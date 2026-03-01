@@ -1,19 +1,19 @@
-# Homelab Backend
+# Homelab Portal
 
-FastAPI backend scaffold for task `T1.2.1`.
+Application repository for the Homelab portal services.
 
-## Endpoints
+## Structure
 
-- `GET /health`
-- `POST /auth/login`
-- `GET /projects`
+- `backend/` FastAPI API service
+- `frontend/` UI application (to be implemented)
 
-## Development
+## Backend Development
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
+python3 -m venv backend/.venv
+source backend/.venv/bin/activate
+pip install -e ./backend[dev]
+cd backend
 pytest
 python scripts/generate_openapi.py
 ```

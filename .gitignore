@@ -1,14 +1,23 @@
 # Python bytecode
 __pycache__/
+**/__pycache__/
 *.py[cod]
 
 # Virtual environments
 .venv/
 venv/
+backend/.venv/
+frontend/.venv/
 
 # Tool caches and build metadata
 .pytest_cache/
+**/.pytest_cache/
 *.egg-info/
+**/*.egg-info/
+
+# Frontend dependencies/build artifacts
+frontend/node_modules/
+frontend/dist/
 
 # IDE
 .vscode/
