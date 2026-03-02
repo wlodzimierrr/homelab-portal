@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
-from app.db import get_database_url
+from app.db import get_psycopg_database_url
 
 app = FastAPI(title="Homelab Backend API", version="0.1.0")
 
@@ -68,7 +68,7 @@ def require_bearer_token(
 
 
 def _with_connection() -> psycopg.Connection:
-    return psycopg.connect(get_database_url())
+    return psycopg.connect(get_psycopg_database_url())
 
 
 def _seed_projects_if_empty(conn: psycopg.Connection) -> None:
