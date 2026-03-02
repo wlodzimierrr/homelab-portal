@@ -75,8 +75,8 @@ jobs:
 
       - name: Run migrations twice (idempotency)
         run: |
-          alembic upgrade head
-          alembic upgrade head
+          python -m alembic upgrade head
+          python -m alembic upgrade head
 
       - name: Run tests
-        run: pytest
+        run: python -m pytest
