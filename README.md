@@ -17,3 +17,11 @@ cd backend
 pytest
 python scripts/generate_openapi.py
 ```
+
+## Frontend Image
+
+```bash
+cd frontend
+./scripts/build_and_push_image.sh ghcr.io/wlodzimierrr/homelab-web 0.1.0
+```
+

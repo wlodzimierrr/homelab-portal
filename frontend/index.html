@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Homelab Portal</title>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --panel: #111827;
+        --line: #334155;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --primary: #14b8a6;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+        background: radial-gradient(circle at top, #1e293b, var(--bg));
+        color: var(--text);
+        min-height: 100vh;
+      }
+
+      .wrap {
+        max-width: 800px;
+        margin: 48px auto;
+        padding: 24px;
+      }
+
+      .card {
+        background: color-mix(in srgb, var(--panel) 92%, black);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+
+      h1 { margin: 0 0 16px; }
+      h2 { margin: 0 0 10px; font-size: 1.1rem; }
+
+      label { display: block; color: var(--muted); margin-bottom: 6px; }
+      input {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0b1220;
+        color: var(--text);
+        margin-bottom: 10px;
+      }
+
+      button {
+        background: var(--primary);
+        color: #052e2b;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .row { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; }
+      .status { color: var(--muted); margin-top: 8px; min-height: 20px; }
+      ul { margin: 0; padding-left: 18px; }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>Homelab Portal</h1>
+
+      <section class="card">
+        <h2>Login</h2>
+        <label for="username">Username</label>
+        <input id="username" value="admin" />
+        <label for="password">Password</label>
+        <input id="password" type="password" value="changeme" />
+        <button id="loginBtn">Login</button>
+        <div id="authStatus" class="status"></div>
+      </section>
+
+      <section class="card">
+        <h2>Create Project</h2>
+        <div class="row">
+          <input id="projId" placeholder="project id" value="proj-web" />
+          <input id="projName" placeholder="name" value="Portal Project" />
+          <input id="projEnv" placeholder="environment" value="dev" />
+          <button id="createBtn">Create</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Projects</h2>
+        <button id="loadBtn">Refresh</button>
+        <div id="projectStatus" class="status"></div>
+        <ul id="projectList"></ul>
+      </section>
+    </main>
+
+    <script>
+      const API_BASE = "/api";
+      let token = "";
+
+      async function login() {
+        const username = document.getElementById("username").value;
+        const password = document.getElementById("password").value;
+        const status = document.getElementById("authStatus");
+
+        status.textContent = "Logging in...";
+        const res = await fetch(`${API_BASE}/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+
+        if (!res.ok) {
+          status.textContent = "Login failed";
+          return;
+        }
+
+        const data = await res.json();
+        token = data.access_token;
+        status.textContent = "Authenticated";
+      }
+
+      async function createProject() {
+        const status = document.getElementById("projectStatus");
+        if (!token) {
+          status.textContent = "Login first";
+          return;
+        }
+
+        const payload = {
+          id: document.getElementById("projId").value,
+          name: document.getElementById("projName").value,
+          environment: document.getElementById("projEnv").value,
+        };
+
+        const res = await fetch(`${API_BASE}/projects`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+
+        status.textContent = res.ok ? "Project upserted" : "Create failed";
+      }
+
+      async function loadProjects() {
+        const status = document.getElementById("projectStatus");
+        const list = document.getElementById("projectList");
+
+        if (!token) {
+          status.textContent = "Login first";
+          return;
+        }
+
+        status.textContent = "Loading...";
+        const res = await fetch(`${API_BASE}/projects`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (!res.ok) {
+          status.textContent = "Failed to load projects";
+          return;
+        }
+
+        const data = await res.json();
+        list.innerHTML = "";
+        for (const project of data.projects) {
+          const li = document.createElement("li");
+          li.textContent = `${project.id} | ${project.name} | ${project.environment}`;
+          list.appendChild(li);
+        }
+        status.textContent = `Loaded ${data.projects.length} project(s)`;
+      }
+
+      document.getElementById("loginBtn").addEventListener("click", login);
+      document.getElementById("createBtn").addEventListener("click", createProject);
+      document.getElementById("loadBtn").addEventListener("click", loadProjects);
+    </script>
+  </body>
+</html>

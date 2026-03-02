@@ -1,8 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
+import psycopg
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
+
+from app.db import get_database_url
 
 app = FastAPI(title="Homelab Backend API", version="0.1.0")
 
@@ -34,7 +37,13 @@ class ProjectsResponse(BaseModel):
     projects: list[Project]
 
 
-PROJECTS = [
+class CreateProjectRequest(BaseModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    environment: str = Field(min_length=1)
+
+
+DEFAULT_PROJECTS = [
     Project(id="proj-dev", name="Homelab App", environment="dev"),
     Project(id="proj-prod", name="Homelab App", environment="prod"),
 ]
@@ -56,6 +65,28 @@ def require_bearer_token(
         )
 
     return credentials.credentials
+
+
+def _with_connection() -> psycopg.Connection:
+    return psycopg.connect(get_database_url())
+
+
+def _seed_projects_if_empty(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM projects")
+        count = cur.fetchone()[0]
+        if count > 0:
+            return
+
+        for project in DEFAULT_PROJECTS:
+            cur.execute(
+                """
+                INSERT INTO projects (id, name, environment)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (project.id, project.name, project.environment),
+            )
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
@@ -80,4 +111,45 @@ def login(payload: LoginRequest) -> LoginResponse:
 
 @app.get("/projects", response_model=ProjectsResponse, tags=["metadata"])
 def list_projects(_: str = Depends(require_bearer_token)) -> ProjectsResponse:
-    return ProjectsResponse(projects=PROJECTS)
+    with _with_connection() as conn:
+        _seed_projects_if_empty(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, name, environment FROM projects ORDER BY id ASC"
+            )
+            rows = cur.fetchall()
+
+    return ProjectsResponse(
+        projects=[
+            Project(id=row[0], name=row[1], environment=row[2])
+            for row in rows
+        ]
+    )
+
+
+@app.post(
+    "/projects",
+    response_model=Project,
+    status_code=status.HTTP_201_CREATED,
+    tags=["metadata"],
+)
+def create_project(
+    payload: CreateProjectRequest,
+    _: str = Depends(require_bearer_token),
+) -> Project:
+    with _with_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO projects (id, name, environment)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (id) DO UPDATE
+                SET name = EXCLUDED.name,
+                    environment = EXCLUDED.environment
+                RETURNING id, name, environment
+                """,
+                (payload.id, payload.name, payload.environment),
+            )
+            row = cur.fetchone()
+
+    return Project(id=row[0], name=row[1], environment=row[2])

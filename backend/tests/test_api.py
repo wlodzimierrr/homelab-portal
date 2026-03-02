@@ -41,13 +41,19 @@ def test_projects_unauthorized_without_token() -> None:
     assert response.status_code == 401
 
 
-def test_projects_returns_metadata_with_valid_token() -> None:
-    response = client.get(
-        "/projects",
-        headers={"Authorization": "Bearer dev-static-token"},
-    )
+def test_create_and_list_projects_with_valid_token() -> None:
+    headers = {"Authorization": "Bearer dev-static-token"}
 
-    assert response.status_code == 200
-    body = response.json()
-    assert len(body["projects"]) == 2
-    assert body["projects"][0]["id"] == "proj-dev"
+    create_response = client.post(
+        "/projects",
+        headers=headers,
+        json={"id": "proj-e2e", "name": "E2E Project", "environment": "dev"},
+    )
+    assert create_response.status_code == 201
+    assert create_response.json()["id"] == "proj-e2e"
+
+    list_response = client.get("/projects", headers=headers)
+    assert list_response.status_code == 200
+
+    project_ids = {project["id"] for project in list_response.json()["projects"]}
+    assert "proj-e2e" in project_ids
