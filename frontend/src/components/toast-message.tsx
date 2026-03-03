@@ -7,5 +7,6 @@ interface ToastMessageProps {
 }
 
 export function ToastMessage({ message, variant = 'info', onClose }: ToastMessageProps) {
-  return <Toast message={message} variant={variant} onClose={onClose} />
+  const mappedVariant = variant === 'info' ? 'default' : variant
+  return <Toast message={message} variant={mappedVariant} onClose={onClose ?? (() => {})} />
 }
