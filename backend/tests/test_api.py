@@ -57,3 +57,8 @@ def test_create_and_list_projects_with_valid_token() -> None:
 
     project_ids = {project["id"] for project in list_response.json()["projects"]}
     assert "proj-e2e" in project_ids
+
+
+def test_ci_gate_temporary_failure() -> None:
+    # Temporary negative test for CI gate validation (remove before merge).
+    assert False
