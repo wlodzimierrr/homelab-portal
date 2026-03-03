@@ -229,3 +229,65 @@ jobs:
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  promote-dev-gitops:
+    name: Promote Dev GitOps Image Tags
+    runs-on: ubuntu-latest
+    needs:
+      - publish-images
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    env:
+      GITOPS_REPO: wlodzimierrr/homelab-workloads
+      DEV_IMAGE_TAG: sha-${{ github.sha }}
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.HOMELAB_WORKLOADS_REPO_TOKEN }}
+          path: homelab-workloads
+
+      - name: Update dev image tags
+        id: update_tags
+        run: |
+          set -euo pipefail
+
+          api_patch="homelab-workloads/apps/homelab-api/envs/dev/patch-deployment.yaml"
+          api_migration_patch="homelab-workloads/apps/homelab-api/envs/dev/patch-migration-job.yaml"
+          web_patch="homelab-workloads/apps/homelab-web/envs/dev/patch-deployment.yaml"
+
+          sed -E -i "s#(image:[[:space:]]*ghcr\\.io/[^/]+/homelab-api:).*#\\1${DEV_IMAGE_TAG}#" "$api_patch"
+          sed -E -i "s#(image:[[:space:]]*ghcr\\.io/[^/]+/homelab-api:).*#\\1${DEV_IMAGE_TAG}#" "$api_migration_patch"
+          sed -E -i "s#(image:[[:space:]]*ghcr\\.io/[^/]+/homelab-web:).*#\\1${DEV_IMAGE_TAG}#" "$web_patch"
+
+          if git -C homelab-workloads diff --quiet; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          git -C homelab-workloads diff -- \
+            apps/homelab-api/envs/dev/patch-deployment.yaml \
+            apps/homelab-api/envs/dev/patch-migration-job.yaml \
+            apps/homelab-web/envs/dev/patch-deployment.yaml
+
+      - name: Create PR in GitOps repo
+        if: steps.update_tags.outputs.updated == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.HOMELAB_WORKLOADS_REPO_TOKEN }}
+          path: homelab-workloads
+          branch: automation/dev-image-bump-${{ github.sha }}
+          delete-branch: true
+          title: "chore(dev): bump portal images to ${{ env.DEV_IMAGE_TAG }}"
+          commit-message: "chore(dev): bump homelab portal images to ${{ env.DEV_IMAGE_TAG }}"
+          body: |
+            Automated update from `apps/portal` image pipeline.
+
+            - backend -> `ghcr.io/${{ github.repository_owner }}/homelab-api:${{ env.DEV_IMAGE_TAG }}`
+            - backend migration job -> `ghcr.io/${{ github.repository_owner }}/homelab-api:${{ env.DEV_IMAGE_TAG }}`
+            - frontend -> `ghcr.io/${{ github.repository_owner }}/homelab-web:${{ env.DEV_IMAGE_TAG }}`
+
+            Trigger commit: `${{ github.sha }}`
