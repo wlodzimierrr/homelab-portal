@@ -17,6 +17,10 @@ export interface Project {
   id: string
   name: string
   environment: string
+  health?: string
+  sync?: string
+  publicUrl?: string
+  lastDeployAt?: string
 }
 
 export interface ProjectsResponse {
