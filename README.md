@@ -5,7 +5,7 @@ Application repository for the Homelab portal services.
 ## Structure
 
 - `backend/` FastAPI API service
-- `frontend/` UI application (to be implemented)
+- `frontend/` React + Vite + TypeScript UI application
 
 ## Backend Development
 
@@ -18,10 +18,18 @@ pytest
 python scripts/generate_openapi.py
 ```
 
-## Frontend Image
+## Frontend Development
+
+```bash
+cd frontend
+npm install
+npm run lint
+npm run dev
+```
+
+## Frontend Image Build/Push
 
 ```bash
 cd frontend
 ./scripts/build_and_push_image.sh ghcr.io/wlodzimierrr/homelab-web 0.1.0
 ```
-
