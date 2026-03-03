@@ -1,4 +1,5 @@
-import { FormEvent, useState } from 'react'
+import { useState, type FormEvent } from 'react'
+import { ErrorState } from '@/components/error-state'
 import { AppLink } from '@/components/navigation/app-link'
 import { login } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
@@ -61,7 +62,7 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
             />
           </label>
 
-          {error ? <p className="text-sm text-destructive">{error}</p> : null}
+          {error ? <ErrorState message={error} /> : null}
 
           <Button type="submit" className="w-full" disabled={isLoading}>
             {isLoading ? 'Signing in...' : 'Sign in'}

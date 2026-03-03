@@ -10,6 +10,13 @@ npm install
 npm run dev
 ```
 
+Build production assets locally:
+
+```bash
+cd apps/portal/frontend
+npm run build
+```
+
 Vite dev proxy forwards `/api/*` to `http://localhost:8000` by default (with `/api` stripped).
 Override target when needed:
 
@@ -20,8 +27,42 @@ VITE_API_PROXY_TARGET=http://localhost:8081 npm run dev
 Frontend runtime config (see `src/lib/config.ts`):
 
 - `VITE_API_BASE_URL` (default: `/api`)
-- `VITE_ARGO_BASE_URL` (default: `http://argo.dev.homelab.local`)
-- `VITE_GRAFANA_BASE_URL` (default: `http://grafana.dev.homelab.local`)
+- `VITE_ARGO_BASE_URL` (default: empty)
+- `VITE_GRAFANA_BASE_URL` (default: empty)
+- `VITE_ARGO_APP_PATH_TEMPLATE` (default: `/applications/{serviceId}`)
+- `VITE_GRAFANA_DASHBOARD_PATH_TEMPLATE` (default: `/d/service-overview?var-service={serviceId}`)
+- `VITE_LOKI_LOGS_PATH_TEMPLATE` (default: `/explore?var-namespace={{namespace}}&var-app={{app_label}}&from=now-{{time_range}}&to=now`)
+
+### Runtime config examples
+
+Local dev (backend on localhost):
+
+```bash
+VITE_API_BASE_URL=http://localhost:8000/api \
+VITE_ARGO_BASE_URL=http://argo.dev.homelab.local \
+VITE_GRAFANA_BASE_URL=http://grafana.dev.homelab.local \
+npm run dev
+```
+
+In-cluster (API via ingress/reverse proxy):
+
+```bash
+VITE_API_BASE_URL=/api \
+VITE_ARGO_BASE_URL=https://argo.example.internal \
+VITE_GRAFANA_BASE_URL=https://grafana.example.internal \
+npm run dev
+```
+
+Notes:
+- If `VITE_ARGO_BASE_URL` or `VITE_GRAFANA_BASE_URL` is empty, related external links are unavailable.
+- Logs templates support both `{var}` and `{{var}}` placeholders, including `{{namespace}}`, `{{app_label}}`, and `{{time_range}}`.
+
+### Services registry fallback (MVP)
+
+The frontend uses an API-first services adapter and falls back to `services.sample.json` when `/api/projects` is unavailable or empty.
+
+- Sample file path: `apps/portal/frontend/services.sample.json`
+- Adapter path: `apps/portal/frontend/src/lib/adapters/services.ts`
 
 ## Available scripts
 
@@ -33,14 +74,47 @@ Frontend runtime config (see `src/lib/config.ts`):
 
 ## Container image
 
+Build image locally:
+
 ```bash
 cd apps/portal/frontend
-./scripts/build_and_push_image.sh ghcr.io/wlodzimierrr/homelab-web 0.1.0
+docker build -t homelab-portal-frontend:local .
+```
+
+Run image locally:
+
+```bash
+docker run --rm -p 8080:80 homelab-portal-frontend:local
 ```
 
 The Docker build uses a multi-stage build:
 - Stage 1: build static assets with Node (`npm run build`)
 - Stage 2: serve `dist/` with Nginx on port `80`
+
+Optional publish helper script:
+
+```bash
+cd apps/portal/frontend
+./scripts/build_and_push_image.sh ghcr.io/wlodzimierrr/homelab-web 0.1.0
+```
+
+## Read-only behavior note
+
+- Deploy controls are intentionally not implemented yet (read-only catalog/visibility first).
+- Logs and some deployment/status metadata may be mocked or placeholder-based until backend integration is complete.
+- If Grafana/Loki base URLs are not configured, external logs links remain unavailable/disabled by design.
+
+## Command validation
+
+Validated locally where possible by project workflow:
+
+- `npm run dev`
+- `npm run lint`
+- `npm run build`
+- `docker build -t homelab-portal-frontend:local .`
+- `docker run --rm -p 8080:80 homelab-portal-frontend:local`
+
+If your environment cannot run Node tooling (for example WSL1), run the same commands in a supported local shell/CI runner.
 
 ## Auth Storage Tradeoff
 

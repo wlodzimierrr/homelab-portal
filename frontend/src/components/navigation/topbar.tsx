@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Menu, X } from 'lucide-react'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
@@ -38,11 +38,11 @@ const mobileLinks = [
 
 export function Topbar({ pathname, theme, onThemeToggle }: TopbarProps) {
   const title = getTitle(pathname)
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
-
-  useEffect(() => {
-    setIsMobileMenuOpen(false)
-  }, [pathname])
+  const [mobileMenuState, setMobileMenuState] = useState<{ isOpen: boolean; pathname: string }>({
+    isOpen: false,
+    pathname,
+  })
+  const isMobileMenuOpen = mobileMenuState.isOpen && mobileMenuState.pathname === pathname
 
   return (
     <header className="sticky top-0 z-10 border-b border-border bg-background/90 backdrop-blur">
@@ -54,7 +54,12 @@ export function Topbar({ pathname, theme, onThemeToggle }: TopbarProps) {
             size="icon"
             className="md:hidden"
             aria-label={isMobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
-            onClick={() => setIsMobileMenuOpen((current) => !current)}
+            onClick={() => {
+              setMobileMenuState({
+                isOpen: !isMobileMenuOpen,
+                pathname,
+              })
+            }}
           >
             {isMobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
           </Button>
@@ -75,7 +80,12 @@ export function Topbar({ pathname, theme, onThemeToggle }: TopbarProps) {
                       ? 'bg-accent font-medium'
                       : 'text-muted-foreground hover:bg-accent/70 hover:text-foreground',
                   )}
-                  onClick={() => setIsMobileMenuOpen(false)}
+                  onClick={() =>
+                    setMobileMenuState({
+                      isOpen: false,
+                      pathname,
+                    })
+                  }
                 >
                   {link.label}
                 </AppLink>

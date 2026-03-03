@@ -1,51 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ApiError } from '@/components/api-error'
+import { EmptyState } from '@/components/empty-state'
+import { ErrorState } from '@/components/error-state'
+import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
 import { AppLink } from '@/components/navigation/app-link'
-import { getProjects, type Project } from '@/lib/api'
+import { getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
 import { cn } from '@/lib/utils'
 
 type HealthStatus = 'healthy' | 'degraded' | 'unknown'
 type SyncStatus = 'synced' | 'out_of_sync' | 'unknown'
 
-interface ServiceRow {
-  id: string
-  name: string
-  environments: string[]
+interface ServiceRow extends ServiceRegistryItem {
   health: HealthStatus
   sync: SyncStatus
-  publicUrl?: string
-  lastDeployAt?: string
-}
-
-function normalizeHealthStatus(value?: string): HealthStatus {
-  if (!value) {
-    return 'unknown'
-  }
-
-  const normalized = value.trim().toLowerCase()
-  if (normalized === 'healthy') {
-    return 'healthy'
-  }
-  if (normalized === 'degraded' || normalized === 'unhealthy') {
-    return 'degraded'
-  }
-  return 'unknown'
-}
-
-function normalizeSyncStatus(value?: string): SyncStatus {
-  if (!value) {
-    return 'unknown'
-  }
-
-  const normalized = value.trim().toLowerCase()
-  if (normalized === 'synced') {
-    return 'synced'
-  }
-  if (normalized === 'out_of_sync' || normalized === 'out-of-sync' || normalized === 'outofsync') {
-    return 'out_of_sync'
-  }
-  return 'unknown'
 }
 
 function formatLastDeploy(value?: string) {
@@ -62,93 +29,6 @@ function formatLastDeploy(value?: string) {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(parsed)
-}
-
-function adaptProjectsToServices(projects: Project[]): ServiceRow[] {
-  const grouped = new Map<string, ServiceRow>()
-
-  for (const project of projects) {
-    const key = project.name.trim().toLowerCase()
-    const current = grouped.get(key)
-
-    const nextHealth = normalizeHealthStatus(project.health)
-    const nextSync = normalizeSyncStatus(project.sync)
-
-    if (!current) {
-      grouped.set(key, {
-        id: project.name,
-        name: project.name,
-        environments: [project.environment],
-        health: nextHealth,
-        sync: nextSync,
-        publicUrl: project.publicUrl,
-        lastDeployAt: project.lastDeployAt,
-      })
-      continue
-    }
-
-    if (!current.environments.includes(project.environment)) {
-      current.environments.push(project.environment)
-      current.environments.sort((a, b) => a.localeCompare(b))
-    }
-
-    if (current.health === 'unknown' && nextHealth !== 'unknown') {
-      current.health = nextHealth
-    }
-
-    if (current.sync === 'unknown' && nextSync !== 'unknown') {
-      current.sync = nextSync
-    }
-
-    if (!current.publicUrl && project.publicUrl) {
-      current.publicUrl = project.publicUrl
-    }
-
-    if (!current.lastDeployAt && project.lastDeployAt) {
-      current.lastDeployAt = project.lastDeployAt
-    }
-  }
-
-  return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name))
-}
-
-function LoadingSkeleton() {
-  return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full text-left text-sm">
-        <thead>
-          <tr className="border-b border-border">
-            {['Service', 'Environment(s)', 'Status', 'Public URL', 'Last Deploy'].map((column) => (
-              <th key={column} className="px-3 py-3 font-medium text-muted-foreground">
-                {column}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {[1, 2, 3].map((row) => (
-            <tr key={row} className="border-b border-border/70">
-              <td className="px-3 py-3">
-                <div className="h-4 w-36 animate-pulse rounded bg-muted" />
-              </td>
-              <td className="px-3 py-3">
-                <div className="h-4 w-24 animate-pulse rounded bg-muted" />
-              </td>
-              <td className="px-3 py-3">
-                <div className="h-6 w-32 animate-pulse rounded bg-muted" />
-              </td>
-              <td className="px-3 py-3">
-                <div className="h-4 w-44 animate-pulse rounded bg-muted" />
-              </td>
-              <td className="px-3 py-3">
-                <div className="h-4 w-36 animate-pulse rounded bg-muted" />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
 }
 
 function StatusBadge({ label, value }: { label: string; value: string }) {
@@ -178,8 +58,8 @@ export function ServicesPage() {
     setIsLoading(true)
     setError('')
     try {
-      const response = await getProjects()
-      setServices(adaptProjectsToServices(response.projects))
+      const response = await getServicesRegistry()
+      setServices(response)
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : 'Failed to load services'
       setError(message)
@@ -263,17 +143,13 @@ export function ServicesPage() {
         </label>
       </div>
 
-      {isLoading ? <LoadingSkeleton /> : null}
-      {!isLoading && error ? <ApiError message={error} onRetry={() => void loadServices()} /> : null}
+      {isLoading ? <LoadingState label="Loading services..." rows={4} /> : null}
+      {!isLoading && error ? <ErrorState message={error} onRetry={() => void loadServices()} /> : null}
       {!isLoading && !error && services.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border p-6 text-center">
-          <p className="text-sm text-muted-foreground">No services available yet.</p>
-        </div>
+        <EmptyState title="No services available yet." />
       ) : null}
       {!isLoading && !error && services.length > 0 && filteredServices.length === 0 ? (
-        <div className="rounded-md border border-dashed border-border p-6 text-center">
-          <p className="text-sm text-muted-foreground">No services match the current search/filter.</p>
-        </div>
+        <EmptyState title="No services match the current filters." description="Try a different search or environment." />
       ) : null}
       {!isLoading && !error && filteredServices.length > 0 ? (
         <div className="overflow-x-auto">

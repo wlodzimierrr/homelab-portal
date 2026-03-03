@@ -20,6 +20,7 @@ export interface Project {
   health?: string
   sync?: string
   publicUrl?: string
+  internalUrl?: string
   lastDeployAt?: string
 }
 
@@ -42,6 +43,31 @@ export interface LoginResponse {
   access_token: string
   token_type?: string
   expires_at?: string
+}
+
+export interface ServiceEndpoint {
+  type?: 'public' | 'internal' | string
+  label?: string
+  url: string
+}
+
+export interface ServiceDeployment {
+  id: string
+  version?: string
+  status?: string
+  deployedAt?: string
+}
+
+export interface ServiceDetails {
+  id: string
+  name: string
+  version?: string
+  health?: string
+  sync?: string
+  publicUrl?: string
+  internalUrls?: string[]
+  endpoints?: ServiceEndpoint[]
+  deployments?: ServiceDeployment[]
 }
 
 async function getErrorMessage(response: Response) {
@@ -118,4 +144,14 @@ export function login(payload: LoginPayload) {
     body: JSON.stringify(payload),
     skipUnauthorizedRedirect: true,
   })
+}
+
+export function getService(serviceId: string) {
+  return request<ServiceDetails>(`/services/${encodeURIComponent(serviceId)}`)
+}
+
+export function getServiceDeployments(serviceId: string) {
+  return request<{ deployments: ServiceDeployment[] }>(
+    `/services/${encodeURIComponent(serviceId)}/deployments`,
+  )
 }

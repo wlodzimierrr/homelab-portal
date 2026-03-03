@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Toast } from '@/components/ui/toast'
+import { ToastMessage } from '@/components/toast-message'
 import { UNAUTHORIZED_EVENT } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { LoginPage } from '@/pages/login-page'
@@ -111,7 +111,7 @@ function App() {
     return (
       <>
         {content}
-        {toastMessage ? <Toast message={toastMessage} onClose={() => setToastMessage('')} /> : null}
+        {toastMessage ? <ToastMessage message={toastMessage} onClose={() => setToastMessage('')} /> : null}
       </>
     )
   }
@@ -121,7 +121,7 @@ function App() {
       <PortalLayout pathname={pathname} theme={theme} onThemeToggle={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
         {content}
       </PortalLayout>
-      {toastMessage ? <Toast message={toastMessage} onClose={() => setToastMessage('')} /> : null}
+      {toastMessage ? <ToastMessage message={toastMessage} onClose={() => setToastMessage('')} /> : null}
     </>
   )
 }

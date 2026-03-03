@@ -1,26 +1,15 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { ApiError } from '@/components/api-error'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { EmptyState } from '@/components/empty-state'
+import { ErrorState } from '@/components/error-state'
+import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
-import { Toast } from '@/components/ui/toast'
+import { ToastMessage } from '@/components/toast-message'
 import { Button } from '@/components/ui/button'
 import { createProject, getProjects, type CreateProjectPayload, type Project } from '@/lib/api'
 
 interface ToastState {
   message: string
   variant: 'success' | 'error'
-}
-
-function LoadingSkeleton() {
-  return (
-    <ul className="space-y-2">
-      {[1, 2, 3].map((row) => (
-        <li key={row} className="rounded-md border border-border p-3">
-          <div className="mb-2 h-4 w-40 animate-pulse rounded bg-muted" />
-          <div className="h-3 w-52 animate-pulse rounded bg-muted" />
-        </li>
-      ))}
-    </ul>
-  )
 }
 
 export function ProjectsPage() {
@@ -117,12 +106,10 @@ export function ProjectsPage() {
           </Button>
         </div>
 
-        {isLoading ? <LoadingSkeleton /> : null}
-        {!isLoading && error ? <ApiError message={error} onRetry={() => void loadProjects()} /> : null}
+        {isLoading ? <LoadingState label="Loading projects..." /> : null}
+        {!isLoading && error ? <ErrorState message={error} onRetry={() => void loadProjects()} /> : null}
         {!isLoading && !error && sortedProjects.length === 0 ? (
-          <div className="rounded-md border border-dashed border-border p-6 text-center">
-            <p className="text-sm text-muted-foreground">No projects yet. Create your first project.</p>
-          </div>
+          <EmptyState title="No projects yet." description="Create your first project to get started." />
         ) : null}
         {!isLoading && !error && sortedProjects.length > 0 ? (
           <ul className="space-y-2 text-sm">
@@ -175,7 +162,7 @@ export function ProjectsPage() {
                 />
               </label>
 
-              {createError ? <ApiError message={createError} /> : null}
+              {createError ? <ErrorState message={createError} /> : null}
 
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="outline" onClick={closeCreateDialog} disabled={isCreating}>
@@ -190,7 +177,7 @@ export function ProjectsPage() {
         </div>
       ) : null}
 
-      {toast ? <Toast message={toast.message} variant={toast.variant} onClose={() => setToast(null)} /> : null}
+      {toast ? <ToastMessage message={toast.message} variant={toast.variant} onClose={() => setToast(null)} /> : null}
     </>
   )
 }
