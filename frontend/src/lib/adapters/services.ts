@@ -114,7 +114,7 @@ function adaptSampleToServices(payload: ServicesSamplePayload): ServiceRegistryI
   }
 
   const adapted = payload.services
-    .map((service) => {
+    .map((service): ServiceRegistryItem | null => {
       const id = typeof service.id === 'string' && service.id.trim() ? service.id.trim() : ''
       const name = typeof service.name === 'string' && service.name.trim() ? service.name.trim() : id
 
@@ -122,7 +122,7 @@ function adaptSampleToServices(payload: ServicesSamplePayload): ServiceRegistryI
         return null
       }
 
-      return {
+      const normalized: ServiceRegistryItem = {
         id,
         name,
         environments: Array.isArray(service.environments)
@@ -130,16 +130,36 @@ function adaptSampleToServices(payload: ServicesSamplePayload): ServiceRegistryI
           : [],
         health: normalizeHealthStatus(service.health),
         sync: normalizeSyncStatus(service.sync),
-        publicUrl: typeof service.publicUrl === 'string' ? service.publicUrl : undefined,
-        internalUrls: Array.isArray(service.internalUrls)
-          ? service.internalUrls.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
-          : undefined,
-        lastDeployAt: typeof service.lastDeployAt === 'string' ? service.lastDeployAt : undefined,
-        namespace: typeof service.namespace === 'string' ? service.namespace : undefined,
-        appLabel: typeof service.appLabel === 'string' ? service.appLabel : undefined,
-      } satisfies ServiceRegistryItem
+      }
+
+      if (typeof service.publicUrl === 'string') {
+        normalized.publicUrl = service.publicUrl
+      }
+
+      if (Array.isArray(service.internalUrls)) {
+        const internalUrls = service.internalUrls.filter(
+          (item): item is string => typeof item === 'string' && item.trim() !== ''
+        )
+        if (internalUrls.length > 0) {
+          normalized.internalUrls = internalUrls
+        }
+      }
+
+      if (typeof service.lastDeployAt === 'string') {
+        normalized.lastDeployAt = service.lastDeployAt
+      }
+
+      if (typeof service.namespace === 'string') {
+        normalized.namespace = service.namespace
+      }
+
+      if (typeof service.appLabel === 'string') {
+        normalized.appLabel = service.appLabel
+      }
+
+      return normalized
     })
-    .filter((item): item is ServiceRegistryItem => Boolean(item))
+    .filter((item): item is ServiceRegistryItem => item !== null)
 
   return adapted.sort((a, b) => a.name.localeCompare(b.name))
 }
