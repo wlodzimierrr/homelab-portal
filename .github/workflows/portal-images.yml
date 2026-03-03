@@ -158,7 +158,22 @@ jobs:
           context: ${{ matrix.service.context }}
           file: ${{ matrix.service.dockerfile }}
           push: false
+          load: true
           tags: local/${{ matrix.service.name }}:ci-${{ github.sha }}
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: local/${{ matrix.service.name }}:ci-${{ github.sha }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.service.name }}.spdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service.name }}-${{ github.sha }}
+          path: sbom-${{ matrix.service.name }}.spdx.json
+          if-no-files-found: error
 
   publish-images:
     name: Publish Image (${{ matrix.service.name }})
@@ -210,6 +225,7 @@ jobs:
           context: ${{ matrix.service.context }}
           file: ${{ matrix.service.dockerfile }}
           push: true
+          provenance: mode=max
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
