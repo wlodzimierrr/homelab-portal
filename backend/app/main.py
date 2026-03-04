@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
+import os
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -67,6 +68,42 @@ def require_bearer_token(
     return credentials.credentials
 
 
+def _parse_csv_header(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_auth),
+    x_auth_user: str | None = Header(None, alias="X-Auth-Request-User"),
+    x_auth_groups: str | None = Header(None, alias="X-Auth-Request-Groups"),
+) -> tuple[str, set[str]]:
+    if x_auth_user:
+        return x_auth_user, _parse_csv_header(x_auth_groups)
+    return require_bearer_token(credentials), set()
+
+
+def require_admin(
+    identity: tuple[str, set[str]] = Depends(get_current_user),
+) -> str:
+    user, groups = identity
+    if user == "dev-static-token":
+        return user
+
+    admin_users = _parse_csv_header(os.getenv("PORTAL_ADMIN_USERS", "admin"))
+    admin_groups = _parse_csv_header(
+        os.getenv("PORTAL_ADMIN_GROUPS", "team-admins")
+    )
+    if user in admin_users or groups.intersection(admin_groups):
+        return user
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="User is not authorized for admin actions",
+    )
+
+
 def _with_connection() -> psycopg.Connection:
     return psycopg.connect(get_psycopg_database_url())
 
@@ -110,7 +147,7 @@ def login(payload: LoginRequest) -> LoginResponse:
 
 
 @app.get("/projects", response_model=ProjectsResponse, tags=["metadata"])
-def list_projects(_: str = Depends(require_bearer_token)) -> ProjectsResponse:
+def list_projects(_: tuple[str, set[str]] = Depends(get_current_user)) -> ProjectsResponse:
     with _with_connection() as conn:
         _seed_projects_if_empty(conn)
         with conn.cursor() as cur:
@@ -135,7 +172,7 @@ def list_projects(_: str = Depends(require_bearer_token)) -> ProjectsResponse:
 )
 def create_project(
     payload: CreateProjectRequest,
-    _: str = Depends(require_bearer_token),
+    _: str = Depends(require_admin),
 ) -> Project:
     with _with_connection() as conn:
         with conn.cursor() as cur:
