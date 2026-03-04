@@ -118,13 +118,21 @@ jobs:
             web_tag="$ROLLBACK_WEB_TAG"
           fi
 
-          tag_pattern='^sha-[0-9a-f]{40}$'
+          if [ "$ACTION_MODE" = "promote" ]; then
+            tag_pattern='^sha-[0-9a-f]{40}$'
+            tag_error='expected sha-<40 hex>'
+          else
+            # Rollback may target historical semver releases.
+            tag_pattern='^(sha-[0-9a-f]{40}|v?[0-9]+(\.[0-9]+){2}([.-][0-9A-Za-z.-]+)?)$'
+            tag_error='expected sha-<40 hex> or semver (for example 0.3.1)'
+          fi
+
           if ! echo "$api_tag" | grep -Eq "$tag_pattern"; then
-            echo "Rejected api tag: $api_tag (expected sha-<40 hex>)"
+            echo "Rejected api tag: $api_tag ($tag_error)"
             exit 1
           fi
           if ! echo "$web_tag" | grep -Eq "$tag_pattern"; then
-            echo "Rejected web tag: $web_tag (expected sha-<40 hex>)"
+            echo "Rejected web tag: $web_tag ($tag_error)"
             exit 1
           fi
 

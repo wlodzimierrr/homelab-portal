@@ -169,7 +169,9 @@ Alternative: secure `HttpOnly` cookie-based auth.
 - Target environments: `staging` or `prod`
 - Policy checks before approval:
   - target overlay files exist
-  - candidate tags match `sha-<40 hex>`
+  - candidate tags:
+    - `promote`: must match `sha-<40 hex>`
+    - `rollback`: may be `sha-<40 hex>` or semver (for example `0.3.1`)
   - candidate tags exist in GHCR
 - Approval gate:
   - job `approval-gate` uses environment `homelab-<target>-promotion`
