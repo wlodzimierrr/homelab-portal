@@ -157,3 +157,23 @@ Alternative: secure `HttpOnly` cookie-based auth.
 - Cons:
   - Requires backend cookie issuance/refresh flow and CSRF defenses.
   - More moving pieces for local dev and cross-origin setups.
+
+## Gated Promotion Workflow (staging/prod)
+
+`apps/portal/.github/workflows/gated-promotion.yml` adds a manual pipeline for higher-environment promotion with an approval checkpoint.
+
+- Trigger: `workflow_dispatch`
+- Modes:
+  - `promote`: copies image tags from `dev` overlays into target env overlays.
+  - `rollback`: writes explicitly provided rollback tags into target env overlays.
+- Target environments: `staging` or `prod`
+- Policy checks before approval:
+  - target overlay files exist
+  - candidate tags match `sha-<40 hex>`
+  - candidate tags exist in GHCR
+- Approval gate:
+  - job `approval-gate` uses environment `homelab-<target>-promotion`
+  - configure required reviewers in GitHub repo settings for these environments
+- Result:
+  - after approval, workflow opens a PR in `wlodzimierrr/homelab-workloads`
+  - changed files are constrained to expected env image patch files only

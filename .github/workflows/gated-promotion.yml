@@ -1,0 +1,269 @@
+name: Gated GitOps Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Promotion target environment"
+        required: true
+        type: choice
+        options:
+          - staging
+          - prod
+        default: prod
+      action_mode:
+        description: "promote copies tags from dev; rollback sets explicit tags"
+        required: true
+        type: choice
+        options:
+          - promote
+          - rollback
+        default: promote
+      rollback_api_tag:
+        description: "Required when action_mode=rollback (example: sha-<commit>)"
+        required: false
+        type: string
+      rollback_web_tag:
+        description: "Required when action_mode=rollback (example: sha-<commit>)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gated-promotion-${{ inputs.target_environment }}
+  cancel-in-progress: false
+
+env:
+  GITOPS_REPO: wlodzimierrr/homelab-workloads
+
+jobs:
+  prepare:
+    name: Prepare Promotion
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      target_environment: ${{ steps.resolve.outputs.target_environment }}
+      action_mode: ${{ steps.resolve.outputs.action_mode }}
+      api_tag: ${{ steps.resolve.outputs.api_tag }}
+      web_tag: ${{ steps.resolve.outputs.web_tag }}
+      no_change: ${{ steps.resolve.outputs.no_change }}
+      gate_environment: ${{ steps.resolve.outputs.gate_environment }}
+      pr_title: ${{ steps.resolve.outputs.pr_title }}
+      pr_body: ${{ steps.resolve.outputs.pr_body }}
+      branch_name: ${{ steps.resolve.outputs.branch_name }}
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.HOMELAB_WORKLOADS_REPO_TOKEN }}
+          path: homelab-workloads
+
+      - name: Resolve tags and run policy checks
+        id: resolve
+        env:
+          TARGET_ENV: ${{ inputs.target_environment }}
+          ACTION_MODE: ${{ inputs.action_mode }}
+          ROLLBACK_API_TAG: ${{ inputs.rollback_api_tag }}
+          ROLLBACK_WEB_TAG: ${{ inputs.rollback_web_tag }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          case "$TARGET_ENV" in
+            staging|prod) ;;
+            *) echo "Unsupported target environment: $TARGET_ENV"; exit 1 ;;
+          esac
+
+          api_dev_patch="homelab-workloads/apps/homelab-api/envs/dev/patch-deployment.yaml"
+          web_dev_patch="homelab-workloads/apps/homelab-web/envs/dev/patch-deployment.yaml"
+
+          api_target_patch="homelab-workloads/apps/homelab-api/envs/$TARGET_ENV/patch-deployment.yaml"
+          api_target_migration_patch="homelab-workloads/apps/homelab-api/envs/$TARGET_ENV/patch-migration-job.yaml"
+          web_target_patch="homelab-workloads/apps/homelab-web/envs/$TARGET_ENV/patch-deployment.yaml"
+
+          for required_file in "$api_target_patch" "$api_target_migration_patch" "$web_target_patch"; do
+            if [ ! -f "$required_file" ]; then
+              echo "Missing target manifest file: $required_file"
+              echo "Add $TARGET_ENV overlays before running gated promotion."
+              exit 1
+            fi
+          done
+
+          extract_tag() {
+            local file="$1"
+            local image_name="$2"
+            local tag
+            tag=$(sed -nE "s#.*image:[[:space:]]*ghcr\.io/[^/]+/${image_name}:([^[:space:]]+).*#\\1#p" "$file" | head -n1)
+            if [ -z "$tag" ]; then
+              echo "Failed to read ${image_name} tag from $file" >&2
+              exit 1
+            fi
+            echo "$tag"
+          }
+
+          if [ "$ACTION_MODE" = "promote" ]; then
+            api_tag=$(extract_tag "$api_dev_patch" "homelab-api")
+            web_tag=$(extract_tag "$web_dev_patch" "homelab-web")
+          else
+            if [ -z "$ROLLBACK_API_TAG" ] || [ -z "$ROLLBACK_WEB_TAG" ]; then
+              echo "rollback_api_tag and rollback_web_tag are required when action_mode=rollback"
+              exit 1
+            fi
+            api_tag="$ROLLBACK_API_TAG"
+            web_tag="$ROLLBACK_WEB_TAG"
+          fi
+
+          tag_pattern='^sha-[0-9a-f]{40}$'
+          if ! echo "$api_tag" | grep -Eq "$tag_pattern"; then
+            echo "Rejected api tag: $api_tag (expected sha-<40 hex>)"
+            exit 1
+          fi
+          if ! echo "$web_tag" | grep -Eq "$tag_pattern"; then
+            echo "Rejected web tag: $web_tag (expected sha-<40 hex>)"
+            exit 1
+          fi
+
+          api_current_target_tag=$(extract_tag "$api_target_patch" "homelab-api")
+          web_current_target_tag=$(extract_tag "$web_target_patch" "homelab-web")
+
+          no_change="false"
+          if [ "$api_current_target_tag" = "$api_tag" ] && [ "$web_current_target_tag" = "$web_tag" ]; then
+            no_change="true"
+          fi
+
+          echo "target_environment=$TARGET_ENV" >> "$GITHUB_OUTPUT"
+          echo "action_mode=$ACTION_MODE" >> "$GITHUB_OUTPUT"
+          echo "api_tag=$api_tag" >> "$GITHUB_OUTPUT"
+          echo "web_tag=$web_tag" >> "$GITHUB_OUTPUT"
+          echo "no_change=$no_change" >> "$GITHUB_OUTPUT"
+          echo "gate_environment=homelab-${TARGET_ENV}-promotion" >> "$GITHUB_OUTPUT"
+
+          if [ "$ACTION_MODE" = "promote" ]; then
+            echo "pr_title=chore(${TARGET_ENV}): promote portal images from dev (${api_tag})" >> "$GITHUB_OUTPUT"
+          else
+            echo "pr_title=chore(${TARGET_ENV}): rollback portal images to requested tags" >> "$GITHUB_OUTPUT"
+          fi
+
+          pr_body=$(cat <<BODY
+          Automated gated ${ACTION_MODE} request.
+
+          - Source: dev overlay tags (for promote) or explicit rollback tags (for rollback)
+          - Target: ${TARGET_ENV}
+          - API image: ghcr.io/${OWNER}/homelab-api:${api_tag}
+          - Web image: ghcr.io/${OWNER}/homelab-web:${web_tag}
+          - Triggered by: ${GITHUB_ACTOR}
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          BODY
+          )
+          {
+            echo "pr_body<<PRBODY"
+            echo "$pr_body"
+            echo "PRBODY"
+          } >> "$GITHUB_OUTPUT"
+
+          branch_name="automation/${TARGET_ENV}-${ACTION_MODE}-image-update-${GITHUB_RUN_ID}"
+          echo "branch_name=$branch_name" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        if: steps.resolve.outputs.no_change != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify promoted image tags exist in GHCR
+        if: steps.resolve.outputs.no_change != 'true'
+        env:
+          OWNER: ${{ github.repository_owner }}
+          API_TAG: ${{ steps.resolve.outputs.api_tag }}
+          WEB_TAG: ${{ steps.resolve.outputs.web_tag }}
+        run: |
+          set -euo pipefail
+          docker manifest inspect "ghcr.io/${OWNER}/homelab-api:${API_TAG}" >/dev/null
+          docker manifest inspect "ghcr.io/${OWNER}/homelab-web:${WEB_TAG}" >/dev/null
+
+      - name: Explain no-op
+        if: steps.resolve.outputs.no_change == 'true'
+        run: echo "Target environment already has desired tags; nothing to promote."
+
+  approval-gate:
+    name: Manual Approval Gate
+    needs: prepare
+    if: needs.prepare.outputs.no_change != 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.prepare.outputs.gate_environment }}
+    steps:
+      - name: Wait for environment approval
+        run: |
+          echo "Promotion is paused for manual approval."
+          echo "Rejecting the environment approval blocks PR creation."
+
+  create-promotion-pr:
+    name: Create Promotion PR
+    needs:
+      - prepare
+      - approval-gate
+    if: needs.prepare.outputs.no_change != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.HOMELAB_WORKLOADS_REPO_TOKEN }}
+          path: homelab-workloads
+
+      - name: Apply target environment tags
+        env:
+          TARGET_ENV: ${{ needs.prepare.outputs.target_environment }}
+          API_TAG: ${{ needs.prepare.outputs.api_tag }}
+          WEB_TAG: ${{ needs.prepare.outputs.web_tag }}
+        run: |
+          set -euo pipefail
+
+          api_target_patch="homelab-workloads/apps/homelab-api/envs/$TARGET_ENV/patch-deployment.yaml"
+          api_target_migration_patch="homelab-workloads/apps/homelab-api/envs/$TARGET_ENV/patch-migration-job.yaml"
+          web_target_patch="homelab-workloads/apps/homelab-web/envs/$TARGET_ENV/patch-deployment.yaml"
+
+          sed -E -i "s#(image:[[:space:]]*ghcr\.io/[^/]+/homelab-api:).*#\\1${API_TAG}#" "$api_target_patch"
+          sed -E -i "s#(image:[[:space:]]*ghcr\.io/[^/]+/homelab-api:).*#\\1${API_TAG}#" "$api_target_migration_patch"
+          sed -E -i "s#(image:[[:space:]]*ghcr\.io/[^/]+/homelab-web:).*#\\1${WEB_TAG}#" "$web_target_patch"
+
+          changed_files=$(git -C homelab-workloads diff --name-only)
+          if [ -z "$changed_files" ]; then
+            echo "No changes detected after patch update; exiting."
+            exit 0
+          fi
+
+          expected_files="$(printf '%s\n' \
+            "apps/homelab-api/envs/$TARGET_ENV/patch-deployment.yaml" \
+            "apps/homelab-api/envs/$TARGET_ENV/patch-migration-job.yaml" \
+            "apps/homelab-web/envs/$TARGET_ENV/patch-deployment.yaml")"
+
+          while IFS= read -r changed; do
+            [ -z "$changed" ] && continue
+            if ! echo "$expected_files" | grep -Fxq "$changed"; then
+              echo "Unexpected changed file: $changed"
+              exit 1
+            fi
+          done <<< "$changed_files"
+
+      - name: Create PR in GitOps repo
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.HOMELAB_WORKLOADS_REPO_TOKEN }}
+          path: homelab-workloads
+          branch: ${{ needs.prepare.outputs.branch_name }}
+          delete-branch: true
+          title: ${{ needs.prepare.outputs.pr_title }}
+          commit-message: ${{ needs.prepare.outputs.pr_title }}
+          body: ${{ needs.prepare.outputs.pr_body }}
