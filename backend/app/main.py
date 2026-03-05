@@ -15,6 +15,15 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, ConfigDict
 
 from app.db import get_psycopg_database_url
+from app.health_timeline import (
+    TimelinePoint,
+    classify_timeline_status,
+    compact_timeline_points,
+    load_timeline_thresholds,
+    now_utc,
+    parse_range,
+    parse_step,
+)
 
 app = FastAPI(title="Homelab Backend API", version="0.1.0")
 logger = logging.getLogger("homelab.backend.monitoring")
@@ -65,6 +74,13 @@ class ServiceMetricsSummaryResponse(BaseModel):
     no_data: dict[str, bool] = Field(alias="noData")
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceHealthTimelineSegmentResponse(BaseModel):
+    start: str
+    end: str
+    status: str
+    reason: str | None = None
 
 
 DEFAULT_PROJECTS = [
@@ -235,6 +251,96 @@ def _query_prometheus_scalar(query: str, metric_name: str) -> float | None:
     return value
 
 
+def _query_prometheus_range(
+    query: str,
+    metric_name: str,
+    *,
+    start: datetime,
+    end: datetime,
+    step_seconds: int,
+) -> dict[int, float]:
+    encoded = urlparse.urlencode(
+        {
+            "query": query,
+            "start": f"{start.timestamp():.3f}",
+            "end": f"{end.timestamp():.3f}",
+            "step": str(step_seconds),
+        }
+    )
+    endpoint = f"{_prometheus_base_url()}/api/v1/query_range?{encoded}"
+    correlation_id = str(uuid4())
+
+    try:
+        with urlrequest.urlopen(
+            endpoint,
+            timeout=_prometheus_timeout_seconds(),
+        ) as response:
+            payload = json.loads(response.read())
+    except urlerror.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:400]
+        logger.error(
+            "prometheus_range_http_error correlation_id=%s metric=%s status=%s body=%s",
+            correlation_id,
+            metric_name,
+            exc.code,
+            body,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Monitoring provider query failed. correlation_id={correlation_id}",
+        ) from exc
+    except Exception as exc:
+        logger.error(
+            "prometheus_range_query_error correlation_id=%s metric=%s error=%s",
+            correlation_id,
+            metric_name,
+            str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Monitoring provider query failed. correlation_id={correlation_id}",
+        ) from exc
+
+    if payload.get("status") != "success":
+        logger.error(
+            "prometheus_range_bad_payload correlation_id=%s metric=%s payload_status=%s",
+            correlation_id,
+            metric_name,
+            payload.get("status"),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Monitoring provider query failed. correlation_id={correlation_id}",
+        )
+
+    results = payload.get("data", {}).get("result", [])
+    if not results:
+        return {}
+
+    # Use first series because query should be pre-aggregated.
+    series_values = results[0].get("values")
+    if not isinstance(series_values, list):
+        return {}
+
+    points: dict[int, float] = {}
+    for sample in series_values:
+        if (
+            not isinstance(sample, list)
+            or len(sample) < 2
+            or not isinstance(sample[0], (int, float))
+            or not isinstance(sample[1], str)
+        ):
+            continue
+        try:
+            value = float(sample[1])
+        except ValueError:
+            continue
+        if not math.isfinite(value):
+            continue
+        points[int(sample[0])] = value
+    return points
+
+
 def _build_service_metrics_queries(
     namespace: str,
     app_label: str,
@@ -259,6 +365,51 @@ def _build_service_metrics_queries(
             f"[{selected_range}]))"
         ),
     }
+
+
+def _build_health_timeline_queries(namespace: str, app_label: str) -> dict[str, str]:
+    deployment_name = app_label
+    return {
+        "availability": (
+            f'avg_over_time(up{{namespace="{namespace}", app="{app_label}"}}[5m])'
+        ),
+        "errorRatePct": (
+            f'100 * (sum(rate(http_requests_total{{namespace="{namespace}", app="{app_label}", status=~"5.."}}[5m]))'
+            f' / sum(rate(http_requests_total{{namespace="{namespace}", app="{app_label}"}}[5m])))'
+        ),
+        "readiness": (
+            f'avg_over_time(kube_deployment_status_replicas_available{{namespace="{namespace}", deployment="{deployment_name}"}}[5m])'
+            f' / clamp_min(avg_over_time(kube_deployment_spec_replicas{{namespace="{namespace}", deployment="{deployment_name}"}}[5m]), 1)'
+        ),
+    }
+
+
+def _validate_step_for_range(range_value: str, step_value: str) -> int:
+    try:
+        step_delta = parse_step(step_value)
+        window_delta = parse_range(range_value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    min_step = timedelta(minutes=5)
+    max_step = timedelta(hours=1)
+    if step_delta < min_step or step_delta > max_step:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="step must be between 5m and 1h",
+        )
+
+    points = int(window_delta.total_seconds() / step_delta.total_seconds())
+    if points > 1000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="step produces too many samples for selected range",
+        )
+
+    return int(step_delta.total_seconds())
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])
@@ -392,3 +543,89 @@ def get_service_metrics_summary_legacy(
         selected_range=selected_range,
         _=identity,
     )
+
+
+@app.get(
+    "/services/{service_id}/health/timeline",
+    response_model=list[ServiceHealthTimelineSegmentResponse],
+    tags=["monitoring"],
+)
+def get_service_health_timeline(
+    service_id: str,
+    selected_range: str = Query(
+        default="24h",
+        alias="range",
+        pattern="^(24h|7d)$",
+    ),
+    step: str = Query(default="5m", pattern="^([1-9][0-9]*)(m|h)$"),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> list[ServiceHealthTimelineSegmentResponse]:
+    step_seconds = _validate_step_for_range(selected_range, step)
+    end = now_utc()
+    window = parse_range(selected_range)
+    start = end - window
+
+    namespace = "default"
+    app_label = service_id
+    queries = _build_health_timeline_queries(namespace, app_label)
+
+    availability_points = _query_prometheus_range(
+        queries["availability"],
+        "availability",
+        start=start,
+        end=end,
+        step_seconds=step_seconds,
+    )
+    error_points = _query_prometheus_range(
+        queries["errorRatePct"],
+        "errorRatePct",
+        start=start,
+        end=end,
+        step_seconds=step_seconds,
+    )
+    readiness_points = _query_prometheus_range(
+        queries["readiness"],
+        "readiness",
+        start=start,
+        end=end,
+        step_seconds=step_seconds,
+    )
+
+    all_timestamps = sorted(
+        set(availability_points.keys())
+        .union(error_points.keys())
+        .union(readiness_points.keys())
+    )
+
+    thresholds = load_timeline_thresholds()
+    points: list[TimelinePoint] = []
+    for ts in all_timestamps:
+        status, reason = classify_timeline_status(
+            availability=availability_points.get(ts),
+            error_rate_pct=error_points.get(ts),
+            readiness=readiness_points.get(ts),
+            thresholds=thresholds,
+        )
+        points.append(
+            TimelinePoint(
+                timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
+                status=status,
+                reason=reason,
+            )
+        )
+
+    segments = compact_timeline_points(
+        points,
+        window_start=start,
+        window_end=end,
+        step=timedelta(seconds=step_seconds),
+    )
+    return [
+        ServiceHealthTimelineSegmentResponse(
+            start=segment.start.isoformat(),
+            end=segment.end.isoformat(),
+            status=segment.status,
+            reason=segment.reason,
+        )
+        for segment in segments
+    ]

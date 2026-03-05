@@ -230,3 +230,76 @@ def test_service_metrics_summary_translates_prometheus_http_errors(monkeypatch) 
     detail = response.json()["detail"]
     assert "Monitoring provider query failed." in detail
     assert "correlation_id=" in detail
+
+
+def test_service_health_timeline_returns_segments(monkeypatch) -> None:
+    payloads = iter(
+        [
+            {
+                "status": "success",
+                "data": {
+                    "result": [
+                        {
+                            "values": [
+                                [1000, "1"],
+                                [1300, "1"],
+                                [1600, "0.5"],
+                            ]
+                        }
+                    ]
+                },
+            },
+            {
+                "status": "success",
+                "data": {
+                    "result": [
+                        {
+                            "values": [
+                                [1000, "0.2"],
+                                [1300, "0.4"],
+                                [1600, "0.4"],
+                            ]
+                        }
+                    ]
+                },
+            },
+            {
+                "status": "success",
+                "data": {
+                    "result": [
+                        {
+                            "values": [
+                                [1000, "1"],
+                                [1300, "1"],
+                                [1600, "0.55"],
+                            ]
+                        }
+                    ]
+                },
+            },
+        ]
+    )
+
+    def _mock_urlopen(*args, **kwargs):
+        return _MockPrometheusResponse(next(payloads))
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+
+    response = client.get(
+        "/services/homelab-api/health/timeline?range=24h&step=5m",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body, list)
+    assert len(body) >= 1
+    assert set(body[0].keys()).issuperset({"start", "end", "status"})
+
+
+def test_service_health_timeline_rejects_invalid_step() -> None:
+    response = client.get(
+        "/services/homelab-api/health/timeline?range=24h&step=1m",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+    assert response.status_code == 422
