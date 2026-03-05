@@ -24,6 +24,11 @@ from app.health_timeline import (
     parse_range,
     parse_step,
 )
+from app.release_traceability import (
+    build_release_traceability_rows,
+    load_argo_metadata_rows,
+    load_ci_metadata_rows,
+)
 
 app = FastAPI(title="Homelab Backend API", version="0.1.0")
 logger = logging.getLogger("homelab.backend.monitoring")
@@ -81,6 +86,53 @@ class ServiceHealthTimelineSegmentResponse(BaseModel):
     end: str
     status: str
     reason: str | None = None
+
+
+class ReleaseArgoStateResponse(BaseModel):
+    app_name: str = Field(alias="appName")
+    sync_status: str = Field(alias="syncStatus")
+    health_status: str = Field(alias="healthStatus")
+    revision: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ReleaseDriftStateResponse(BaseModel):
+    is_drifted: bool = Field(alias="isDrifted")
+    expected_revision: str | None = Field(default=None, alias="expectedRevision")
+    live_revision: str | None = Field(default=None, alias="liveRevision")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ReleaseTraceabilityResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    env: str
+    commit_sha: str | None = Field(default=None, alias="commitSha")
+    image_ref: str | None = Field(default=None, alias="imageRef")
+    deployed_at: str | None = Field(default=None, alias="deployedAt")
+    argo: ReleaseArgoStateResponse
+    drift: ReleaseDriftStateResponse
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ReleaseDashboardCompatRow(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    service_name: str = Field(alias="serviceName")
+    environment: str
+    commit_sha: str | None = Field(default=None, alias="commitSha")
+    image: str | None = None
+    sync: str
+    health: str
+    drift: bool
+    deployed_at: str | None = Field(default=None, alias="deployedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ReleaseDashboardCompatResponse(BaseModel):
+    releases: list[ReleaseDashboardCompatRow]
 
 
 DEFAULT_PROJECTS = [
@@ -163,6 +215,24 @@ def _seed_projects_if_empty(conn: psycopg.Connection) -> None:
                 """,
                 (project.id, project.name, project.environment),
             )
+
+
+def _load_project_rows() -> list[dict[str, str]]:
+    with _with_connection() as conn:
+        _seed_projects_if_empty(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT name, environment FROM projects ORDER BY name ASC, environment ASC"
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "service_id": row[0],
+            "env": row[1],
+        }
+        for row in rows
+    ]
 
 
 def _prometheus_base_url() -> str:
@@ -629,3 +699,86 @@ def get_service_health_timeline(
         )
         for segment in segments
     ]
+
+
+@app.get(
+    "/releases",
+    response_model=list[ReleaseTraceabilityResponse],
+    tags=["monitoring"],
+)
+def get_release_traceability(
+    env: str | None = Query(default=None),
+    service_id: str | None = Query(default=None, alias="serviceId"),
+    limit: int = Query(default=50, ge=1, le=200),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> list[ReleaseTraceabilityResponse]:
+    rows = build_release_traceability_rows(
+        project_rows=_load_project_rows(),
+        ci_rows=load_ci_metadata_rows(),
+        argo_rows=load_argo_metadata_rows(),
+        env_filter=env,
+        service_id_filter=service_id,
+        limit=limit,
+    )
+    return [
+        ReleaseTraceabilityResponse(
+            serviceId=row["serviceId"],
+            env=row["env"],
+            commitSha=row["commitSha"],
+            imageRef=row["imageRef"],
+            deployedAt=row["deployedAt"],
+            argo=ReleaseArgoStateResponse(
+                appName=str(row["argo"]["appName"]),
+                syncStatus=str(row["argo"]["syncStatus"]),
+                healthStatus=str(row["argo"]["healthStatus"]),
+                revision=row["argo"]["revision"]
+                if isinstance(row["argo"]["revision"], str)
+                else None,
+            ),
+            drift=ReleaseDriftStateResponse(
+                isDrifted=bool(row["drift"]["isDrifted"]),
+                expectedRevision=row["drift"]["expectedRevision"]
+                if isinstance(row["drift"]["expectedRevision"], str)
+                else None,
+                liveRevision=row["drift"]["liveRevision"]
+                if isinstance(row["drift"]["liveRevision"], str)
+                else None,
+            ),
+        )
+        for row in rows
+    ]
+
+
+@app.get(
+    "/release-dashboard",
+    response_model=ReleaseDashboardCompatResponse,
+    tags=["monitoring"],
+)
+def get_release_dashboard_compat(
+    env: str | None = Query(default=None),
+    service_id: str | None = Query(default=None, alias="serviceId"),
+    limit: int = Query(default=50, ge=1, le=200),
+    identity: tuple[str, set[str]] = Depends(get_current_user),
+) -> ReleaseDashboardCompatResponse:
+    rows = get_release_traceability(
+        env=env,
+        service_id=service_id,
+        limit=limit,
+        _=identity,
+    )
+    return ReleaseDashboardCompatResponse(
+        releases=[
+            ReleaseDashboardCompatRow(
+                serviceId=row.service_id,
+                serviceName=row.service_id,
+                environment=row.env,
+                commitSha=row.commit_sha,
+                image=row.image_ref,
+                sync=row.argo.sync_status,
+                health=row.argo.health_status,
+                drift=row.drift.is_drifted,
+                deployedAt=row.deployed_at,
+            )
+            for row in rows
+        ]
+    )

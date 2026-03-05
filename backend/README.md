@@ -9,6 +9,7 @@ FastAPI backend scaffold for task `T1.2.1`.
 - `GET /projects`
 - `GET /services/{serviceId}/metrics/summary?range=1h|24h|7d`
 - `GET /services/{serviceId}/health/timeline?range=24h|7d&step=5m..1h`
+- `GET /releases?env=dev&limit=50&serviceId=...`
 
 ## Development
 
@@ -52,6 +53,18 @@ Health timeline status thresholds:
 - `TIMELINE_DOWN_ERROR_RATE_MIN_PCT` (default: `5.0`)
 - `TIMELINE_DEGRADED_READINESS_MAX` (default: `0.98`)
 - `TIMELINE_DOWN_READINESS_MAX` (default: `0.6`)
+
+Release traceability metadata sources:
+
+- `RELEASE_CI_METADATA_JSON`: JSON array of CI/build rows (`serviceId`, `env`, `commitSha`, `imageRef`, optional `expectedRevision`, `expectedImageRef`, `deployedAt`)
+- `RELEASE_ARGO_METADATA_JSON`: JSON array of Argo rows (`serviceId`, `env`, `appName`, `syncStatus`, `healthStatus`, `revision`, optional `liveRevision`, `expectedRevision`, `imageRef`, `deployedAt`)
+
+Deterministic drift rule for `/releases`:
+
+1. `syncStatus == out_of_sync` => drifted
+2. else `expectedRevision != liveRevision` when both values exist => drifted
+3. else `expectedImageRef != liveImageRef` when both values exist => drifted
+4. otherwise not drifted
 
 ## Container Image
 

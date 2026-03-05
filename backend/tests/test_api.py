@@ -303,3 +303,90 @@ def test_service_health_timeline_rejects_invalid_step() -> None:
         headers={"Authorization": "Bearer dev-static-token"},
     )
     assert response.status_code == 422
+
+
+def test_releases_endpoint_returns_traceability_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_project_rows",
+        lambda: [{"service_id": "homelab-api", "env": "dev"}],
+    )
+    monkeypatch.setattr(
+        "app.main.load_ci_metadata_rows",
+        lambda: [
+            {
+                "serviceId": "homelab-api",
+                "env": "dev",
+                "commitSha": "abc123",
+                "imageRef": "ghcr.io/example/homelab-api:v1",
+                "expectedRevision": "abc123",
+                "deployedAt": "2026-03-05T12:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main.load_argo_metadata_rows",
+        lambda: [
+            {
+                "serviceId": "homelab-api",
+                "env": "dev",
+                "appName": "homelab-api-dev",
+                "syncStatus": "synced",
+                "healthStatus": "healthy",
+                "revision": "abc123",
+            }
+        ],
+    )
+
+    response = client.get(
+        "/releases?env=dev&limit=50",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body, list)
+    assert len(body) == 1
+    row = body[0]
+    assert row["serviceId"] == "homelab-api"
+    assert row["env"] == "dev"
+    assert row["argo"]["syncStatus"] == "synced"
+    assert row["drift"]["isDrifted"] is False
+
+
+def test_releases_endpoint_supports_service_filter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_project_rows",
+        lambda: [
+            {"service_id": "homelab-api", "env": "dev"},
+            {"service_id": "homelab-web", "env": "dev"},
+        ],
+    )
+    monkeypatch.setattr("app.main.load_ci_metadata_rows", lambda: [])
+    monkeypatch.setattr("app.main.load_argo_metadata_rows", lambda: [])
+
+    response = client.get(
+        "/releases?serviceId=homelab-web",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["serviceId"] == "homelab-web"
+
+
+def test_release_dashboard_compat_endpoint_available(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_project_rows",
+        lambda: [{"service_id": "homelab-api", "env": "dev"}],
+    )
+    monkeypatch.setattr("app.main.load_ci_metadata_rows", lambda: [])
+    monkeypatch.setattr("app.main.load_argo_metadata_rows", lambda: [])
+
+    response = client.get(
+        "/release-dashboard?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "releases" in body
+    assert len(body["releases"]) == 1
