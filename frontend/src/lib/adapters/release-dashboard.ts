@@ -1,4 +1,6 @@
 import { ApiRequestError, getProjects, isApiRequestError, request, type Project } from '@/lib/api'
+import { buildArgoAppUrl } from '@/lib/config'
+import { config } from '@/lib/config'
 
 export type ReleaseSyncStatus = 'synced' | 'out_of_sync' | 'unknown'
 export type ReleaseHealthStatus = 'healthy' | 'degraded' | 'unknown'
@@ -47,15 +49,42 @@ interface ReleaseDashboardResponse {
   releases?: ReleaseDashboardApiEntry[]
 }
 
+interface ReleaseTraceabilityApiRow {
+  serviceId?: string
+  env?: string
+  commitSha?: string | null
+  imageRef?: string | null
+  deployedAt?: string | null
+  argo?: {
+    appName?: string | null
+    syncStatus?: string | null
+    healthStatus?: string | null
+    revision?: string | null
+  }
+  drift?: {
+    isDrifted?: boolean
+    expectedRevision?: string | null
+    liveRevision?: string | null
+  }
+}
+
 interface ReleaseDashboardSamplePayload {
   releases?: ReleaseDashboardApiEntry[]
 }
 
 const releaseDashboardSampleUrl = new URL('../../../release-dashboard.sample.json', import.meta.url).toString()
 const releaseDashboardMissingStatuses = new Set([404, 405, 501])
+const enableSampleFallback = import.meta.env.DEV || config.enableReleaseSampleFallback
 
 type ReleaseDashboardApiAvailability = 'unknown' | 'available' | 'unavailable'
 let releaseDashboardApiAvailability: ReleaseDashboardApiAvailability = 'unknown'
+
+export type ReleaseDashboardSource = 'live_api' | 'projects_fallback' | 'sample_fallback'
+
+export interface ReleaseDashboardResult {
+  rows: ReleaseDashboardEntry[]
+  dataSource: ReleaseDashboardSource
+}
 
 function normalizeSyncStatus(value?: string): ReleaseSyncStatus {
   if (!value) {
@@ -150,6 +179,51 @@ function adaptReleasePayload(payload: ReleaseDashboardResponse | ReleaseDashboar
     })
 }
 
+function adaptLiveReleaseRows(rows: ReleaseTraceabilityApiRow[]): ReleaseDashboardEntry[] {
+  return rows
+    .map((row): ReleaseDashboardEntry | null => {
+      const serviceId =
+        typeof row.serviceId === 'string' && row.serviceId.trim() ? row.serviceId.trim() : ''
+      const environment = typeof row.env === 'string' && row.env.trim() ? row.env.trim() : ''
+
+      if (!serviceId || !environment) {
+        return null
+      }
+
+      const imageRef = typeof row.imageRef === 'string' ? row.imageRef : undefined
+      const commitSha = typeof row.commitSha === 'string' ? row.commitSha : undefined
+      const expectedRevision =
+        typeof row.drift?.expectedRevision === 'string' ? row.drift.expectedRevision : undefined
+      const liveRevision = typeof row.drift?.liveRevision === 'string' ? row.drift.liveRevision : undefined
+      const drift = row.drift?.isDrifted === true
+
+      return {
+        id: `${serviceId}:${environment}`,
+        serviceId,
+        serviceName: serviceId,
+        environment,
+        commitSha,
+        desiredCommitSha: expectedRevision,
+        image: imageRef,
+        imageTag: imageRef?.split(':').slice(1).join(':') || imageRef,
+        desiredImage: undefined,
+        argoApp: typeof row.argo?.appName === 'string' ? row.argo.appName : undefined,
+        argoAppUrl: buildArgoAppUrl(serviceId),
+        sync: normalizeSyncStatus(typeof row.argo?.syncStatus === 'string' ? row.argo.syncStatus : undefined),
+        health: normalizeHealthStatus(typeof row.argo?.healthStatus === 'string' ? row.argo.healthStatus : undefined),
+        drift: drift || Boolean(expectedRevision && liveRevision && expectedRevision !== liveRevision),
+        deployedAt: typeof row.deployedAt === 'string' ? row.deployedAt : undefined,
+      }
+    })
+    .filter((row): row is ReleaseDashboardEntry => row !== null)
+    .sort((a, b) => {
+      if (a.serviceName === b.serviceName) {
+        return a.environment.localeCompare(b.environment)
+      }
+      return a.serviceName.localeCompare(b.serviceName)
+    })
+}
+
 function adaptProjectsToReleaseRows(projects: Project[]): ReleaseDashboardEntry[] {
   return projects
     .map((project) => {
@@ -190,18 +264,21 @@ async function getReleaseDashboardFromApi() {
     throw new ApiRequestError('Release dashboard endpoint is not available in this backend.', 404)
   }
 
-  const payload = await request<ReleaseDashboardResponse>('/release-dashboard')
+  const payload = await request<ReleaseTraceabilityApiRow[]>('/releases?limit=50')
   releaseDashboardApiAvailability = 'available'
-  return adaptReleasePayload(payload)
+  return adaptLiveReleaseRows(payload)
 }
 
-export async function getReleaseDashboardEntries() {
+export async function getReleaseDashboardEntries(): Promise<ReleaseDashboardResult> {
   let apiError: Error | null = null
 
   try {
     const fromApi = await getReleaseDashboardFromApi()
     if (fromApi.length > 0) {
-      return fromApi
+      return {
+        rows: fromApi,
+        dataSource: 'live_api',
+      }
     }
   } catch (error) {
     if (isApiRequestError(error) && releaseDashboardMissingStatuses.has(error.status)) {
@@ -214,7 +291,10 @@ export async function getReleaseDashboardEntries() {
     const projects = await getProjects()
     const fromProjects = adaptProjectsToReleaseRows(projects.projects)
     if (fromProjects.length > 0) {
-      return fromProjects
+      return {
+        rows: fromProjects,
+        dataSource: 'projects_fallback',
+      }
     }
   } catch (error) {
     if (!apiError) {
@@ -222,8 +302,18 @@ export async function getReleaseDashboardEntries() {
     }
   }
 
+  if (!enableSampleFallback) {
+    if (apiError) {
+      throw apiError
+    }
+    throw new Error('Release dashboard data unavailable and sample fallback disabled.')
+  }
+
   try {
-    return await loadSampleReleaseDashboard()
+    return {
+      rows: await loadSampleReleaseDashboard(),
+      dataSource: 'sample_fallback',
+    }
   } catch (fallbackError) {
     if (apiError) {
       throw apiError

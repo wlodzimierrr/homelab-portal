@@ -8,6 +8,7 @@ import {
   getReleaseDashboardEntries,
   type ReleaseDashboardEntry,
   type ReleaseHealthStatus,
+  type ReleaseDashboardSource,
   type ReleaseSyncStatus,
 } from '@/lib/adapters/release-dashboard'
 import { cn } from '@/lib/utils'
@@ -84,8 +85,20 @@ function SummaryCard({ label, value, tone }: { label: string; value: string; ton
   )
 }
 
+function DataSourceBadge({ source }: { source: ReleaseDashboardSource }) {
+  const config =
+    source === 'live_api'
+      ? { label: 'Live', tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' }
+      : source === 'projects_fallback'
+        ? { label: 'Fallback: Projects', tone: 'bg-amber-500/10 text-amber-700 dark:text-amber-300' }
+        : { label: 'Fallback: Sample', tone: 'bg-sky-500/10 text-sky-700 dark:text-sky-300' }
+
+  return <span className={cn('inline-flex rounded-full px-2 py-1 text-xs font-medium', config.tone)}>{config.label}</span>
+}
+
 export function DashboardPage() {
   const [rows, setRows] = useState<ReleaseDashboardEntry[]>([])
+  const [dataSource, setDataSource] = useState<ReleaseDashboardSource>('projects_fallback')
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
@@ -97,7 +110,8 @@ export function DashboardPage() {
 
     try {
       const result = await getReleaseDashboardEntries()
-      setRows(result)
+      setRows(result.rows)
+      setDataSource(result.dataSource)
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : 'Failed to load release dashboard'
       setError(message)
@@ -158,6 +172,9 @@ export function DashboardPage() {
       description="Trace commits to deployed images and Argo CD sync state, with explicit drift visibility."
     >
       <div className="space-y-4">
+        <div className="flex items-center justify-end">
+          <DataSourceBadge source={dataSource} />
+        </div>
         <div className="grid gap-3 md:grid-cols-4">
           <SummaryCard label="Tracked releases" value={String(summary.total)} />
           <SummaryCard label="Synced" value={String(summary.syncedCount)} tone="text-emerald-700 dark:text-emerald-300" />
