@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import TypedDict
 
+logger = logging.getLogger("homelab.backend.release_traceability")
 
-class ProjectRow(TypedDict):
+
+class ProjectRow(TypedDict, total=False):
     service_id: str
+    service_name: str
     env: str
 
 
 class CiMetadataRow(TypedDict, total=False):
     serviceId: str
+    serviceName: str
     env: str
     commitSha: str
     imageRef: str
@@ -22,6 +27,7 @@ class CiMetadataRow(TypedDict, total=False):
 
 class ArgoMetadataRow(TypedDict, total=False):
     serviceId: str
+    serviceName: str
     env: str
     appName: str
     syncStatus: str
@@ -43,7 +49,21 @@ class ReleaseTraceabilityRow(TypedDict):
     drift: dict[str, bool | str | None]
 
 
+class ReleaseJoinDiagnostics(TypedDict):
+    ciUnmatchedCount: int
+    argoUnmatchedCount: int
+    ciUnmatchedKeys: list[str]
+    argoUnmatchedKeys: list[str]
+
+
 UNKNOWN = "unknown"
+
+
+def _normalize_service_id(value: str) -> str:
+    normalized = value.strip().lower()
+    normalized = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in normalized)
+    normalized = "-".join(part for part in normalized.split("-") if part)
+    return normalized or "unknown-service"
 
 
 def _normalize_sync(value: str | None) -> str:
@@ -118,12 +138,11 @@ def build_release_traceability_rows(
     limit: int,
 ) -> list[ReleaseTraceabilityRow]:
     ci_index: dict[tuple[str, str], CiMetadataRow] = {}
+    ci_normalized_index: dict[tuple[str, str], CiMetadataRow] = {}
     argo_index: dict[tuple[str, str], ArgoMetadataRow] = {}
-    keys: set[tuple[str, str]] = set()
-
-    for row in project_rows:
-        key = (row["service_id"], row["env"])
-        keys.add(key)
+    argo_normalized_index: dict[tuple[str, str], ArgoMetadataRow] = {}
+    registry_keys: set[tuple[str, str]] = set()
+    registry_service_name_by_key: dict[tuple[str, str], str] = {}
 
     for row in ci_rows:
         service_id = str(row.get("serviceId", "")).strip()
@@ -131,8 +150,8 @@ def build_release_traceability_rows(
         if not service_id or not env:
             continue
         key = (service_id, env)
-        keys.add(key)
         ci_index[key] = row
+        ci_normalized_index[(_normalize_service_id(service_id), env)] = row
 
     for row in argo_rows:
         service_id = str(row.get("serviceId", "")).strip()
@@ -140,11 +159,24 @@ def build_release_traceability_rows(
         if not service_id or not env:
             continue
         key = (service_id, env)
-        keys.add(key)
         argo_index[key] = row
+        argo_normalized_index[(_normalize_service_id(service_id), env)] = row
 
-    ordered = sorted(keys, key=lambda item: (item[0], item[1]))
+    for row in project_rows:
+        service_id = str(row.get("service_id", "")).strip()
+        env = str(row.get("env", "")).strip()
+        if not service_id or not env:
+            continue
+        key = (service_id, env)
+        registry_keys.add(key)
+        service_name = str(row.get("service_name", "")).strip() if row.get("service_name") else ""
+        if service_name:
+            registry_service_name_by_key[key] = service_name
+
+    ordered = sorted(registry_keys, key=lambda item: (item[0], item[1]))
     rows: list[ReleaseTraceabilityRow] = []
+    matched_ci_keys: set[tuple[str, str]] = set()
+    matched_argo_keys: set[tuple[str, str]] = set()
 
     for service_id, env in ordered:
         if env_filter and env != env_filter:
@@ -152,8 +184,43 @@ def build_release_traceability_rows(
         if service_id_filter and service_id != service_id_filter:
             continue
 
-        ci = ci_index.get((service_id, env), {})
-        argo = argo_index.get((service_id, env), {})
+        service_name = registry_service_name_by_key.get((service_id, env))
+        ci: CiMetadataRow = {}
+        argo: ArgoMetadataRow = {}
+
+        candidate_ci_keys = [
+            (service_id, env),
+            (service_name, env) if service_name else None,
+        ]
+        for candidate in candidate_ci_keys:
+            if candidate and candidate in ci_index:
+                ci = ci_index[candidate]
+                matched_ci_keys.add(candidate)
+                break
+        if not ci:
+            normalized_key = (_normalize_service_id(service_id), env)
+            if normalized_key in ci_normalized_index:
+                ci = ci_normalized_index[normalized_key]
+                source_service_id = str(ci.get("serviceId", "")).strip()
+                if source_service_id:
+                    matched_ci_keys.add((source_service_id, env))
+
+        candidate_argo_keys = [
+            (service_id, env),
+            (service_name, env) if service_name else None,
+        ]
+        for candidate in candidate_argo_keys:
+            if candidate and candidate in argo_index:
+                argo = argo_index[candidate]
+                matched_argo_keys.add(candidate)
+                break
+        if not argo:
+            normalized_key = (_normalize_service_id(service_id), env)
+            if normalized_key in argo_normalized_index:
+                argo = argo_normalized_index[normalized_key]
+                source_service_id = str(argo.get("serviceId", "")).strip()
+                if source_service_id:
+                    matched_argo_keys.add((source_service_id, env))
 
         sync_status = _normalize_sync(argo.get("syncStatus"))  # type: ignore[arg-type]
         health_status = _normalize_health(argo.get("healthStatus"))  # type: ignore[arg-type]
@@ -220,4 +287,164 @@ def build_release_traceability_rows(
         }
         rows.append(row)
 
+    unmatched_ci = sorted(set(ci_index.keys()) - matched_ci_keys)
+    unmatched_argo = sorted(set(argo_index.keys()) - matched_argo_keys)
+
+    for service_id, env in unmatched_ci:
+        row = ci_index[(service_id, env)]
+        service_name = (
+            row.get("serviceName")
+            if isinstance(row.get("serviceName"), str)
+            else UNKNOWN
+        )
+        logger.warning(
+            "release_join_mismatch source=ci key=%s|%s|%s reason=missing_registry_mapping",
+            service_id,
+            service_name,
+            env,
+        )
+
+    for service_id, env in unmatched_argo:
+        row = argo_index[(service_id, env)]
+        service_name = (
+            row.get("serviceName")
+            if isinstance(row.get("serviceName"), str)
+            else UNKNOWN
+        )
+        logger.warning(
+            "release_join_mismatch source=argo key=%s|%s|%s reason=missing_registry_mapping",
+            service_id,
+            service_name,
+            env,
+        )
+
     return rows[:limit]
+
+
+def build_release_join_diagnostics(
+    *,
+    project_rows: list[ProjectRow],
+    ci_rows: list[CiMetadataRow],
+    argo_rows: list[ArgoMetadataRow],
+    env_filter: str | None,
+    service_id_filter: str | None,
+) -> ReleaseJoinDiagnostics:
+    ci_index: dict[tuple[str, str], CiMetadataRow] = {}
+    ci_normalized_index: dict[tuple[str, str], CiMetadataRow] = {}
+    argo_index: dict[tuple[str, str], ArgoMetadataRow] = {}
+    argo_normalized_index: dict[tuple[str, str], ArgoMetadataRow] = {}
+    registry_keys: set[tuple[str, str]] = set()
+    registry_service_name_by_key: dict[tuple[str, str], str] = {}
+
+    for row in ci_rows:
+        service_id = str(row.get("serviceId", "")).strip()
+        env = str(row.get("env", "")).strip()
+        if not service_id or not env:
+            continue
+        key = (service_id, env)
+        ci_index[key] = row
+        ci_normalized_index[(_normalize_service_id(service_id), env)] = row
+
+    for row in argo_rows:
+        service_id = str(row.get("serviceId", "")).strip()
+        env = str(row.get("env", "")).strip()
+        if not service_id or not env:
+            continue
+        key = (service_id, env)
+        argo_index[key] = row
+        argo_normalized_index[(_normalize_service_id(service_id), env)] = row
+
+    for row in project_rows:
+        service_id = str(row.get("service_id", "")).strip()
+        env = str(row.get("env", "")).strip()
+        if not service_id or not env:
+            continue
+        if env_filter and env != env_filter:
+            continue
+        if service_id_filter and service_id != service_id_filter:
+            continue
+        key = (service_id, env)
+        registry_keys.add(key)
+        service_name = str(row.get("service_name", "")).strip() if row.get("service_name") else ""
+        if service_name:
+            registry_service_name_by_key[key] = service_name
+
+    matched_ci_keys: set[tuple[str, str]] = set()
+    matched_argo_keys: set[tuple[str, str]] = set()
+    for service_id, env in sorted(registry_keys):
+        service_name = registry_service_name_by_key.get((service_id, env))
+
+        candidate_ci_keys = [
+            (service_id, env),
+            (service_name, env) if service_name else None,
+        ]
+        for candidate in candidate_ci_keys:
+            if candidate and candidate in ci_index:
+                matched_ci_keys.add(candidate)
+                break
+        else:
+            normalized_key = (_normalize_service_id(service_id), env)
+            if normalized_key in ci_normalized_index:
+                row = ci_normalized_index[normalized_key]
+                source_service_id = str(row.get("serviceId", "")).strip()
+                if source_service_id:
+                    matched_ci_keys.add((source_service_id, env))
+
+        candidate_argo_keys = [
+            (service_id, env),
+            (service_name, env) if service_name else None,
+        ]
+        for candidate in candidate_argo_keys:
+            if candidate and candidate in argo_index:
+                matched_argo_keys.add(candidate)
+                break
+        else:
+            normalized_key = (_normalize_service_id(service_id), env)
+            if normalized_key in argo_normalized_index:
+                row = argo_normalized_index[normalized_key]
+                source_service_id = str(row.get("serviceId", "")).strip()
+                if source_service_id:
+                    matched_argo_keys.add((source_service_id, env))
+
+    def _matches_filters(key: tuple[str, str]) -> bool:
+        if env_filter and key[1] != env_filter:
+            return False
+        if service_id_filter and key[0] != service_id_filter:
+            return False
+        return True
+
+    unmatched_ci = sorted(
+        key for key in set(ci_index.keys()) - matched_ci_keys if _matches_filters(key)
+    )
+    unmatched_argo = sorted(
+        key
+        for key in set(argo_index.keys()) - matched_argo_keys
+        if _matches_filters(key)
+    )
+
+    ci_keys = []
+    for service_id, env in unmatched_ci:
+        row = ci_index[(service_id, env)]
+        service_name = (
+            row.get("serviceName")
+            if isinstance(row.get("serviceName"), str)
+            else UNKNOWN
+        )
+        ci_keys.append(f"{service_id}|{service_name}|{env}")
+
+    argo_keys = []
+    for service_id, env in unmatched_argo:
+        row = argo_index[(service_id, env)]
+        service_name = (
+            row.get("serviceName")
+            if isinstance(row.get("serviceName"), str)
+            else UNKNOWN
+        )
+        argo_keys.append(f"{service_id}|{service_name}|{env}")
+
+    return {
+        "ciUnmatchedCount": len(ci_keys),
+        "argoUnmatchedCount": len(argo_keys),
+        "ciUnmatchedKeys": ci_keys,
+        "argoUnmatchedKeys": argo_keys,
+    }

@@ -37,10 +37,12 @@ from app.logs_quickview import (
     validate_preset,
 )
 from app.release_traceability import (
+    build_release_join_diagnostics,
     build_release_traceability_rows,
     load_argo_metadata_rows,
     load_ci_metadata_rows,
 )
+from app.service_registry_sync import sync_service_registry_from_cluster
 from app.observability_cache import TTLCache
 from app.observability_config import (
     load_observability_config,
@@ -93,6 +95,56 @@ class CreateProjectRequest(BaseModel):
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     environment: str = Field(min_length=1)
+
+
+class ServiceRegistrySyncFailure(BaseModel):
+    source: str
+    scope: str
+    error: str
+
+
+class ServiceRegistrySyncResponse(BaseModel):
+    correlation_id: str = Field(alias="correlationId")
+    env: str
+    namespaces: list[str]
+    discovered: int
+    upserted: int
+    inserted: int
+    updated: int
+    source_failures: list[ServiceRegistrySyncFailure] = Field(alias="sourceFailures")
+    generated_at: str = Field(alias="generatedAt")
+    duration_ms: int = Field(alias="durationMs")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceRegistryFreshnessResponse(BaseModel):
+    row_count: int = Field(alias="rowCount")
+    last_synced_at: str | None = Field(alias="lastSyncedAt")
+    stale_after_minutes: int = Field(alias="staleAfterMinutes")
+    is_empty: bool = Field(alias="isEmpty")
+    is_stale: bool = Field(alias="isStale")
+    state: str
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceRegistryJoinMismatchResponse(BaseModel):
+    ci_unmatched_count: int = Field(alias="ciUnmatchedCount")
+    argo_unmatched_count: int = Field(alias="argoUnmatchedCount")
+    ci_unmatched_keys: list[str] = Field(alias="ciUnmatchedKeys")
+    argo_unmatched_keys: list[str] = Field(alias="argoUnmatchedKeys")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceRegistryDiagnosticsResponse(BaseModel):
+    generated_at: str = Field(alias="generatedAt")
+    env: str | None = None
+    freshness: ServiceRegistryFreshnessResponse
+    join_mismatch: ServiceRegistryJoinMismatchResponse = Field(alias="joinMismatch")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ServiceMetricsSummaryResponse(BaseModel):
@@ -211,13 +263,6 @@ class ReleaseDashboardCompatRow(BaseModel):
 class ReleaseDashboardCompatResponse(BaseModel):
     releases: list[ReleaseDashboardCompatRow]
 
-
-DEFAULT_PROJECTS = [
-    Project(id="proj-dev", name="Homelab App", environment="dev"),
-    Project(id="proj-prod", name="Homelab App", environment="prod"),
-]
-
-
 def require_bearer_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_auth),
 ) -> str:
@@ -240,6 +285,13 @@ def _parse_csv_header(value: str | None) -> set[str]:
     if not value:
         return set()
     return {item.strip() for item in value.split(",") if item.strip()}
+
+
+def _normalize_service_id(value: str) -> str:
+    normalized = value.strip().lower()
+    normalized = re.sub(r"[^a-z0-9._-]+", "-", normalized)
+    normalized = normalized.strip("-")
+    return normalized or "unknown-service"
 
 
 def get_current_user(
@@ -276,40 +328,35 @@ def _with_connection() -> psycopg.Connection:
     return psycopg.connect(get_psycopg_database_url())
 
 
-def _seed_projects_if_empty(conn: psycopg.Connection) -> None:
-    with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM projects")
-        count = cur.fetchone()[0]
-        if count > 0:
-            return
-
-        for project in DEFAULT_PROJECTS:
-            cur.execute(
-                """
-                INSERT INTO projects (id, name, environment)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (id) DO NOTHING
-                """,
-                (project.id, project.name, project.environment),
-            )
-
-
 def _load_project_rows() -> list[dict[str, str]]:
     with _with_connection() as conn:
-        _seed_projects_if_empty(conn)
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT name, environment FROM projects ORDER BY name ASC, environment ASC"
+                """
+                SELECT service_id, service_name, env
+                FROM service_registry
+                ORDER BY service_id ASC, env ASC
+                """
             )
             rows = cur.fetchall()
 
     return [
         {
             "service_id": row[0],
-            "env": row[1],
+            "service_name": row[1],
+            "env": row[2],
         }
         for row in rows
     ]
+
+
+def _registry_stale_after_minutes() -> int:
+    raw = os.getenv("REGISTRY_STALE_AFTER_MINUTES", "30")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 30
+    return value if value > 0 else 30
 
 
 def _prometheus_base_url() -> str:
@@ -768,10 +815,13 @@ def login(payload: LoginRequest) -> LoginResponse:
 @app.get("/projects", response_model=ProjectsResponse, tags=["metadata"])
 def list_projects(_: tuple[str, set[str]] = Depends(get_current_user)) -> ProjectsResponse:
     with _with_connection() as conn:
-        _seed_projects_if_empty(conn)
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, name, environment FROM projects ORDER BY id ASC"
+                """
+                SELECT service_id, service_name, env
+                FROM service_registry
+                ORDER BY service_id ASC, env ASC
+                """
             )
             rows = cur.fetchall()
 
@@ -793,22 +843,181 @@ def create_project(
     payload: CreateProjectRequest,
     _: str = Depends(require_admin),
 ) -> Project:
+    service_id = _normalize_service_id(payload.id)
+    namespace = os.getenv("PROJECTS_DEFAULT_NAMESPACE", "default")
+    app_label = service_id
+    now = datetime.now(tz=timezone.utc)
+
     with _with_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO projects (id, name, environment)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (id) DO UPDATE
-                SET name = EXCLUDED.name,
-                    environment = EXCLUDED.environment
-                RETURNING id, name, environment
+                SELECT service_id
+                FROM service_registry
+                WHERE service_name = %s
+                  AND namespace = %s
+                  AND env = %s
                 """,
-                (payload.id, payload.name, payload.environment),
+                (payload.name, namespace, payload.environment),
             )
-            row = cur.fetchone()
+            existing_name_row = cur.fetchone()
+
+            if (
+                existing_name_row
+                and isinstance(existing_name_row[0], str)
+                and existing_name_row[0] != service_id
+            ):
+                # Rekey existing name/env row instead of violating uq(service_name, namespace, env).
+                cur.execute(
+                    """
+                    UPDATE service_registry
+                    SET service_id = %s,
+                        service_name = %s,
+                        namespace = %s,
+                        app_label = %s,
+                        argo_app_name = %s,
+                        source = %s,
+                        source_ref = %s,
+                        last_synced_at = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE service_id = %s
+                      AND env = %s
+                    RETURNING service_id, service_name, env
+                    """,
+                    (
+                        service_id,
+                        payload.name,
+                        namespace,
+                        app_label,
+                        None,
+                        "manual",
+                        "projects_api",
+                        now,
+                        existing_name_row[0],
+                        payload.environment,
+                    ),
+                )
+                row = cur.fetchone()
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO service_registry (
+                        service_id,
+                        service_name,
+                        namespace,
+                        env,
+                        app_label,
+                        argo_app_name,
+                        source,
+                        source_ref,
+                        last_synced_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (service_id, env) DO UPDATE
+                    SET service_name = EXCLUDED.service_name,
+                        namespace = EXCLUDED.namespace,
+                        app_label = EXCLUDED.app_label,
+                        source = EXCLUDED.source,
+                        source_ref = EXCLUDED.source_ref,
+                        last_synced_at = EXCLUDED.last_synced_at,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING service_id, service_name, env
+                    """,
+                    (
+                        service_id,
+                        payload.name,
+                        namespace,
+                        payload.environment,
+                        app_label,
+                        None,
+                        "manual",
+                        "projects_api",
+                        now,
+                    ),
+                )
+                row = cur.fetchone()
 
     return Project(id=row[0], name=row[1], environment=row[2])
+
+
+@app.post(
+    "/service-registry/sync",
+    response_model=ServiceRegistrySyncResponse,
+    tags=["metadata"],
+)
+def sync_service_registry(_: str = Depends(require_admin)) -> ServiceRegistrySyncResponse:
+    with _with_connection() as conn:
+        summary = sync_service_registry_from_cluster(conn)
+    return ServiceRegistrySyncResponse(**summary)
+
+
+@app.get(
+    "/service-registry/diagnostics",
+    response_model=ServiceRegistryDiagnosticsResponse,
+    tags=["metadata"],
+)
+def get_service_registry_diagnostics(
+    env: str | None = Query(default=None),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> ServiceRegistryDiagnosticsResponse:
+    with _with_connection() as conn:
+        with conn.cursor() as cur:
+            if env:
+                cur.execute(
+                    """
+                    SELECT COUNT(*), MAX(last_synced_at)
+                    FROM service_registry
+                    WHERE env = %s
+                    """,
+                    (env,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT COUNT(*), MAX(last_synced_at)
+                    FROM service_registry
+                    """
+                )
+            count_row = cur.fetchone()
+
+    row_count = int(count_row[0] or 0)
+    last_synced_at = count_row[1]
+    stale_after_minutes = _registry_stale_after_minutes()
+    now = datetime.now(tz=timezone.utc)
+
+    is_empty = row_count == 0
+    if is_empty:
+        is_stale = False
+        state = "empty"
+    else:
+        if last_synced_at is None:
+            is_stale = True
+        else:
+            is_stale = (now - last_synced_at) > timedelta(minutes=stale_after_minutes)
+        state = "stale" if is_stale else "fresh"
+
+    project_rows = _load_project_rows()
+    mismatches = build_release_join_diagnostics(
+        project_rows=project_rows,
+        ci_rows=load_ci_metadata_rows(),
+        argo_rows=load_argo_metadata_rows(),
+        env_filter=env,
+        service_id_filter=None,
+    )
+
+    return ServiceRegistryDiagnosticsResponse(
+        generatedAt=now.isoformat(),
+        env=env,
+        freshness=ServiceRegistryFreshnessResponse(
+            rowCount=row_count,
+            lastSyncedAt=last_synced_at.isoformat() if last_synced_at else None,
+            staleAfterMinutes=stale_after_minutes,
+            isEmpty=is_empty,
+            isStale=is_stale,
+            state=state,
+        ),
+        joinMismatch=ServiceRegistryJoinMismatchResponse(**mismatches),
+    )
 
 
 @app.get(

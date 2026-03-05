@@ -7,6 +7,8 @@ FastAPI backend scaffold for task `T1.2.1`.
 - `GET /health`
 - `POST /auth/login`
 - `GET /projects`
+- `POST /service-registry/sync`
+- `GET /service-registry/diagnostics?env=dev`
 - `GET /services/{serviceId}/metrics/summary?range=1h|24h|7d`
 - `GET /services/{serviceId}/health/timeline?range=24h|7d&step=5m..1h`
 - `GET /alerts/active?env=dev&serviceId=...`
@@ -22,6 +24,8 @@ source .venv/bin/activate
 pip install -e .[dev]
 pytest
 python scripts/generate_openapi.py
+python scripts/migrate_projects_to_service_registry.py  # dry-run legacy projects backfill
+python scripts/project_source_cutover_smoke.py --api-base-url http://api.dev.homelab.local --auth-token dev-static-token --env dev
 ```
 
 ## Database Migrations (Alembic)
@@ -84,6 +88,15 @@ Active alerts feed config:
 - `ALERT_SEVERITY_WARNING_VALUES` (CSV, default: `warning,warn,info`)
 
 Severity mapping for `/alerts/active` is normalized to `warning|critical` for consistency with frontend badge tones.
+
+Service registry sync config:
+
+- `PORTAL_ENV` (default: `dev`)
+- `SERVICE_REGISTRY_SYNC_NAMESPACES` (CSV, default: `homelab-api,homelab-web`)
+- `SERVICE_REGISTRY_SYNC_ARGO_NAMESPACE` (default: `argocd`)
+- `KUBERNETES_API_URL` (optional override when not using in-cluster `KUBERNETES_SERVICE_HOST`/`PORT`)
+- `KUBERNETES_BEARER_TOKEN` (optional override for service-account token)
+- `REGISTRY_STALE_AFTER_MINUTES` (default: `30`) used by `/service-registry/diagnostics`
 
 Observability hardening config:
 

@@ -62,6 +62,50 @@ def test_projects_authorized_with_forwarded_user() -> None:
     assert response.status_code == 200
 
 
+def test_projects_list_does_not_seed_defaults_on_read(monkeypatch) -> None:
+    executed_sql: list[str] = []
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql: str, *_args, **_kwargs):
+            normalized = " ".join(sql.split()).upper()
+            executed_sql.append(normalized)
+            if normalized.startswith("INSERT INTO PROJECTS"):
+                raise AssertionError("GET /projects must not write seeded rows")
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+
+    response = client.get(
+        "/projects",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"projects": []}
+    assert any(
+        sql.startswith("SELECT SERVICE_ID, SERVICE_NAME, ENV FROM SERVICE_REGISTRY")
+        for sql in executed_sql
+    )
+
+
 def test_create_and_list_projects_with_valid_token() -> None:
     headers = {"Authorization": "Bearer dev-static-token"}
 
@@ -78,6 +122,18 @@ def test_create_and_list_projects_with_valid_token() -> None:
 
     project_ids = {project["id"] for project in list_response.json()["projects"]}
     assert "proj-e2e" in project_ids
+
+
+def test_create_project_normalizes_to_canonical_service_id() -> None:
+    headers = {"Authorization": "Bearer dev-static-token"}
+
+    response = client.post(
+        "/projects",
+        headers=headers,
+        json={"id": "Portal Project", "name": "Portal Project", "environment": "dev"},
+    )
+    assert response.status_code == 201
+    assert response.json()["id"] == "portal-project"
 
 
 def test_create_project_forbidden_for_non_admin_forwarded_user() -> None:
@@ -99,6 +155,150 @@ def test_create_project_allowed_for_admin_group() -> None:
         json={"id": "proj-admin", "name": "Allowed", "environment": "dev"},
     )
     assert response.status_code == 201
+
+
+def test_service_registry_sync_requires_auth() -> None:
+    response = client.post("/service-registry/sync")
+    assert response.status_code == 401
+
+
+def test_service_registry_sync_returns_summary_for_admin(monkeypatch) -> None:
+    class _ConnContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _ConnContext())
+    monkeypatch.setattr(
+        "app.main.sync_service_registry_from_cluster",
+        lambda conn: {
+            "correlationId": "cid-1",
+            "env": "dev",
+            "namespaces": ["homelab-api"],
+            "discovered": 2,
+            "upserted": 2,
+            "inserted": 1,
+            "updated": 1,
+            "sourceFailures": [],
+            "generatedAt": "2026-03-05T00:00:00+00:00",
+            "durationMs": 12,
+        },
+    )
+
+    response = client.post(
+        "/service-registry/sync",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["correlationId"] == "cid-1"
+    assert body["inserted"] == 1
+    assert body["updated"] == 1
+
+
+def test_service_registry_diagnostics_reports_empty_registry(monkeypatch) -> None:
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchone(self):
+            return (0, None)
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+    monkeypatch.setattr("app.main._load_project_rows", lambda: [])
+    monkeypatch.setattr("app.main.load_ci_metadata_rows", lambda: [])
+    monkeypatch.setattr("app.main.load_argo_metadata_rows", lambda: [])
+
+    response = client.get(
+        "/service-registry/diagnostics",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["freshness"]["rowCount"] == 0
+    assert body["freshness"]["state"] == "empty"
+    assert body["freshness"]["isStale"] is False
+    assert body["joinMismatch"]["ciUnmatchedCount"] == 0
+    assert body["joinMismatch"]["argoUnmatchedCount"] == 0
+
+
+def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
+    monkeypatch,
+) -> None:
+    stale_ts = "2026-03-01T00:00:00+00:00"
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchone(self):
+            from datetime import datetime
+
+            return (3, datetime.fromisoformat(stale_ts))
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setenv("REGISTRY_STALE_AFTER_MINUTES", "30")
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+    monkeypatch.setattr(
+        "app.main._load_project_rows",
+        lambda: [{"service_id": "homelab-api", "service_name": "Homelab API", "env": "dev"}],
+    )
+    monkeypatch.setattr(
+        "app.main.load_ci_metadata_rows",
+        lambda: [{"serviceId": "portal-project", "serviceName": "Portal Project", "env": "dev"}],
+    )
+    monkeypatch.setattr("app.main.load_argo_metadata_rows", lambda: [])
+
+    response = client.get(
+        "/service-registry/diagnostics?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["env"] == "dev"
+    assert body["freshness"]["rowCount"] == 3
+    assert body["freshness"]["state"] == "stale"
+    assert body["freshness"]["isStale"] is True
+    assert body["joinMismatch"]["ciUnmatchedCount"] == 1
+    assert body["joinMismatch"]["ciUnmatchedKeys"] == [
+        "portal-project|Portal Project|dev"
+    ]
 
 
 class _MockPrometheusResponse:

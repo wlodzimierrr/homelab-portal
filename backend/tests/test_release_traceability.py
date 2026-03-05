@@ -1,4 +1,5 @@
 from app.release_traceability import (
+    build_release_join_diagnostics,
     build_release_traceability_rows,
     compute_is_drifted,
 )
@@ -99,3 +100,55 @@ def test_build_release_rows_marks_drift_with_mismatch() -> None:
     assert rows[0]["drift"]["isDrifted"] is True
     assert rows[0]["drift"]["expectedRevision"] == "abc123"
     assert rows[0]["drift"]["liveRevision"] == "def456"
+
+
+def test_build_release_rows_maps_upstream_service_name_to_canonical_service_id() -> None:
+    rows = build_release_traceability_rows(
+        project_rows=[{"service_id": "portal-project", "service_name": "Portal Project", "env": "dev"}],
+        ci_rows=[
+            {
+                "serviceId": "Portal Project",
+                "env": "dev",
+                "commitSha": "abc123",
+                "expectedRevision": "abc123",
+            }
+        ],
+        argo_rows=[],
+        env_filter=None,
+        service_id_filter=None,
+        limit=50,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["serviceId"] == "portal-project"
+    assert rows[0]["commitSha"] == "abc123"
+
+
+def test_build_release_rows_logs_unmatched_upstream_keys(caplog) -> None:
+    caplog.set_level("WARNING")
+    rows = build_release_traceability_rows(
+        project_rows=[{"service_id": "homelab-api", "service_name": "homelab-api", "env": "dev"}],
+        ci_rows=[{"serviceId": "portal-project", "serviceName": "Portal Project", "env": "dev"}],
+        argo_rows=[],
+        env_filter=None,
+        service_id_filter=None,
+        limit=50,
+    )
+
+    assert len(rows) == 1
+    assert "release_join_mismatch source=ci key=portal-project|Portal Project|dev" in caplog.text
+
+
+def test_build_release_join_diagnostics_reports_unmatched_keys() -> None:
+    diagnostics = build_release_join_diagnostics(
+        project_rows=[{"service_id": "homelab-api", "service_name": "Homelab API", "env": "dev"}],
+        ci_rows=[{"serviceId": "portal-project", "serviceName": "Portal Project", "env": "dev"}],
+        argo_rows=[{"serviceId": "portal-project", "serviceName": "Portal Project", "env": "dev"}],
+        env_filter="dev",
+        service_id_filter=None,
+    )
+
+    assert diagnostics["ciUnmatchedCount"] == 1
+    assert diagnostics["argoUnmatchedCount"] == 1
+    assert diagnostics["ciUnmatchedKeys"] == ["portal-project|Portal Project|dev"]
+    assert diagnostics["argoUnmatchedKeys"] == ["portal-project|Portal Project|dev"]
