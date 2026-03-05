@@ -1,5 +1,5 @@
 import { getProjects, type Project } from '@/lib/api'
-import { createServiceIdentity, parseNamespaceFromInternalUrl, type ServiceIdentity } from '@/lib/service-identity'
+import { createServiceIdentity, normalizeServiceId, parseNamespaceFromInternalUrl, type ServiceIdentity } from '@/lib/service-identity'
 
 export type ServiceHealth = 'healthy' | 'degraded' | 'unknown'
 export type ServiceSync = 'synced' | 'out_of_sync' | 'unknown'
@@ -20,12 +20,6 @@ export interface ServiceRegistryItem {
   appLabel?: string
   argoAppName?: string
 }
-
-interface ServicesSamplePayload {
-  services?: Array<Partial<ServiceRegistryItem>>
-}
-
-const servicesSampleUrl = new URL('../../../services.sample.json', import.meta.url).toString()
 
 function normalizeHealthStatus(value?: string): ServiceHealth {
   if (!value) {
@@ -61,7 +55,8 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
   const grouped = new Map<string, ServiceRegistryItem>()
 
   for (const project of projects) {
-    const key = project.name.trim().toLowerCase()
+    const canonicalId = normalizeServiceId(project.name) || normalizeServiceId(project.id) || project.id.trim().toLowerCase()
+    const key = canonicalId
     const current = grouped.get(key)
     const nextHealth = normalizeHealthStatus(project.health)
     const nextSync = normalizeSyncStatus(project.sync)
@@ -69,7 +64,7 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
     if (!current) {
       const inferredNamespace = parseNamespaceFromInternalUrl(project.internalUrl) ?? 'default'
       grouped.set(key, {
-        id: project.name,
+        id: canonicalId,
         name: project.name,
         environments: [project.environment],
         health: nextHealth,
@@ -78,8 +73,8 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
         internalUrls: project.internalUrl ? [project.internalUrl] : undefined,
         lastDeployAt: project.lastDeployAt,
         namespace: inferredNamespace,
-        appLabel: project.name,
-        argoAppName: `${project.name}-${project.environment}`,
+        appLabel: canonicalId,
+        argoAppName: `${canonicalId}-${project.environment}`,
       })
       continue
     }
@@ -120,110 +115,16 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
   return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
-function adaptSampleToServices(payload: ServicesSamplePayload): ServiceRegistryItem[] {
-  if (!Array.isArray(payload.services)) {
-    return []
-  }
-
-  const adapted = payload.services
-    .map((service): ServiceRegistryItem | null => {
-      const id = typeof service.id === 'string' && service.id.trim() ? service.id.trim() : ''
-      const name = typeof service.name === 'string' && service.name.trim() ? service.name.trim() : id
-
-      if (!id || !name) {
-        return null
-      }
-
-      const normalized: ServiceRegistryItem = {
-        id,
-        name,
-        environments: Array.isArray(service.environments)
-          ? service.environments.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
-          : [],
-        health: normalizeHealthStatus(service.health),
-        sync: normalizeSyncStatus(service.sync),
-      }
-
-      if (typeof service.publicUrl === 'string') {
-        normalized.publicUrl = service.publicUrl
-      }
-
-      if (Array.isArray(service.internalUrls)) {
-        const internalUrls = service.internalUrls.filter(
-          (item): item is string => typeof item === 'string' && item.trim() !== ''
-        )
-        if (internalUrls.length > 0) {
-          normalized.internalUrls = internalUrls
-        }
-      }
-
-      if (typeof service.lastDeployAt === 'string') {
-        normalized.lastDeployAt = service.lastDeployAt
-      }
-
-      if (typeof service.uptime24hPct === 'number' && Number.isFinite(service.uptime24hPct)) {
-        normalized.uptime24hPct = service.uptime24hPct
-      }
-
-      if (typeof service.uptime7dPct === 'number' && Number.isFinite(service.uptime7dPct)) {
-        normalized.uptime7dPct = service.uptime7dPct
-      }
-
-      if (typeof service.metricsLastRefreshedAt === 'string') {
-        normalized.metricsLastRefreshedAt = service.metricsLastRefreshedAt
-      }
-
-      if (typeof service.namespace === 'string') {
-        normalized.namespace = service.namespace
-      }
-
-      if (typeof service.appLabel === 'string') {
-        normalized.appLabel = service.appLabel
-      }
-
-      if (typeof service.argoAppName === 'string') {
-        normalized.argoAppName = service.argoAppName
-      }
-
-      return normalized
-    })
-    .filter((item): item is ServiceRegistryItem => item !== null)
-
-  return adapted.sort((a, b) => a.name.localeCompare(b.name))
-}
-
-async function loadSampleServices() {
-  const response = await fetch(servicesSampleUrl)
-  if (!response.ok) {
-    throw new Error('Failed to load fallback services registry.')
-  }
-
-  const payload = (await response.json()) as ServicesSamplePayload
-  return adaptSampleToServices(payload)
-}
-
 export async function getServicesRegistry() {
-  let apiError: Error | null = null
-
   try {
     const response = await getProjects()
     const fromApi = adaptProjectsToServices(response.projects)
     if (fromApi.length > 0) {
       return fromApi
     }
+    throw new Error('Services registry API returned no services.')
   } catch (error) {
-    apiError = error instanceof Error ? error : new Error('Failed to load services from API.')
-  }
-
-  try {
-    return await loadSampleServices()
-  } catch (fallbackError) {
-    if (apiError) {
-      throw apiError
-    }
-    throw fallbackError instanceof Error
-      ? fallbackError
-      : new Error('Failed to load fallback services registry.')
+    throw error instanceof Error ? error : new Error('Failed to load services from API.')
   }
 }
 

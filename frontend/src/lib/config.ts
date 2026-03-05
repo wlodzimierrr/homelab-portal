@@ -102,7 +102,6 @@ export const config = {
   apiBaseUrl: env.VITE_API_BASE_URL ?? '/api',
   argoBaseUrl: env.VITE_ARGO_BASE_URL ?? '',
   grafanaBaseUrl: env.VITE_GRAFANA_BASE_URL ?? '',
-  enableReleaseSampleFallback: env.VITE_ENABLE_RELEASE_SAMPLE_FALLBACK === 'true',
   incidentBannerMinSeverity: env.VITE_INCIDENT_BANNER_MIN_SEVERITY ?? 'warning',
   metricsStaleAfterMinutes: readPositiveNumber(env.VITE_METRICS_STALE_AFTER_MINUTES, 20),
   argoAppPathTemplate: env.VITE_ARGO_APP_PATH_TEMPLATE ?? '/applications/{serviceId}',

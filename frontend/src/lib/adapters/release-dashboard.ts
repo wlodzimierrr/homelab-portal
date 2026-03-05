@@ -1,6 +1,7 @@
 import { ApiRequestError, getProjects, isApiRequestError, request, type Project } from '@/lib/api'
+import { getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
 import { buildArgoAppUrl } from '@/lib/config'
-import { config } from '@/lib/config'
+import { normalizeServiceId } from '@/lib/service-identity'
 
 export type ReleaseSyncStatus = 'synced' | 'out_of_sync' | 'unknown'
 export type ReleaseHealthStatus = 'healthy' | 'degraded' | 'unknown'
@@ -25,30 +26,6 @@ export interface ReleaseDashboardEntry {
   deployedAt?: string
 }
 
-interface ReleaseDashboardApiEntry {
-  id?: string
-  serviceId?: string
-  serviceName?: string
-  environment?: string
-  commitSha?: string
-  commitUrl?: string
-  desiredCommitSha?: string
-  image?: string
-  imageTag?: string
-  imageUrl?: string
-  desiredImage?: string
-  argoApp?: string
-  argoAppUrl?: string
-  sync?: string
-  health?: string
-  drift?: boolean
-  deployedAt?: string
-}
-
-interface ReleaseDashboardResponse {
-  releases?: ReleaseDashboardApiEntry[]
-}
-
 interface ReleaseTraceabilityApiRow {
   serviceId?: string
   env?: string
@@ -68,22 +45,39 @@ interface ReleaseTraceabilityApiRow {
   }
 }
 
-interface ReleaseDashboardSamplePayload {
-  releases?: ReleaseDashboardApiEntry[]
-}
-
-const releaseDashboardSampleUrl = new URL('../../../release-dashboard.sample.json', import.meta.url).toString()
 const releaseDashboardMissingStatuses = new Set([404, 405, 501])
-const enableSampleFallback = import.meta.env.DEV || config.enableReleaseSampleFallback
 
 type ReleaseDashboardApiAvailability = 'unknown' | 'available' | 'unavailable'
 let releaseDashboardApiAvailability: ReleaseDashboardApiAvailability = 'unknown'
 
-export type ReleaseDashboardSource = 'live_api' | 'projects_fallback' | 'sample_fallback'
+export type ReleaseDashboardSource = 'live_api' | 'projects_fallback'
+export type ReleaseDashboardLiveStatus = 'live_api' | 'fallback_projects'
 
 export interface ReleaseDashboardResult {
   rows: ReleaseDashboardEntry[]
   dataSource: ReleaseDashboardSource
+  liveStatus: ReleaseDashboardLiveStatus
+  unknownFieldCount: number
+  warnings: string[]
+}
+
+function countUnknownTraceabilityFields(rows: ReleaseDashboardEntry[]) {
+  let unknownFieldCount = 0
+  for (const row of rows) {
+    if (!row.commitSha) {
+      unknownFieldCount += 1
+    }
+    if (!row.image) {
+      unknownFieldCount += 1
+    }
+    if (!row.argoApp) {
+      unknownFieldCount += 1
+    }
+    if (!row.deployedAt) {
+      unknownFieldCount += 1
+    }
+  }
+  return unknownFieldCount
 }
 
 function normalizeSyncStatus(value?: string): ReleaseSyncStatus {
@@ -116,74 +110,12 @@ function normalizeHealthStatus(value?: string): ReleaseHealthStatus {
   return 'unknown'
 }
 
-function toEntry(input: ReleaseDashboardApiEntry): ReleaseDashboardEntry | null {
-  const serviceId = typeof input.serviceId === 'string' && input.serviceId.trim() ? input.serviceId.trim() : ''
-  const serviceName =
-    typeof input.serviceName === 'string' && input.serviceName.trim() ? input.serviceName.trim() : serviceId
-  const environment =
-    typeof input.environment === 'string' && input.environment.trim() ? input.environment.trim() : ''
-
-  if (!serviceId || !serviceName || !environment) {
-    return null
-  }
-
-  const image = typeof input.image === 'string' ? input.image : undefined
-  const desiredImage = typeof input.desiredImage === 'string' ? input.desiredImage : undefined
-  const commitSha = typeof input.commitSha === 'string' ? input.commitSha : undefined
-  const desiredCommitSha = typeof input.desiredCommitSha === 'string' ? input.desiredCommitSha : undefined
-
-  const driftSignals = [
-    normalizeSyncStatus(input.sync) === 'out_of_sync',
-    Boolean(desiredImage && image && desiredImage !== image),
-    Boolean(desiredCommitSha && commitSha && desiredCommitSha !== commitSha),
-    input.drift === true,
-  ]
-
-  return {
-    id:
-      typeof input.id === 'string' && input.id.trim()
-        ? input.id.trim()
-        : `${serviceId}:${environment}`,
-    serviceId,
-    serviceName,
-    environment,
-    commitSha,
-    commitUrl: typeof input.commitUrl === 'string' ? input.commitUrl : undefined,
-    desiredCommitSha,
-    image,
-    imageTag: typeof input.imageTag === 'string' ? input.imageTag : undefined,
-    imageUrl: typeof input.imageUrl === 'string' ? input.imageUrl : undefined,
-    desiredImage,
-    argoApp: typeof input.argoApp === 'string' ? input.argoApp : undefined,
-    argoAppUrl: typeof input.argoAppUrl === 'string' ? input.argoAppUrl : undefined,
-    sync: normalizeSyncStatus(input.sync),
-    health: normalizeHealthStatus(input.health),
-    drift: driftSignals.some(Boolean),
-    deployedAt: typeof input.deployedAt === 'string' ? input.deployedAt : undefined,
-  }
-}
-
-function adaptReleasePayload(payload: ReleaseDashboardResponse | ReleaseDashboardSamplePayload): ReleaseDashboardEntry[] {
-  if (!Array.isArray(payload.releases)) {
-    return []
-  }
-
-  return payload.releases
-    .map((entry) => toEntry(entry))
-    .filter((entry): entry is ReleaseDashboardEntry => entry !== null)
-    .sort((a, b) => {
-      if (a.serviceName === b.serviceName) {
-        return a.environment.localeCompare(b.environment)
-      }
-      return a.serviceName.localeCompare(b.serviceName)
-    })
-}
-
 function adaptLiveReleaseRows(rows: ReleaseTraceabilityApiRow[]): ReleaseDashboardEntry[] {
   return rows
     .map((row): ReleaseDashboardEntry | null => {
-      const serviceId =
+      const rawServiceId =
         typeof row.serviceId === 'string' && row.serviceId.trim() ? row.serviceId.trim() : ''
+      const serviceId = normalizeServiceId(rawServiceId) || rawServiceId
       const environment = typeof row.env === 'string' && row.env.trim() ? row.env.trim() : ''
 
       if (!serviceId || !environment) {
@@ -200,7 +132,7 @@ function adaptLiveReleaseRows(rows: ReleaseTraceabilityApiRow[]): ReleaseDashboa
       return {
         id: `${serviceId}:${environment}`,
         serviceId,
-        serviceName: serviceId,
+        serviceName: rawServiceId,
         environment,
         commitSha,
         desiredCommitSha: expectedRevision,
@@ -229,10 +161,11 @@ function adaptProjectsToReleaseRows(projects: Project[]): ReleaseDashboardEntry[
     .map((project) => {
       const sync = normalizeSyncStatus(project.sync)
       const health = normalizeHealthStatus(project.health)
+      const serviceId = normalizeServiceId(project.name) || normalizeServiceId(project.id) || project.id
 
       return {
         id: project.id,
-        serviceId: project.name,
+        serviceId,
         serviceName: project.name,
         environment: project.environment,
         sync,
@@ -249,14 +182,47 @@ function adaptProjectsToReleaseRows(projects: Project[]): ReleaseDashboardEntry[
     })
 }
 
-async function loadSampleReleaseDashboard() {
-  const response = await fetch(releaseDashboardSampleUrl)
-  if (!response.ok) {
-    throw new Error('Failed to load fallback release dashboard data.')
+function normalizeLookup(value: string) {
+  return normalizeServiceId(value) || value.trim().toLowerCase()
+}
+
+function joinRowsWithServices(rows: ReleaseDashboardEntry[], services: ServiceRegistryItem[]) {
+  const byId = new Map<string, ServiceRegistryItem>()
+  const byName = new Map<string, ServiceRegistryItem>()
+
+  for (const service of services) {
+    byId.set(normalizeLookup(service.id), service)
+    byName.set(normalizeLookup(service.name), service)
   }
 
-  const payload = (await response.json()) as ReleaseDashboardSamplePayload
-  return adaptReleasePayload(payload)
+  const unresolvedKeys: string[] = []
+
+  const joined = rows.map((row) => {
+    const match = byId.get(normalizeLookup(row.serviceId)) ?? byName.get(normalizeLookup(row.serviceName))
+    if (!match) {
+      unresolvedKeys.push(`${row.serviceId}|${row.serviceName}|${row.environment}`)
+      return row
+    }
+
+    return {
+      ...row,
+      serviceId: match.id,
+      serviceName: match.name,
+      argoApp: row.argoApp ?? match.argoAppName,
+    }
+  })
+
+  const unresolved = joined.filter((row) => {
+    const byServiceId = byId.has(normalizeLookup(row.serviceId))
+    const byServiceName = byName.has(normalizeLookup(row.serviceName))
+    return !byServiceId && !byServiceName
+  }).length
+
+  return {
+    rows: joined,
+    unresolved,
+    unresolvedKeys,
+  }
 }
 
 async function getReleaseDashboardFromApi() {
@@ -271,14 +237,15 @@ async function getReleaseDashboardFromApi() {
 
 export async function getReleaseDashboardEntries(): Promise<ReleaseDashboardResult> {
   let apiError: Error | null = null
+  let baseRows: ReleaseDashboardEntry[] = []
+  let dataSource: ReleaseDashboardSource = 'projects_fallback'
+  const warnings: string[] = []
 
   try {
     const fromApi = await getReleaseDashboardFromApi()
     if (fromApi.length > 0) {
-      return {
-        rows: fromApi,
-        dataSource: 'live_api',
-      }
+      baseRows = fromApi
+      dataSource = 'live_api'
     }
   } catch (error) {
     if (isApiRequestError(error) && releaseDashboardMissingStatuses.has(error.status)) {
@@ -288,12 +255,12 @@ export async function getReleaseDashboardEntries(): Promise<ReleaseDashboardResu
   }
 
   try {
-    const projects = await getProjects()
-    const fromProjects = adaptProjectsToReleaseRows(projects.projects)
-    if (fromProjects.length > 0) {
-      return {
-        rows: fromProjects,
-        dataSource: 'projects_fallback',
+    if (baseRows.length === 0) {
+      const projects = await getProjects()
+      const fromProjects = adaptProjectsToReleaseRows(projects.projects)
+      if (fromProjects.length > 0) {
+        baseRows = fromProjects
+        dataSource = 'projects_fallback'
       }
     }
   } catch (error) {
@@ -302,25 +269,40 @@ export async function getReleaseDashboardEntries(): Promise<ReleaseDashboardResu
     }
   }
 
-  if (!enableSampleFallback) {
-    if (apiError) {
-      throw apiError
+  if (baseRows.length > 0) {
+    try {
+      const services = await getServicesRegistry()
+      const joined = joinRowsWithServices(baseRows, services)
+      if (joined.unresolved > 0) {
+        warnings.push(
+          `Service identity join incomplete: ${joined.unresolved} release row(s) are not mapped to registry metadata.`,
+        )
+        const keysPreview = joined.unresolvedKeys.slice(0, 5).join(', ')
+        warnings.push(`Unmatched release keys: ${keysPreview}${joined.unresolvedKeys.length > 5 ? ', ...' : ''}`)
+      }
+      return {
+        rows: joined.rows,
+        dataSource,
+        liveStatus: dataSource === 'live_api' ? 'live_api' : 'fallback_projects',
+        unknownFieldCount: countUnknownTraceabilityFields(joined.rows),
+        warnings,
+      }
+    } catch (joinError) {
+      warnings.push(
+        `Service registry API unavailable: release rows rendered without registry identity join (${joinError instanceof Error ? joinError.message : 'unknown error'}).`,
+      )
+      return {
+        rows: baseRows,
+        dataSource,
+        liveStatus: dataSource === 'live_api' ? 'live_api' : 'fallback_projects',
+        unknownFieldCount: countUnknownTraceabilityFields(baseRows),
+        warnings,
+      }
     }
-    throw new Error('Release dashboard data unavailable and sample fallback disabled.')
   }
 
-  try {
-    return {
-      rows: await loadSampleReleaseDashboard(),
-      dataSource: 'sample_fallback',
-    }
-  } catch (fallbackError) {
-    if (apiError) {
-      throw apiError
-    }
-
-    throw fallbackError instanceof Error
-      ? fallbackError
-      : new Error('Failed to load fallback release dashboard data.')
+  if (apiError) {
+    throw apiError
   }
+  throw new Error('Release dashboard data unavailable from live API sources.')
 }

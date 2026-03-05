@@ -46,10 +46,6 @@ export interface PlatformIncidentFeed {
   warnings: string[]
 }
 
-interface IncidentsResponse {
-  incidents?: PlatformIncident[]
-}
-
 interface ActiveAlertItem {
   id?: string
   severity?: string
@@ -61,7 +57,6 @@ interface ActiveAlertItem {
   env?: string
 }
 
-const sampleUrl = new URL('../../../platform-health.sample.json', import.meta.url).toString()
 const incidentsMissingStatuses = new Set([404, 405, 501])
 
 type IncidentsApiAvailability = 'unknown' | 'available' | 'unavailable'
@@ -73,40 +68,6 @@ function normalizeSeverity(value?: string): IncidentSeverity {
   if (normalized === 'critical') return 'critical'
   if (normalized === 'warning') return 'warning'
   return 'info'
-}
-
-function normalizeStatus(value?: string): IncidentStatus {
-  if (!value) return 'active'
-  return value.trim().toLowerCase() === 'resolved' ? 'resolved' : 'active'
-}
-
-function normalizeIncidents(input: unknown): PlatformIncident[] {
-  if (!Array.isArray(input)) return []
-
-  return input
-    .map((raw, index): PlatformIncident | null => {
-      if (typeof raw !== 'object' || raw === null) return null
-      const item = raw as Record<string, unknown>
-      const id = typeof item.id === 'string' && item.id.trim() ? item.id : `incident-${index}`
-      const title = typeof item.title === 'string' && item.title.trim() ? item.title : 'Untitled incident'
-
-      return {
-        id,
-        title,
-        description: typeof item.description === 'string' ? item.description : undefined,
-        severity: normalizeSeverity(typeof item.severity === 'string' ? item.severity : undefined),
-        status: normalizeStatus(typeof item.status === 'string' ? item.status : undefined),
-        startedAt: typeof item.startedAt === 'string' ? item.startedAt : undefined,
-        source: typeof item.source === 'string' ? item.source : undefined,
-        serviceId: typeof item.serviceId === 'string' ? item.serviceId : undefined,
-      }
-    })
-    .filter((item): item is PlatformIncident => item !== null)
-    .sort((a, b) => {
-      const left = a.startedAt ? new Date(a.startedAt).getTime() : 0
-      const right = b.startedAt ? new Date(b.startedAt).getTime() : 0
-      return right - left
-    })
 }
 
 function normalizeActiveAlerts(input: unknown): PlatformIncident[] {
@@ -143,29 +104,9 @@ async function getIncidentsFromApi() {
     throw new ApiRequestError('Alerts endpoint is not available in this backend.', 404)
   }
 
-  try {
-    const response = await request<ActiveAlertItem[]>('/alerts/active')
-    incidentsApiAvailability = 'available'
-    return normalizeActiveAlerts(response)
-  } catch (error) {
-    if (!(isApiRequestError(error) && incidentsMissingStatuses.has(error.status))) {
-      throw error
-    }
-  }
-
-  const compat = await request<IncidentsResponse>('/monitoring/incidents')
+  const response = await request<ActiveAlertItem[]>('/alerts/active')
   incidentsApiAvailability = 'available'
-  return normalizeIncidents(compat.incidents)
-}
-
-async function getIncidentsFromSample() {
-  const response = await fetch(sampleUrl)
-  if (!response.ok) {
-    throw new Error('Failed to load platform health sample incidents.')
-  }
-
-  const payload = (await response.json()) as IncidentsResponse
-  return normalizeIncidents(payload.incidents)
+  return normalizeActiveAlerts(response)
 }
 
 async function buildServiceHealthItems(services: ServiceRegistryItem[]): Promise<PlatformServiceHealthItem[]> {
@@ -242,12 +183,7 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
     ) {
       incidentsApiAvailability = 'unavailable'
     }
-    warnings.push('Active alerts feed unavailable, using sample incident feed.')
-    try {
-      incidents = await getIncidentsFromSample()
-    } catch {
-      warnings.push('Sample incidents unavailable.')
-    }
+    warnings.push('Active alerts feed unavailable from /api/alerts/active.')
   }
 
   const unhealthyServices = serviceHealthItems
@@ -285,14 +221,7 @@ export async function getPlatformIncidentFeed(): Promise<PlatformIncidentFeed> {
     if (isApiRequestError(error) && incidentsMissingStatuses.has(error.status)) {
       incidentsApiAvailability = 'unavailable'
     }
-    warnings.push('Active alerts feed unavailable, using sample incident feed.')
-  }
-
-  try {
-    const incidents = await getIncidentsFromSample()
-    return { incidents, warnings }
-  } catch {
-    warnings.push('Sample incidents unavailable.')
+    warnings.push('Active alerts feed unavailable from /api/alerts/active.')
     return { incidents: [], warnings }
   }
 }

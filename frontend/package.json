@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "test:unit": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/**/*.test.js && rm -rf .tmp-tests",
+    "test:live-smoke": "bash ./scripts/live_data_smoke.sh",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "preview": "vite preview"

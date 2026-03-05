@@ -22,8 +22,6 @@ export interface DeploymentHistoryItem {
 
 interface DeploymentHistoryOptions {
   limit?: number
-  preferBackend?: boolean
-  fallbackToMock?: boolean
 }
 
 function resolveIdentity(input: ServiceIdentity | string) {
@@ -60,59 +58,6 @@ function sortByNewest(items: DeploymentHistoryItem[]) {
     const left = a.deployedAt ? new Date(a.deployedAt).getTime() : 0
     const right = b.deployedAt ? new Date(b.deployedAt).getTime() : 0
     return right - left
-  })
-}
-
-function createMockDeployments(identity: ServiceIdentity, limit: number): DeploymentHistoryItem[] {
-  const outcomes = ['succeeded', 'succeeded', 'degraded', 'failed', 'succeeded', 'unknown']
-  const now = Date.now()
-  const count = Math.max(limit, 10)
-
-  return Array.from({ length: count }, (_, index) => {
-    const missingComparison = index % 5 === 4
-    const baselineError = 0.4 + index * 0.05
-    const baselineLatency = 180 + index * 12
-    const baselineAvailability = 99.95 - index * 0.02
-    const regressionFactor = index % 3 === 0 ? 1.4 : index % 3 === 1 ? 0.9 : 1.1
-
-    const errorRatePct: DeploymentMetricSnapshot = missingComparison
-      ? {}
-      : {
-          before: Number(baselineError.toFixed(2)),
-          after: Number((baselineError * regressionFactor).toFixed(2)),
-        }
-    const p95LatencyMs: DeploymentMetricSnapshot = missingComparison
-      ? {}
-      : {
-          before: Number(baselineLatency.toFixed(0)),
-          after: Number((baselineLatency * regressionFactor).toFixed(0)),
-        }
-    const availabilityPct: DeploymentMetricSnapshot = missingComparison
-      ? {}
-      : {
-          before: Number(baselineAvailability.toFixed(2)),
-          after: Number((baselineAvailability - (regressionFactor - 1) * 0.25).toFixed(2)),
-        }
-
-    attachDelta(errorRatePct)
-    attachDelta(p95LatencyMs)
-    attachDelta(availabilityPct)
-
-    const hasComparisonWindow =
-      hasSnapshotValues(errorRatePct) || hasSnapshotValues(p95LatencyMs) || hasSnapshotValues(availabilityPct)
-
-    return {
-      id: `${identity.serviceId}-mock-deploy-${index + 1}`,
-      identity,
-      version: `v0.1.${count - index}`,
-      outcome: outcomes[index % outcomes.length],
-      deployedAt: new Date(now - index * 1000 * 60 * 60 * 8).toISOString(),
-      errorRatePct,
-      p95LatencyMs,
-      availabilityPct,
-      hasComparisonWindow,
-      regressionScore: computeRegressionScore(errorRatePct, p95LatencyMs, availabilityPct),
-    }
   })
 }
 
@@ -181,7 +126,6 @@ function computeRegressionScore(
   return Number((errorPenalty + latencyPenalty + availabilityPenalty).toFixed(3))
 }
 
-// TODO: Replace mock fallback with a dedicated backend adapter once deployment-history API is finalized.
 export async function getDeploymentHistory(
   service: ServiceIdentity | string,
   options: DeploymentHistoryOptions = {},
@@ -189,27 +133,11 @@ export async function getDeploymentHistory(
   const identity = resolveIdentity(service)
   const serviceId = identity.serviceId
   const limit = options.limit ?? 10
-  const preferBackend = options.preferBackend ?? true
-  const fallbackToMock = options.fallbackToMock ?? true
 
   if (!serviceId.trim()) {
     throw new Error('Service ID is required to load deployment history.')
   }
 
-  if (preferBackend) {
-    try {
-      const response = await getServiceDeployments(serviceId)
-      const normalized = sortByNewest(response.deployments.map((item) => normalizeDeployment(item, identity))).slice(0, limit)
-
-      if (normalized.length > 0 || !fallbackToMock) {
-        return normalized
-      }
-    } catch (error) {
-      if (!fallbackToMock) {
-        throw error
-      }
-    }
-  }
-
-  return createMockDeployments(identity, limit).slice(0, limit)
+  const response = await getServiceDeployments(serviceId)
+  return sortByNewest(response.deployments.map((item) => normalizeDeployment(item, identity))).slice(0, limit)
 }

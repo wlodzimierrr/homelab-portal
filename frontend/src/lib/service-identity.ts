@@ -33,8 +33,24 @@ export function parseNamespaceFromInternalUrl(url?: string) {
   return undefined
 }
 
+export function normalizeServiceId(value: string | undefined) {
+  const trimmed = value?.trim().toLowerCase() ?? ''
+  if (!trimmed) {
+    return ''
+  }
+
+  const normalized = trimmed
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+    .replace(/-+/g, '-')
+
+  return normalized || trimmed
+}
+
 export function createServiceIdentity(input: Partial<ServiceIdentity> & { serviceId: string }): ServiceIdentity {
-  const serviceId = safeTrim(input.serviceId, 'unknown-service')
+  const canonicalServiceId = normalizeServiceId(input.serviceId)
+  const serviceId = safeTrim(canonicalServiceId, 'unknown-service')
   const env = safeTrim(input.env, DEFAULT_ENV)
   const serviceName = safeTrim(input.serviceName, serviceId)
   const namespace = safeTrim(input.namespace, DEFAULT_NAMESPACE)

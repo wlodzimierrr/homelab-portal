@@ -4,11 +4,13 @@ import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
+import { isApiAuthDiagnosticError, type ApiAuthDiagnostic } from '@/lib/api'
 import {
   getReleaseDashboardEntries,
   type ReleaseDashboardEntry,
   type ReleaseHealthStatus,
   type ReleaseDashboardSource,
+  type ReleaseDashboardLiveStatus,
   type ReleaseSyncStatus,
 } from '@/lib/adapters/release-dashboard'
 import { cn } from '@/lib/utils'
@@ -89,16 +91,38 @@ function DataSourceBadge({ source }: { source: ReleaseDashboardSource }) {
   const config =
     source === 'live_api'
       ? { label: 'Live', tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' }
-      : source === 'projects_fallback'
-        ? { label: 'Fallback: Projects', tone: 'bg-amber-500/10 text-amber-700 dark:text-amber-300' }
-        : { label: 'Fallback: Sample', tone: 'bg-sky-500/10 text-sky-700 dark:text-sky-300' }
+      : { label: 'Fallback: Projects', tone: 'bg-amber-500/10 text-amber-700 dark:text-amber-300' }
 
   return <span className={cn('inline-flex rounded-full px-2 py-1 text-xs font-medium', config.tone)}>{config.label}</span>
+}
+
+function LiveStatusBadge({ status }: { status: ReleaseDashboardLiveStatus }) {
+  const config =
+    status === 'live_api'
+      ? { label: 'Live source: API', tone: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' }
+      : { label: 'Live source: Projects fallback', tone: 'bg-amber-500/10 text-amber-700 dark:text-amber-300' }
+
+  return <span className={cn('inline-flex rounded-full px-2 py-1 text-xs font-medium', config.tone)}>{config.label}</span>
+}
+
+function UnknownValue({ source }: { source: ReleaseDashboardSource }) {
+  const label = source === 'live_api' ? 'Upstream unknown' : 'Unavailable from fallback source'
+  return <span className="text-xs text-muted-foreground">{label}</span>
+}
+
+function UnknownCountCard({ count, source }: { count: number; source: ReleaseDashboardSource }) {
+  const label = source === 'live_api' ? 'Unknown upstream fields' : 'Unknown source fields'
+  const tone = count > 0 ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'
+  return <SummaryCard label={label} value={String(count)} tone={tone} />
 }
 
 export function DashboardPage() {
   const [rows, setRows] = useState<ReleaseDashboardEntry[]>([])
   const [dataSource, setDataSource] = useState<ReleaseDashboardSource>('projects_fallback')
+  const [liveStatus, setLiveStatus] = useState<ReleaseDashboardLiveStatus>('fallback_projects')
+  const [unknownFieldCount, setUnknownFieldCount] = useState(0)
+  const [warnings, setWarnings] = useState<string[]>([])
+  const [authDiagnostic, setAuthDiagnostic] = useState<ApiAuthDiagnostic | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
@@ -107,14 +131,27 @@ export function DashboardPage() {
   const loadDashboard = useCallback(async () => {
     setIsLoading(true)
     setError('')
+    setAuthDiagnostic(null)
 
     try {
       const result = await getReleaseDashboardEntries()
       setRows(result.rows)
       setDataSource(result.dataSource)
+      setLiveStatus(result.liveStatus)
+      setUnknownFieldCount(result.unknownFieldCount)
+      setWarnings(result.warnings)
     } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : 'Failed to load release dashboard'
-      setError(message)
+      if (isApiAuthDiagnosticError(requestError)) {
+        setAuthDiagnostic(requestError.diagnostic)
+        setError('')
+      } else {
+        const message = requestError instanceof Error ? requestError.message : 'Failed to load release dashboard'
+        setError(message)
+      }
+      setLiveStatus('fallback_projects')
+      setUnknownFieldCount(0)
+      setWarnings([])
+      setRows([])
     } finally {
       setIsLoading(false)
     }
@@ -172,14 +209,42 @@ export function DashboardPage() {
       description="Trace commits to deployed images and Argo CD sync state, with explicit drift visibility."
     >
       <div className="space-y-4">
-        <div className="flex items-center justify-end">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <LiveStatusBadge status={liveStatus} />
           <DataSourceBadge source={dataSource} />
         </div>
-        <div className="grid gap-3 md:grid-cols-4">
+        {!isLoading && !error && warnings.length > 0 ? (
+          <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-900 dark:text-amber-200">Partial data warning</p>
+            <ul className="mt-1 space-y-1 text-xs text-amber-900 dark:text-amber-200">
+              {warnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {!isLoading && authDiagnostic ? (
+          <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-900 dark:text-amber-200">Auth/session diagnostics</p>
+            <p className="mt-1 text-xs text-amber-900 dark:text-amber-200">{authDiagnostic.summary}</p>
+            <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-amber-900 dark:text-amber-200">
+              {authDiagnostic.hints.map((hint) => (
+                <li key={hint}>{hint}</li>
+              ))}
+            </ul>
+            {authDiagnostic.responseUrl ? (
+              <p className="mt-2 break-all text-xs text-amber-900 dark:text-amber-200">
+                Gateway target: {authDiagnostic.responseUrl}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="grid gap-3 md:grid-cols-5">
           <SummaryCard label="Tracked releases" value={String(summary.total)} />
           <SummaryCard label="Synced" value={String(summary.syncedCount)} tone="text-emerald-700 dark:text-emerald-300" />
           <SummaryCard label="Drift" value={String(summary.driftCount)} tone="text-amber-700 dark:text-amber-300" />
           <SummaryCard label="Degraded" value={String(summary.degradedCount)} tone="text-rose-700 dark:text-rose-300" />
+          <UnknownCountCard count={unknownFieldCount} source={dataSource} />
         </div>
 
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
@@ -208,7 +273,7 @@ export function DashboardPage() {
         {isLoading ? <LoadingState label="Loading release dashboard..." rows={5} /> : null}
         {!isLoading && error ? <ErrorState message={error} onRetry={() => void loadDashboard()} /> : null}
         {!isLoading && !error && rows.length === 0 ? (
-          <EmptyState title="No release data available yet." description="Connect API release metadata or provide sample data." />
+          <EmptyState title="No release data available yet." description="Connect release metadata and service registry APIs." />
         ) : null}
         {!isLoading && !error && rows.length > 0 && filteredRows.length === 0 ? (
           <EmptyState title="No releases match your filters." description="Try a different query or include non-drifted releases." />
@@ -249,7 +314,11 @@ export function DashboardPage() {
                           {shortSha(row.commitSha)}
                         </a>
                       ) : (
-                        <span className="font-mono text-muted-foreground">{shortSha(row.commitSha)}</span>
+                        row.commitSha ? (
+                          <span className="font-mono text-muted-foreground">{shortSha(row.commitSha)}</span>
+                        ) : (
+                          <UnknownValue source={dataSource} />
+                        )
                       )}
                       {row.desiredCommitSha && row.desiredCommitSha !== row.commitSha ? (
                         <p className="mt-1 font-mono text-xs text-amber-700 dark:text-amber-300">
@@ -268,7 +337,11 @@ export function DashboardPage() {
                           {row.imageTag ?? row.image}
                         </a>
                       ) : (
-                        <span className="break-all text-muted-foreground">{row.imageTag ?? row.image ?? 'N/A'}</span>
+                        row.image || row.imageTag ? (
+                          <span className="break-all text-muted-foreground">{row.imageTag ?? row.image}</span>
+                        ) : (
+                          <UnknownValue source={dataSource} />
+                        )
                       )}
                       {row.desiredImage && row.desiredImage !== row.image ? (
                         <p className="mt-1 break-all text-xs text-amber-700 dark:text-amber-300">desired: {row.desiredImage}</p>
@@ -292,12 +365,16 @@ export function DashboardPage() {
                         ) : (
                           <p className="text-xs text-muted-foreground">{row.argoApp}</p>
                         )
-                      ) : null}
+                      ) : (
+                        <UnknownValue source={dataSource} />
+                      )}
                     </td>
                     <td className="px-3 py-3">
                       <DriftBadge drift={row.drift} />
                     </td>
-                    <td className="px-3 py-3 text-muted-foreground">{formatDate(row.deployedAt)}</td>
+                    <td className="px-3 py-3 text-muted-foreground">
+                      {row.deployedAt ? formatDate(row.deployedAt) : <UnknownValue source={dataSource} />}
+                    </td>
                   </tr>
                 ))}
               </tbody>

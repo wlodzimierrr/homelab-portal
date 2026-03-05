@@ -35,18 +35,6 @@ interface ApiPayload {
   segments?: ApiSegment[]
 }
 
-interface SampleEntry {
-  serviceId?: string
-  lastRefreshedAt?: string
-  timelines?: Partial<Record<TimelineWindow, ApiSegment[]>>
-}
-
-interface SamplePayload {
-  services?: SampleEntry[]
-}
-
-const sampleUrl = new URL('../../../service-health-timeline.sample.json', import.meta.url).toString()
-
 function normalizeStatus(value?: string): TimelineStatus {
   if (!value) {
     return 'unknown'
@@ -125,47 +113,12 @@ async function getFromApi(serviceId: string, window: TimelineWindow) {
   return payload
 }
 
-async function getFromSample(serviceId: string, window: TimelineWindow) {
-  const response = await fetch(sampleUrl)
-  if (!response.ok) {
-    throw new Error('Failed to load service health timeline sample data.')
-  }
-
-  const payload = (await response.json()) as SamplePayload
-  const match = payload.services?.find((entry) => {
-    if (typeof entry.serviceId !== 'string') return false
-    return entry.serviceId.trim().toLowerCase() === serviceId.trim().toLowerCase()
-  })
-
-  if (!match) {
-    return undefined
-  }
-
-  return {
-    serviceId,
-    window,
-    lastRefreshedAt: typeof match.lastRefreshedAt === 'string' ? match.lastRefreshedAt : undefined,
-    segments: adaptSegments(match.timelines?.[window]),
-  }
-}
-
 export async function getServiceHealthTimeline(service: ServiceIdentity | string, window: TimelineWindow = '24h') {
   const identity = resolveIdentity(service)
 
   try {
     return adaptApi(identity, window, await getFromApi(identity.serviceId, window))
   } catch {
-    try {
-      const fromSample = await getFromSample(identity.serviceId, window)
-      if (!fromSample) {
-        return emptyTimeline(identity, window)
-      }
-      return {
-        ...fromSample,
-        identity,
-      }
-    } catch {
-      return emptyTimeline(identity, window)
-    }
+    return emptyTimeline(identity, window)
   }
 }

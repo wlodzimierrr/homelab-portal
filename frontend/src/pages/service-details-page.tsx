@@ -12,11 +12,11 @@ import { Button } from '@/components/ui/button'
 import {
   getProjects,
   getService,
-  getServiceDeployments,
   type Project,
   type ServiceDeployment,
   type ServiceEndpoint,
 } from '@/lib/api'
+import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import {
   createEmptyServiceMetricsSummary,
   getServiceMetricsSummary,
@@ -127,16 +127,6 @@ function safeDecodeServiceId(rawServiceId: string) {
   } catch {
     return rawServiceId
   }
-}
-
-function createMockDeployments(serviceId: string): ServiceDeployment[] {
-  const now = Date.now()
-  return [0, 1, 2, 3, 4].map((offset) => ({
-    id: `${serviceId}-mock-${offset + 1}`,
-    version: `v0.0.${9 - offset}`,
-    status: offset === 2 ? 'degraded' : 'succeeded',
-    deployedAt: new Date(now - offset * 1000 * 60 * 60 * 24).toISOString(),
-  }))
 }
 
 function getMetricSeverity(
@@ -330,10 +320,14 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [logsResult, setLogsResult] = useState<ServiceLogsQuickView | null>(null)
   const [logsLoading, setLogsLoading] = useState(false)
   const [logsError, setLogsError] = useState('')
+  const [deploymentHistoryUnavailable, setDeploymentHistoryUnavailable] = useState(false)
+  const [deploymentHistoryError, setDeploymentHistoryError] = useState('')
 
   const loadOverview = useCallback(async () => {
     setIsLoading(true)
     setError('')
+    setDeploymentHistoryUnavailable(false)
+    setDeploymentHistoryError('')
 
     try {
       const identity = await getServiceIdentity(decodedServiceId).catch(() =>
@@ -344,7 +338,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       const [serviceResult, projectsResult, deploymentsResult] = await Promise.allSettled([
         getService(decodedServiceId),
         getProjects(),
-        getServiceDeployments(decodedServiceId),
+        getDeploymentHistory(identity, { limit: 20 }),
       ])
 
       const fallback =
@@ -365,7 +359,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 serviceResult.value.publicUrl,
                 serviceResult.value.internalUrls,
               ),
-              deployments: serviceResult.value.deployments ?? [],
+              deployments: [],
             }
           : fallback
 
@@ -373,12 +367,20 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
         finalOverview.endpoints = fallback.endpoints
       }
 
-      if (deploymentsResult.status === 'fulfilled' && deploymentsResult.value.deployments.length > 0) {
-        finalOverview.deployments = deploymentsResult.value.deployments
-      }
-
-      if (finalOverview.deployments.length === 0) {
-        finalOverview.deployments = createMockDeployments(decodedServiceId)
+      if (deploymentsResult.status === 'fulfilled') {
+        finalOverview.deployments = deploymentsResult.value.map((deployment) => ({
+          id: deployment.id,
+          version: deployment.version,
+          status: deployment.outcome,
+          deployedAt: deployment.deployedAt,
+        }))
+      } else {
+        setDeploymentHistoryUnavailable(true)
+        setDeploymentHistoryError(
+          deploymentsResult.reason instanceof Error
+            ? deploymentsResult.reason.message
+            : 'Deployment history is unavailable right now.',
+        )
       }
 
       setOverview(finalOverview)
@@ -897,30 +899,48 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                   Open full history
                 </AppLink>
               </div>
-              <div className="overflow-x-auto rounded-md border border-border">
-                <table className="min-w-full text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-border">
-                      <th className="px-3 py-2 font-medium text-muted-foreground">Version</th>
-                      <th className="px-3 py-2 font-medium text-muted-foreground">Outcome</th>
-                      <th className="px-3 py-2 font-medium text-muted-foreground">Deployed At</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {overview.deployments.slice(0, 5).map((deployment) => (
-                      <tr key={deployment.id} className="border-b border-border/70">
-                        <td className="px-3 py-2">{deployment.version ?? 'N/A'}</td>
-                        <td className="px-3 py-2">
-                          <span className="inline-flex items-center rounded-full bg-muted px-2 py-1 text-xs font-medium text-muted-foreground">
-                            State: {deployment.status ?? 'unknown'}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 text-muted-foreground">{formatDate(deployment.deployedAt)}</td>
+              {deploymentHistoryUnavailable ? (
+                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                  <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
+                    Deployment history unavailable
+                  </p>
+                  <p className="mt-1 text-xs text-amber-900 dark:text-amber-200">
+                    {deploymentHistoryError || 'Live deployment history could not be loaded.'}
+                  </p>
+                  <Button type="button" size="sm" variant="outline" className="mt-3" onClick={() => void loadOverview()}>
+                    Retry deployment history
+                  </Button>
+                </div>
+              ) : overview.deployments.length === 0 ? (
+                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                  No deployments found for this service yet.
+                </p>
+              ) : (
+                <div className="overflow-x-auto rounded-md border border-border">
+                  <table className="min-w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-border">
+                        <th className="px-3 py-2 font-medium text-muted-foreground">Version</th>
+                        <th className="px-3 py-2 font-medium text-muted-foreground">Outcome</th>
+                        <th className="px-3 py-2 font-medium text-muted-foreground">Deployed At</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {overview.deployments.slice(0, 5).map((deployment) => (
+                        <tr key={deployment.id} className="border-b border-border/70">
+                          <td className="px-3 py-2">{deployment.version ?? 'N/A'}</td>
+                          <td className="px-3 py-2">
+                            <span className="inline-flex items-center rounded-full bg-muted px-2 py-1 text-xs font-medium text-muted-foreground">
+                              State: {deployment.status ?? 'unknown'}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-muted-foreground">{formatDate(deployment.deployedAt)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </section>
           </>
         ) : null}
