@@ -86,6 +86,17 @@ The frontend uses an API-first services adapter and falls back to `services.samp
 - Sample file path: `apps/portal/frontend/services.sample.json`
 - Adapter path: `apps/portal/frontend/src/lib/adapters/services.ts`
 
+### Release dashboard fallback (T4.3.1)
+
+The dashboard uses API-first release metadata and falls back to local sample data when release metadata APIs are not available yet.
+
+- Sample file path: `apps/portal/frontend/release-dashboard.sample.json`
+- Adapter path: `apps/portal/frontend/src/lib/adapters/release-dashboard.ts`
+- Current load order:
+  - `GET /api/release-dashboard` (if implemented)
+  - `GET /api/projects` (minimal status-only mapping)
+  - local sample payload
+
 ## Available scripts
 
 - `npm run dev` - start Vite dev server

@@ -1,0 +1,42 @@
+{
+  "releases": [
+    {
+      "id": "homelab-api-dev",
+      "serviceId": "homelab-api",
+      "serviceName": "homelab-api",
+      "environment": "dev",
+      "commitSha": "f6b4cc9f605c8f1d80aa2f00e34e95993f4f34a2",
+      "commitUrl": "https://github.com/wlodzimierrr/homelab/commit/f6b4cc9f605c8f1d80aa2f00e34e95993f4f34a2",
+      "desiredCommitSha": "f6b4cc9f605c8f1d80aa2f00e34e95993f4f34a2",
+      "image": "ghcr.io/wlodzimierrr/homelab-api:sha-f6b4cc9f605c8f1d80aa2f00e34e95993f4f34a2",
+      "imageTag": "sha-f6b4cc9f605c8f1d80aa2f00e34e95993f4f34a2",
+      "imageUrl": "https://github.com/wlodzimierrr/homelab/pkgs/container/homelab-api",
+      "desiredImage": "ghcr.io/wlodzimierrr/homelab-api:sha-f6b4cc9f605c8f1d80aa2f00e34e95993f4f34a2",
+      "argoApp": "homelab-api-dev",
+      "argoAppUrl": "https://argo.wlodzimierrr.co.uk/applications/homelab-api-dev",
+      "sync": "synced",
+      "health": "healthy",
+      "drift": false,
+      "deployedAt": "2026-03-04T08:10:00Z"
+    },
+    {
+      "id": "homelab-web-dev",
+      "serviceId": "homelab-web",
+      "serviceName": "homelab-web",
+      "environment": "dev",
+      "commitSha": "8f5a6df46791f7a11b6018dea151280698f4cc43",
+      "commitUrl": "https://github.com/wlodzimierrr/homelab/commit/8f5a6df46791f7a11b6018dea151280698f4cc43",
+      "desiredCommitSha": "24f3e5cad9c816bafad76d2ac34d08d40f0e32a6",
+      "image": "ghcr.io/wlodzimierrr/homelab-web:sha-8f5a6df46791f7a11b6018dea151280698f4cc43",
+      "imageTag": "sha-8f5a6df46791f7a11b6018dea151280698f4cc43",
+      "imageUrl": "https://github.com/wlodzimierrr/homelab/pkgs/container/homelab-web",
+      "desiredImage": "ghcr.io/wlodzimierrr/homelab-web:sha-24f3e5cad9c816bafad76d2ac34d08d40f0e32a6",
+      "argoApp": "homelab-web-dev",
+      "argoAppUrl": "https://argo.wlodzimierrr.co.uk/applications/homelab-web-dev",
+      "sync": "out_of_sync",
+      "health": "degraded",
+      "drift": true,
+      "deployedAt": "2026-03-04T08:14:00Z"
+    }
+  ]
+}
