@@ -1,4 +1,5 @@
 import { request } from '@/lib/api'
+import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export type TimelineStatus = 'healthy' | 'degraded' | 'down' | 'unknown'
 export type TimelineWindow = '6h' | '24h' | '7d'
@@ -13,6 +14,7 @@ export interface ServiceHealthTimelineSegment {
 
 export interface ServiceHealthTimeline {
   serviceId: string
+  identity: ServiceIdentity
   window: TimelineWindow
   lastRefreshedAt?: string
   segments: ServiceHealthTimelineSegment[]
@@ -90,17 +92,26 @@ function adaptSegments(segments: ApiSegment[] | undefined): ServiceHealthTimelin
   return adapted.sort((a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime())
 }
 
-function emptyTimeline(serviceId: string, window: TimelineWindow): ServiceHealthTimeline {
+function resolveIdentity(input: ServiceIdentity | string) {
+  if (typeof input === 'string') {
+    return createServiceIdentity({ serviceId: input })
+  }
+  return createServiceIdentity(input)
+}
+
+function emptyTimeline(identity: ServiceIdentity, window: TimelineWindow): ServiceHealthTimeline {
   return {
-    serviceId,
+    serviceId: identity.serviceId,
+    identity,
     window,
     segments: [],
   }
 }
 
-function adaptApi(serviceId: string, window: TimelineWindow, payload: ApiPayload): ServiceHealthTimeline {
+function adaptApi(identity: ServiceIdentity, window: TimelineWindow, payload: ApiPayload): ServiceHealthTimeline {
   return {
-    serviceId: typeof payload.serviceId === 'string' ? payload.serviceId : serviceId,
+    serviceId: typeof payload.serviceId === 'string' ? payload.serviceId : identity.serviceId,
+    identity,
     window: asWindow(payload.window ?? window),
     lastRefreshedAt: typeof payload.lastRefreshedAt === 'string' ? payload.lastRefreshedAt : undefined,
     segments: adaptSegments(payload.segments),
@@ -111,7 +122,7 @@ async function getFromApi(serviceId: string, window: TimelineWindow) {
   const payload = await request<ApiPayload>(
     `/services/${encodeURIComponent(serviceId)}/health-timeline?range=${encodeURIComponent(window)}`,
   )
-  return adaptApi(serviceId, window, payload)
+  return payload
 }
 
 async function getFromSample(serviceId: string, window: TimelineWindow) {
@@ -127,7 +138,7 @@ async function getFromSample(serviceId: string, window: TimelineWindow) {
   })
 
   if (!match) {
-    return emptyTimeline(serviceId, window)
+    return undefined
   }
 
   return {
@@ -138,14 +149,23 @@ async function getFromSample(serviceId: string, window: TimelineWindow) {
   }
 }
 
-export async function getServiceHealthTimeline(serviceId: string, window: TimelineWindow = '24h') {
+export async function getServiceHealthTimeline(service: ServiceIdentity | string, window: TimelineWindow = '24h') {
+  const identity = resolveIdentity(service)
+
   try {
-    return await getFromApi(serviceId, window)
+    return adaptApi(identity, window, await getFromApi(identity.serviceId, window))
   } catch {
     try {
-      return await getFromSample(serviceId, window)
+      const fromSample = await getFromSample(identity.serviceId, window)
+      if (!fromSample) {
+        return emptyTimeline(identity, window)
+      }
+      return {
+        ...fromSample,
+        identity,
+      }
     } catch {
-      return emptyTimeline(serviceId, window)
+      return emptyTimeline(identity, window)
     }
   }
 }

@@ -1,5 +1,6 @@
 import { clearToken, getToken } from '@/lib/auth'
 import { config } from '@/lib/config'
+import type { ServiceIdentity } from '@/lib/service-identity'
 
 export const UNAUTHORIZED_EVENT = 'portal:unauthorized'
 const serviceEndpointMissingStatuses = new Set([404, 405, 501])
@@ -80,6 +81,11 @@ export interface ServiceDeployment {
 export interface ServiceDetails {
   id: string
   name: string
+  namespace?: string
+  env?: string
+  appLabel?: string
+  argoAppName?: string
+  identity?: Partial<ServiceIdentity>
   version?: string
   health?: string
   sync?: string

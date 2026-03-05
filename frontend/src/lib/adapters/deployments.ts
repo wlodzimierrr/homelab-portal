@@ -1,4 +1,5 @@
 import { getServiceDeployments, type ServiceDeployment } from '@/lib/api'
+import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export interface DeploymentMetricSnapshot {
   before?: number
@@ -8,6 +9,7 @@ export interface DeploymentMetricSnapshot {
 
 export interface DeploymentHistoryItem {
   id: string
+  identity: ServiceIdentity
   version: string
   outcome: string
   deployedAt?: string
@@ -24,7 +26,14 @@ interface DeploymentHistoryOptions {
   fallbackToMock?: boolean
 }
 
-function normalizeDeployment(item: ServiceDeployment): DeploymentHistoryItem {
+function resolveIdentity(input: ServiceIdentity | string) {
+  if (typeof input === 'string') {
+    return createServiceIdentity({ serviceId: input })
+  }
+  return createServiceIdentity(input)
+}
+
+function normalizeDeployment(item: ServiceDeployment, identity: ServiceIdentity): DeploymentHistoryItem {
   const input = item as ServiceDeployment & Record<string, unknown>
   const errorRate = getSnapshot(input, ['errorRatePct', 'errorRate'])
   const latency = getSnapshot(input, ['p95LatencyMs', 'latencyP95Ms', 'latencyMs'])
@@ -34,6 +43,7 @@ function normalizeDeployment(item: ServiceDeployment): DeploymentHistoryItem {
 
   return {
     id: item.id,
+    identity,
     version: item.version ?? 'N/A',
     outcome: item.status ?? 'unknown',
     deployedAt: item.deployedAt,
@@ -53,7 +63,7 @@ function sortByNewest(items: DeploymentHistoryItem[]) {
   })
 }
 
-function createMockDeployments(serviceId: string, limit: number): DeploymentHistoryItem[] {
+function createMockDeployments(identity: ServiceIdentity, limit: number): DeploymentHistoryItem[] {
   const outcomes = ['succeeded', 'succeeded', 'degraded', 'failed', 'succeeded', 'unknown']
   const now = Date.now()
   const count = Math.max(limit, 10)
@@ -92,7 +102,8 @@ function createMockDeployments(serviceId: string, limit: number): DeploymentHist
       hasSnapshotValues(errorRatePct) || hasSnapshotValues(p95LatencyMs) || hasSnapshotValues(availabilityPct)
 
     return {
-      id: `${serviceId}-mock-deploy-${index + 1}`,
+      id: `${identity.serviceId}-mock-deploy-${index + 1}`,
+      identity,
       version: `v0.1.${count - index}`,
       outcome: outcomes[index % outcomes.length],
       deployedAt: new Date(now - index * 1000 * 60 * 60 * 8).toISOString(),
@@ -172,9 +183,11 @@ function computeRegressionScore(
 
 // TODO: Replace mock fallback with a dedicated backend adapter once deployment-history API is finalized.
 export async function getDeploymentHistory(
-  serviceId: string,
+  service: ServiceIdentity | string,
   options: DeploymentHistoryOptions = {},
 ): Promise<DeploymentHistoryItem[]> {
+  const identity = resolveIdentity(service)
+  const serviceId = identity.serviceId
   const limit = options.limit ?? 10
   const preferBackend = options.preferBackend ?? true
   const fallbackToMock = options.fallbackToMock ?? true
@@ -186,7 +199,7 @@ export async function getDeploymentHistory(
   if (preferBackend) {
     try {
       const response = await getServiceDeployments(serviceId)
-      const normalized = sortByNewest(response.deployments.map(normalizeDeployment)).slice(0, limit)
+      const normalized = sortByNewest(response.deployments.map((item) => normalizeDeployment(item, identity))).slice(0, limit)
 
       if (normalized.length > 0 || !fallbackToMock) {
         return normalized
@@ -198,5 +211,5 @@ export async function getDeploymentHistory(
     }
   }
 
-  return createMockDeployments(serviceId, limit).slice(0, limit)
+  return createMockDeployments(identity, limit).slice(0, limit)
 }

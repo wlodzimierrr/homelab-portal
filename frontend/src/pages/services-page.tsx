@@ -6,7 +6,7 @@ import { PageShell } from '@/components/page-shell'
 import { AppLink } from '@/components/navigation/app-link'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import { UptimeIndicator } from '@/components/uptime-indicator'
-import { getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
+import { deriveServiceIdentity, getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
 import { summarizeDeploymentAlerts, type DeploymentAlertLevel } from '@/lib/deployment-alerts'
 import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
 import { cn } from '@/lib/utils'
@@ -93,7 +93,8 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
       const alerts = await Promise.all(
         response.map(async (service) => {
           try {
-            const deployments = await getDeploymentHistory(service.id, { limit: 3 })
+            const identity = deriveServiceIdentity(service)
+            const deployments = await getDeploymentHistory(identity, { limit: 3 })
             const summary = summarizeDeploymentAlerts(
               deployments.map((item) => ({
                 outcome: item.outcome,

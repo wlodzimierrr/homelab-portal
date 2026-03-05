@@ -18,6 +18,7 @@ import {
   type ServiceEndpoint,
 } from '@/lib/api'
 import { getServiceMetricsSummary, type ServiceMetricsSummary } from '@/lib/adapters/service-metrics'
+import { getServiceIdentity } from '@/lib/adapters/services'
 import {
   getServiceHealthTimeline,
   type ServiceHealthTimeline as ServiceHealthTimelineData,
@@ -25,6 +26,7 @@ import {
 } from '@/lib/adapters/service-health-timeline'
 import { summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
 import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
+import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 import {
   buildArgoAppUrl,
   buildGrafanaDashboardUrl,
@@ -291,6 +293,9 @@ const logsPresets: LogsPreset[] = [
 
 export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: ServiceDetailsPageProps) {
   const decodedServiceId = useMemo(() => safeDecodeServiceId(serviceId), [serviceId])
+  const [serviceIdentity, setServiceIdentity] = useState<ServiceIdentity>(() =>
+    createServiceIdentity({ serviceId: decodedServiceId }),
+  )
   const [overview, setOverview] = useState<ServiceOverviewData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
@@ -306,11 +311,16 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     setError('')
 
     try {
+      const identity = await getServiceIdentity(decodedServiceId).catch(() =>
+        createServiceIdentity({ serviceId: decodedServiceId }),
+      )
+      setServiceIdentity(identity)
+
       const [serviceResult, projectsResult, deploymentsResult, metricsResult] = await Promise.allSettled([
         getService(decodedServiceId),
         getProjects(),
         getServiceDeployments(decodedServiceId),
-        getServiceMetricsSummary(decodedServiceId),
+        getServiceMetricsSummary(identity),
       ])
 
       const fallback =
@@ -371,7 +381,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     setTimelineError('')
 
     try {
-      const response = await getServiceHealthTimeline(decodedServiceId, timelineWindow)
+      const response = await getServiceHealthTimeline(serviceIdentity, timelineWindow)
       setTimeline(response)
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : 'Failed to load service timeline'
@@ -379,7 +389,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     } finally {
       setTimelineLoading(false)
     }
-  }, [decodedServiceId, timelineWindow])
+  }, [serviceIdentity, timelineWindow])
 
   useEffect(() => {
     void loadTimeline()
@@ -420,8 +430,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     [decodedServiceId, incidentServiceAlerts, serviceId],
   )
   const logsConfigured = isLogsConfigured()
-  const logsNamespace = 'default'
-  const logsAppLabel = decodedServiceId
+  const logsNamespace = serviceIdentity.namespace
+  const logsAppLabel = serviceIdentity.appLabel
   const logsTimeRange = '6h'
   const logsUrl = useMemo(
     () =>

@@ -6,6 +6,7 @@ import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
 import { getDeploymentHistory, type DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import { evaluateDeploymentHistoryItem } from '@/lib/deployment-alerts'
+import { createServiceIdentity } from '@/lib/service-identity'
 import { cn } from '@/lib/utils'
 
 interface ServiceDeploymentsPageProps {
@@ -115,7 +116,8 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
     setIsLoading(true)
     setError('')
     try {
-      const history = await getDeploymentHistory(normalizedServiceId, { limit: 20 })
+      const identity = createServiceIdentity({ serviceId: normalizedServiceId })
+      const history = await getDeploymentHistory(identity, { limit: 20 })
       setDeployments(history)
     } catch (requestError) {
       const message =

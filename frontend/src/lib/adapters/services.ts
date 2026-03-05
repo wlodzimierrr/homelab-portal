@@ -1,4 +1,5 @@
 import { getProjects, type Project } from '@/lib/api'
+import { createServiceIdentity, parseNamespaceFromInternalUrl, type ServiceIdentity } from '@/lib/service-identity'
 
 export type ServiceHealth = 'healthy' | 'degraded' | 'unknown'
 export type ServiceSync = 'synced' | 'out_of_sync' | 'unknown'
@@ -17,6 +18,7 @@ export interface ServiceRegistryItem {
   lastDeployAt?: string
   namespace?: string
   appLabel?: string
+  argoAppName?: string
 }
 
 interface ServicesSamplePayload {
@@ -65,6 +67,7 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
     const nextSync = normalizeSyncStatus(project.sync)
 
     if (!current) {
+      const inferredNamespace = parseNamespaceFromInternalUrl(project.internalUrl) ?? 'default'
       grouped.set(key, {
         id: project.name,
         name: project.name,
@@ -74,6 +77,9 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
         publicUrl: project.publicUrl,
         internalUrls: project.internalUrl ? [project.internalUrl] : undefined,
         lastDeployAt: project.lastDeployAt,
+        namespace: inferredNamespace,
+        appLabel: project.name,
+        argoAppName: `${project.name}-${project.environment}`,
       })
       continue
     }
@@ -101,6 +107,9 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
         list.push(project.internalUrl)
       }
       current.internalUrls = list
+      if (!current.namespace) {
+        current.namespace = parseNamespaceFromInternalUrl(project.internalUrl) ?? current.namespace
+      }
     }
 
     if (!current.lastDeployAt && project.lastDeployAt) {
@@ -172,6 +181,10 @@ function adaptSampleToServices(payload: ServicesSamplePayload): ServiceRegistryI
         normalized.appLabel = service.appLabel
       }
 
+      if (typeof service.argoAppName === 'string') {
+        normalized.argoAppName = service.argoAppName
+      }
+
       return normalized
     })
     .filter((item): item is ServiceRegistryItem => item !== null)
@@ -212,4 +225,24 @@ export async function getServicesRegistry() {
       ? fallbackError
       : new Error('Failed to load fallback services registry.')
   }
+}
+
+export function deriveServiceIdentity(service: ServiceRegistryItem, env?: string): ServiceIdentity {
+  return createServiceIdentity({
+    serviceId: service.id,
+    serviceName: service.name,
+    namespace: service.namespace,
+    env: env ?? service.environments[0],
+    appLabel: service.appLabel,
+    argoAppName: service.argoAppName,
+  })
+}
+
+export async function getServiceIdentity(serviceId: string, env?: string): Promise<ServiceIdentity> {
+  const services = await getServicesRegistry()
+  const match = services.find((service) => service.id.trim().toLowerCase() === serviceId.trim().toLowerCase())
+  if (!match) {
+    return createServiceIdentity({ serviceId, env })
+  }
+  return deriveServiceIdentity(match, env)
 }

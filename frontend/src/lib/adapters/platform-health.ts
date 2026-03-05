@@ -1,4 +1,4 @@
-import { getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
+import { deriveServiceIdentity, getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import { request } from '@/lib/api'
 import { summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
@@ -110,11 +110,12 @@ async function getIncidentsFromSample() {
 async function buildServiceHealthItems(services: ServiceRegistryItem[]): Promise<PlatformServiceHealthItem[]> {
   return Promise.all(
     services.map(async (service) => {
+      const identity = deriveServiceIdentity(service)
       const baseHealth = service.health
       const baseSync = service.sync
 
       try {
-        const deployments = await getDeploymentHistory(service.id, { limit: 3 })
+        const deployments = await getDeploymentHistory(identity, { limit: 3 })
         const summary = summarizeDeploymentAlerts(
           deployments.map((item) => ({
             outcome: item.outcome,
@@ -126,8 +127,8 @@ async function buildServiceHealthItems(services: ServiceRegistryItem[]): Promise
         )
 
         return {
-          serviceId: service.id,
-          serviceName: service.name,
+          serviceId: identity.serviceId,
+          serviceName: identity.serviceName,
           health: baseHealth === 'degraded' || summary.suspicious ? 'degraded' : baseHealth,
           sync: baseSync,
           suspicious: summary.suspicious,
@@ -136,8 +137,8 @@ async function buildServiceHealthItems(services: ServiceRegistryItem[]): Promise
         }
       } catch {
         return {
-          serviceId: service.id,
-          serviceName: service.name,
+          serviceId: identity.serviceId,
+          serviceName: identity.serviceName,
           health: baseHealth,
           sync: baseSync,
           suspicious: false,

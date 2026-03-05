@@ -1,7 +1,9 @@
 import { request } from '@/lib/api'
+import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export interface ServiceMetricsSummary {
   serviceId: string
+  identity?: ServiceIdentity
   uptime24hPct?: number
   uptime7dPct?: number
   p95LatencyMs?: number
@@ -31,9 +33,17 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
-function adaptSummary(serviceId: string, payload: ServiceMetricsSummaryResponse): ServiceMetricsSummary {
+function resolveIdentity(input: ServiceIdentity | string) {
+  if (typeof input === 'string') {
+    return createServiceIdentity({ serviceId: input })
+  }
+  return createServiceIdentity(input)
+}
+
+function adaptSummary(identity: ServiceIdentity, payload: ServiceMetricsSummaryResponse): ServiceMetricsSummary {
   return {
-    serviceId,
+    serviceId: identity.serviceId,
+    identity,
     uptime24hPct: isFiniteNumber(payload.uptime24hPct)
       ? payload.uptime24hPct
       : isFiniteNumber(payload.uptimePct)
@@ -50,7 +60,7 @@ function adaptSummary(serviceId: string, payload: ServiceMetricsSummaryResponse)
 async function getMetricsFromApi(serviceId: string) {
   const encodedServiceId = encodeURIComponent(serviceId)
   const payload = await request<ServiceMetricsSummaryResponse>(`/services/${encodedServiceId}/metrics-summary`)
-  return adaptSummary(serviceId, payload)
+  return payload
 }
 
 async function getMetricsFromSample(serviceId: string) {
@@ -61,7 +71,7 @@ async function getMetricsFromSample(serviceId: string) {
 
   const payload = (await response.json()) as ServiceMetricsSamplePayload
   if (!Array.isArray(payload.services)) {
-    return { serviceId }
+    return undefined
   }
 
   const match = payload.services.find((entry) => {
@@ -72,20 +82,23 @@ async function getMetricsFromSample(serviceId: string) {
   })
 
   if (!match) {
-    return { serviceId }
+    return undefined
   }
 
-  return adaptSummary(serviceId, match)
+  return match
 }
 
-export async function getServiceMetricsSummary(serviceId: string): Promise<ServiceMetricsSummary> {
+export async function getServiceMetricsSummary(service: ServiceIdentity | string): Promise<ServiceMetricsSummary> {
+  const identity = resolveIdentity(service)
+
   try {
-    return await getMetricsFromApi(serviceId)
+    return adaptSummary(identity, await getMetricsFromApi(identity.serviceId))
   } catch {
     try {
-      return await getMetricsFromSample(serviceId)
+      const fromSample = await getMetricsFromSample(identity.serviceId)
+      return fromSample ? adaptSummary(identity, fromSample) : { serviceId: identity.serviceId, identity }
     } catch {
-      return { serviceId }
+      return { serviceId: identity.serviceId, identity }
     }
   }
 }
