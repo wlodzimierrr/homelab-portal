@@ -1,33 +1,40 @@
 import { request } from '@/lib/api'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
+export type ServiceMetricsRange = '1h' | '24h' | '7d'
+
+interface ServiceMetricsNoData {
+  uptimePct: boolean
+  p95LatencyMs: boolean
+  errorRatePct: boolean
+  restartCount: boolean
+}
+
 export interface ServiceMetricsSummary {
   serviceId: string
   identity?: ServiceIdentity
-  uptime24hPct?: number
-  uptime7dPct?: number
+  range: ServiceMetricsRange
+  uptimePct?: number
   p95LatencyMs?: number
   errorRatePct?: number
   restartCount?: number
-  lastRefreshedAt?: string
+  windowStart?: string
+  windowEnd?: string
+  generatedAt?: string
+  noData: ServiceMetricsNoData
 }
 
 interface ServiceMetricsSummaryResponse {
   serviceId?: string
   uptimePct?: number
-  uptime24hPct?: number
-  uptime7dPct?: number
   p95LatencyMs?: number
   errorRatePct?: number
   restartCount?: number
-  lastRefreshedAt?: string
+  windowStart?: string
+  windowEnd?: string
+  generatedAt?: string
+  noData?: Partial<ServiceMetricsNoData>
 }
-
-interface ServiceMetricsSamplePayload {
-  services?: ServiceMetricsSummaryResponse[]
-}
-
-const serviceMetricsSampleUrl = new URL('../../../service-metrics.sample.json', import.meta.url).toString()
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
@@ -40,65 +47,79 @@ function resolveIdentity(input: ServiceIdentity | string) {
   return createServiceIdentity(input)
 }
 
-function adaptSummary(identity: ServiceIdentity, payload: ServiceMetricsSummaryResponse): ServiceMetricsSummary {
+function emptyNoData(): ServiceMetricsNoData {
+  return {
+    uptimePct: true,
+    p95LatencyMs: true,
+    errorRatePct: true,
+    restartCount: true,
+  }
+}
+
+function normalizeNoData(payload: ServiceMetricsSummaryResponse): ServiceMetricsNoData {
+  const fromApi = payload.noData ?? {}
+
+  const uptimeNoData = typeof fromApi.uptimePct === 'boolean' ? fromApi.uptimePct : !isFiniteNumber(payload.uptimePct)
+  const latencyNoData =
+    typeof fromApi.p95LatencyMs === 'boolean' ? fromApi.p95LatencyMs : !isFiniteNumber(payload.p95LatencyMs)
+  const errorNoData =
+    typeof fromApi.errorRatePct === 'boolean' ? fromApi.errorRatePct : !isFiniteNumber(payload.errorRatePct)
+  const restartNoData =
+    typeof fromApi.restartCount === 'boolean' ? fromApi.restartCount : !isFiniteNumber(payload.restartCount)
+
+  return {
+    uptimePct: uptimeNoData,
+    p95LatencyMs: latencyNoData,
+    errorRatePct: errorNoData,
+    restartCount: restartNoData,
+  }
+}
+
+function adaptSummary(
+  identity: ServiceIdentity,
+  range: ServiceMetricsRange,
+  payload: ServiceMetricsSummaryResponse,
+): ServiceMetricsSummary {
   return {
     serviceId: identity.serviceId,
     identity,
-    uptime24hPct: isFiniteNumber(payload.uptime24hPct)
-      ? payload.uptime24hPct
-      : isFiniteNumber(payload.uptimePct)
-        ? payload.uptimePct
-        : undefined,
-    uptime7dPct: isFiniteNumber(payload.uptime7dPct) ? payload.uptime7dPct : undefined,
+    range,
+    uptimePct: isFiniteNumber(payload.uptimePct) ? payload.uptimePct : undefined,
     p95LatencyMs: isFiniteNumber(payload.p95LatencyMs) ? payload.p95LatencyMs : undefined,
     errorRatePct: isFiniteNumber(payload.errorRatePct) ? payload.errorRatePct : undefined,
     restartCount: isFiniteNumber(payload.restartCount) ? payload.restartCount : undefined,
-    lastRefreshedAt: typeof payload.lastRefreshedAt === 'string' ? payload.lastRefreshedAt : undefined,
+    windowStart: typeof payload.windowStart === 'string' ? payload.windowStart : undefined,
+    windowEnd: typeof payload.windowEnd === 'string' ? payload.windowEnd : undefined,
+    generatedAt: typeof payload.generatedAt === 'string' ? payload.generatedAt : undefined,
+    noData: normalizeNoData(payload),
   }
 }
 
-async function getMetricsFromApi(serviceId: string) {
+async function getMetricsFromApi(serviceId: string, range: ServiceMetricsRange) {
   const encodedServiceId = encodeURIComponent(serviceId)
-  const payload = await request<ServiceMetricsSummaryResponse>(`/services/${encodedServiceId}/metrics-summary`)
+  const payload = await request<ServiceMetricsSummaryResponse>(
+    `/services/${encodedServiceId}/metrics/summary?range=${encodeURIComponent(range)}`,
+  )
   return payload
 }
 
-async function getMetricsFromSample(serviceId: string) {
-  const response = await fetch(serviceMetricsSampleUrl)
-  if (!response.ok) {
-    throw new Error('Failed to load service metrics sample data.')
+export function createEmptyServiceMetricsSummary(
+  service: ServiceIdentity | string,
+  range: ServiceMetricsRange = '24h',
+): ServiceMetricsSummary {
+  const identity = resolveIdentity(service)
+  return {
+    serviceId: identity.serviceId,
+    identity,
+    range,
+    noData: emptyNoData(),
   }
-
-  const payload = (await response.json()) as ServiceMetricsSamplePayload
-  if (!Array.isArray(payload.services)) {
-    return undefined
-  }
-
-  const match = payload.services.find((entry) => {
-    if (typeof entry.serviceId !== 'string') {
-      return false
-    }
-    return entry.serviceId.trim().toLowerCase() === serviceId.trim().toLowerCase()
-  })
-
-  if (!match) {
-    return undefined
-  }
-
-  return match
 }
 
-export async function getServiceMetricsSummary(service: ServiceIdentity | string): Promise<ServiceMetricsSummary> {
+export async function getServiceMetricsSummary(
+  service: ServiceIdentity | string,
+  range: ServiceMetricsRange = '24h',
+): Promise<ServiceMetricsSummary> {
   const identity = resolveIdentity(service)
-
-  try {
-    return adaptSummary(identity, await getMetricsFromApi(identity.serviceId))
-  } catch {
-    try {
-      const fromSample = await getMetricsFromSample(identity.serviceId)
-      return fromSample ? adaptSummary(identity, fromSample) : { serviceId: identity.serviceId, identity }
-    } catch {
-      return { serviceId: identity.serviceId, identity }
-    }
-  }
+  return adaptSummary(identity, range, await getMetricsFromApi(identity.serviceId, range))
 }

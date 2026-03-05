@@ -17,7 +17,12 @@ import {
   type ServiceDeployment,
   type ServiceEndpoint,
 } from '@/lib/api'
-import { getServiceMetricsSummary, type ServiceMetricsSummary } from '@/lib/adapters/service-metrics'
+import {
+  createEmptyServiceMetricsSummary,
+  getServiceMetricsSummary,
+  type ServiceMetricsRange,
+  type ServiceMetricsSummary,
+} from '@/lib/adapters/service-metrics'
 import { getServiceIdentity } from '@/lib/adapters/services'
 import {
   getServiceHealthTimeline,
@@ -33,6 +38,7 @@ import {
   buildGrafanaErrorPanelUrl,
   buildGrafanaLatencyPanelUrl,
   buildLogsUrl,
+  config,
   isLogsConfigured,
 } from '@/lib/config'
 
@@ -52,7 +58,6 @@ interface ServiceOverviewData {
   sync: SyncStatus
   endpoints: ServiceEndpoint[]
   deployments: ServiceDeployment[]
-  metrics: ServiceMetricsSummary
 }
 
 interface QuickLinkCardProps {
@@ -187,7 +192,6 @@ function buildFromProjects(serviceId: string, projects: Project[]): ServiceOverv
     sync: normalizeSyncStatus(primary?.sync),
     endpoints: [...endpointMap.values()],
     deployments: [],
-    metrics: { serviceId },
   }
 }
 
@@ -299,6 +303,12 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [overview, setOverview] = useState<ServiceOverviewData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
+  const [metricsRange, setMetricsRange] = useState<ServiceMetricsRange>('24h')
+  const [metrics, setMetrics] = useState<ServiceMetricsSummary>(() =>
+    createEmptyServiceMetricsSummary(decodedServiceId, '24h'),
+  )
+  const [metricsLoading, setMetricsLoading] = useState(true)
+  const [metricsError, setMetricsError] = useState('')
   const [timelineWindow, setTimelineWindow] = useState<TimelineWindow>('24h')
   const [timeline, setTimeline] = useState<ServiceHealthTimelineData | null>(null)
   const [timelineLoading, setTimelineLoading] = useState(true)
@@ -316,11 +326,10 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       )
       setServiceIdentity(identity)
 
-      const [serviceResult, projectsResult, deploymentsResult, metricsResult] = await Promise.allSettled([
+      const [serviceResult, projectsResult, deploymentsResult] = await Promise.allSettled([
         getService(decodedServiceId),
         getProjects(),
         getServiceDeployments(decodedServiceId),
-        getServiceMetricsSummary(identity),
       ])
 
       const fallback =
@@ -342,8 +351,6 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 serviceResult.value.internalUrls,
               ),
               deployments: serviceResult.value.deployments ?? [],
-              metrics:
-                metricsResult.status === 'fulfilled' ? metricsResult.value : { serviceId: decodedServiceId },
             }
           : fallback
 
@@ -359,9 +366,6 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
         finalOverview.deployments = createMockDeployments(decodedServiceId)
       }
 
-      finalOverview.metrics =
-        metricsResult.status === 'fulfilled' ? metricsResult.value : { serviceId: decodedServiceId }
-
       setOverview(finalOverview)
     } catch (requestError) {
       const message =
@@ -375,6 +379,26 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   useEffect(() => {
     void loadOverview()
   }, [loadOverview])
+
+  const loadMetrics = useCallback(async () => {
+    setMetricsLoading(true)
+    setMetricsError('')
+
+    try {
+      const response = await getServiceMetricsSummary(serviceIdentity, metricsRange)
+      setMetrics(response)
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : 'Failed to load service metrics'
+      setMetricsError(message)
+      setMetrics(createEmptyServiceMetricsSummary(serviceIdentity, metricsRange))
+    } finally {
+      setMetricsLoading(false)
+    }
+  }, [metricsRange, serviceIdentity])
+
+  useEffect(() => {
+    void loadMetrics()
+  }, [loadMetrics])
 
   const loadTimeline = useCallback(async () => {
     setTimelineLoading(true)
@@ -521,22 +545,48 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
             ) : null}
 
             <section className="space-y-3">
-              <h2 className="text-sm font-semibold">Service Metrics</h2>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold">Service Metrics</h2>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  Range
+                  <select
+                    value={metricsRange}
+                    onChange={(event) => setMetricsRange(event.target.value as ServiceMetricsRange)}
+                    className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+                  >
+                    <option value="1h">1h</option>
+                    <option value="24h">24h</option>
+                    <option value="7d">7d</option>
+                  </select>
+                </label>
+              </div>
               <p className="text-xs text-muted-foreground">
-                Summary metrics sourced from monitoring adapters using service identity metadata.
+                Live summary metrics from <code>/api/services/:serviceId/metrics/summary</code>.
               </p>
+              {metricsError ? (
+                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                  <p className="text-xs text-amber-900 dark:text-amber-200">{metricsError}</p>
+                  <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => void loadMetrics()}>
+                    Retry metrics
+                  </Button>
+                </div>
+              ) : null}
               <UptimeIndicator
-                uptime24h={overview.metrics.uptime24hPct}
-                uptime7d={overview.metrics.uptime7dPct}
-                lastRefreshedAt={overview.metrics.lastRefreshedAt}
+                uptime24h={metricsRange === '7d' ? undefined : metrics.uptimePct}
+                uptime7d={metricsRange === '7d' ? metrics.uptimePct : undefined}
+                lastRefreshedAt={metrics.generatedAt}
+                isLoading={metricsLoading}
               />
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <ServiceMetricCard
-                  label="Uptime (24h)"
-                  value={overview.metrics.uptime24hPct}
+                  label={`Uptime (${metricsRange})`}
+                  value={metrics.uptimePct}
                   formatValue={(value) => `${value.toFixed(2)}%`}
-                  lastRefreshedAt={overview.metrics.lastRefreshedAt}
-                  severity={getMetricSeverity(overview.metrics.uptime24hPct, {
+                  lastRefreshedAt={metrics.generatedAt}
+                  noData={metrics.noData.uptimePct}
+                  isLoading={metricsLoading}
+                  staleAfterMinutes={config.metricsStaleAfterMinutes}
+                  severity={getMetricSeverity(metrics.uptimePct, {
                     warning: 99.9,
                     critical: 99.0,
                     direction: 'higher_is_better',
@@ -544,10 +594,13 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 />
                 <ServiceMetricCard
                   label="P95 Latency"
-                  value={overview.metrics.p95LatencyMs}
+                  value={metrics.p95LatencyMs}
                   formatValue={(value) => `${Math.round(value)} ms`}
-                  lastRefreshedAt={overview.metrics.lastRefreshedAt}
-                  severity={getMetricSeverity(overview.metrics.p95LatencyMs, {
+                  lastRefreshedAt={metrics.generatedAt}
+                  noData={metrics.noData.p95LatencyMs}
+                  isLoading={metricsLoading}
+                  staleAfterMinutes={config.metricsStaleAfterMinutes}
+                  severity={getMetricSeverity(metrics.p95LatencyMs, {
                     warning: 250,
                     critical: 500,
                     direction: 'lower_is_better',
@@ -555,10 +608,13 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 />
                 <ServiceMetricCard
                   label="Error Rate"
-                  value={overview.metrics.errorRatePct}
+                  value={metrics.errorRatePct}
                   formatValue={(value) => `${value.toFixed(2)}%`}
-                  lastRefreshedAt={overview.metrics.lastRefreshedAt}
-                  severity={getMetricSeverity(overview.metrics.errorRatePct, {
+                  lastRefreshedAt={metrics.generatedAt}
+                  noData={metrics.noData.errorRatePct}
+                  isLoading={metricsLoading}
+                  staleAfterMinutes={config.metricsStaleAfterMinutes}
+                  severity={getMetricSeverity(metrics.errorRatePct, {
                     warning: 1,
                     critical: 3,
                     direction: 'lower_is_better',
@@ -566,10 +622,13 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 />
                 <ServiceMetricCard
                   label="Restart Count"
-                  value={overview.metrics.restartCount}
+                  value={metrics.restartCount}
                   formatValue={(value) => String(Math.round(value))}
-                  lastRefreshedAt={overview.metrics.lastRefreshedAt}
-                  severity={getMetricSeverity(overview.metrics.restartCount, {
+                  lastRefreshedAt={metrics.generatedAt}
+                  noData={metrics.noData.restartCount}
+                  isLoading={metricsLoading}
+                  staleAfterMinutes={config.metricsStaleAfterMinutes}
+                  severity={getMetricSeverity(metrics.restartCount, {
                     warning: 1,
                     critical: 3,
                     direction: 'lower_is_better',

@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { isMetricStale } from '@/lib/uptime-status'
 
 export type MetricSeverity = 'healthy' | 'warning' | 'critical' | 'unknown'
 
@@ -8,6 +9,9 @@ interface ServiceMetricCardProps {
   formatValue: (value: number) => string
   lastRefreshedAt?: string
   severity: MetricSeverity
+  noData?: boolean
+  isLoading?: boolean
+  staleAfterMinutes?: number
 }
 
 function getSeverityTone(severity: MetricSeverity) {
@@ -39,8 +43,28 @@ function formatTimestamp(value?: string) {
   }).format(parsed)
 }
 
-export function ServiceMetricCard({ label, value, formatValue, lastRefreshedAt, severity }: ServiceMetricCardProps) {
-  const isMissing = typeof value !== 'number'
+export function ServiceMetricCard({
+  label,
+  value,
+  formatValue,
+  lastRefreshedAt,
+  severity,
+  noData = false,
+  isLoading = false,
+  staleAfterMinutes = 20,
+}: ServiceMetricCardProps) {
+  const isMissing = noData || typeof value !== 'number'
+  const stale = isMetricStale(lastRefreshedAt, { healthyMin: 99.9, warningMin: 99.0, staleAfterMinutes })
+
+  if (isLoading) {
+    return (
+      <article className="rounded-md border border-border bg-background p-4">
+        <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+        <div className="mt-2 h-8 w-28 animate-pulse rounded bg-muted" />
+        <div className="mt-3 h-5 w-full animate-pulse rounded bg-muted" />
+      </article>
+    )
+  }
 
   return (
     <article className="rounded-md border border-border bg-background p-4">
@@ -52,7 +76,10 @@ export function ServiceMetricCard({ label, value, formatValue, lastRefreshedAt, 
         <span className={cn('inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize', getSeverityTone(severity))}>
           {isMissing ? 'No data' : severity}
         </span>
-        <span className="text-xs text-muted-foreground">Last refresh: {formatTimestamp(lastRefreshedAt)}</span>
+        <span className="text-xs text-muted-foreground">
+          Last refresh: {formatTimestamp(lastRefreshedAt)}
+          {stale ? ' (stale)' : ''}
+        </span>
       </div>
     </article>
   )

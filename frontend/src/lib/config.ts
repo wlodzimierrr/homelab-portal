@@ -72,6 +72,14 @@ function normalizePath(path: string, context: string, fallbackPath: string) {
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`
 }
 
+function readPositiveNumber(value: string | undefined, fallback: number) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback
+  }
+  return parsed
+}
+
 export function buildMonitoringUrl({
   baseUrl,
   pathTemplate,
@@ -95,6 +103,7 @@ export const config = {
   argoBaseUrl: env.VITE_ARGO_BASE_URL ?? '',
   grafanaBaseUrl: env.VITE_GRAFANA_BASE_URL ?? '',
   incidentBannerMinSeverity: env.VITE_INCIDENT_BANNER_MIN_SEVERITY ?? 'warning',
+  metricsStaleAfterMinutes: readPositiveNumber(env.VITE_METRICS_STALE_AFTER_MINUTES, 20),
   argoAppPathTemplate: env.VITE_ARGO_APP_PATH_TEMPLATE ?? '/applications/{serviceId}',
   grafanaDashboardPathTemplate:
     env.VITE_GRAFANA_DASHBOARD_PATH_TEMPLATE ?? '/d/service-overview?var-service={serviceId}',
