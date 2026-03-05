@@ -1,6 +1,6 @@
 import { deriveServiceIdentity, getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
-import { request } from '@/lib/api'
+import { ApiRequestError, isApiRequestError, request } from '@/lib/api'
 import { summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
 
 export type IncidentSeverity = 'info' | 'warning' | 'critical'
@@ -50,6 +50,10 @@ interface IncidentsResponse {
 }
 
 const sampleUrl = new URL('../../../platform-health.sample.json', import.meta.url).toString()
+const incidentsMissingStatuses = new Set([404, 405, 501])
+
+type IncidentsApiAvailability = 'unknown' | 'available' | 'unavailable'
+let incidentsApiAvailability: IncidentsApiAvailability = 'unknown'
 
 function normalizeSeverity(value?: string): IncidentSeverity {
   if (!value) return 'info'
@@ -93,7 +97,12 @@ function normalizeIncidents(input: unknown): PlatformIncident[] {
 }
 
 async function getIncidentsFromApi() {
+  if (incidentsApiAvailability === 'unavailable') {
+    throw new ApiRequestError('Incidents endpoint is not available in this backend.', 404)
+  }
+
   const response = await request<IncidentsResponse>('/monitoring/incidents')
+  incidentsApiAvailability = 'available'
   return normalizeIncidents(response.incidents)
 }
 
@@ -175,6 +184,12 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
   if (incidentsApiResult.status === 'fulfilled') {
     incidents = incidentsApiResult.value
   } else {
+    if (
+      isApiRequestError(incidentsApiResult.reason) &&
+      incidentsMissingStatuses.has(incidentsApiResult.reason.status)
+    ) {
+      incidentsApiAvailability = 'unavailable'
+    }
     warnings.push('Incidents API unavailable, using sample incident feed.')
     try {
       incidents = await getIncidentsFromSample()
@@ -214,7 +229,10 @@ export async function getPlatformIncidentFeed(): Promise<PlatformIncidentFeed> {
   try {
     const incidents = await getIncidentsFromApi()
     return { incidents, warnings }
-  } catch {
+  } catch (error) {
+    if (isApiRequestError(error) && incidentsMissingStatuses.has(error.status)) {
+      incidentsApiAvailability = 'unavailable'
+    }
     warnings.push('Incidents API unavailable, using sample incident feed.')
   }
 

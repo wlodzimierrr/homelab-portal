@@ -1,4 +1,4 @@
-import { getProjects, request, type Project } from '@/lib/api'
+import { ApiRequestError, getProjects, isApiRequestError, request, type Project } from '@/lib/api'
 
 export type ReleaseSyncStatus = 'synced' | 'out_of_sync' | 'unknown'
 export type ReleaseHealthStatus = 'healthy' | 'degraded' | 'unknown'
@@ -52,6 +52,10 @@ interface ReleaseDashboardSamplePayload {
 }
 
 const releaseDashboardSampleUrl = new URL('../../../release-dashboard.sample.json', import.meta.url).toString()
+const releaseDashboardMissingStatuses = new Set([404, 405, 501])
+
+type ReleaseDashboardApiAvailability = 'unknown' | 'available' | 'unavailable'
+let releaseDashboardApiAvailability: ReleaseDashboardApiAvailability = 'unknown'
 
 function normalizeSyncStatus(value?: string): ReleaseSyncStatus {
   if (!value) {
@@ -182,7 +186,12 @@ async function loadSampleReleaseDashboard() {
 }
 
 async function getReleaseDashboardFromApi() {
+  if (releaseDashboardApiAvailability === 'unavailable') {
+    throw new ApiRequestError('Release dashboard endpoint is not available in this backend.', 404)
+  }
+
   const payload = await request<ReleaseDashboardResponse>('/release-dashboard')
+  releaseDashboardApiAvailability = 'available'
   return adaptReleasePayload(payload)
 }
 
@@ -195,6 +204,9 @@ export async function getReleaseDashboardEntries() {
       return fromApi
     }
   } catch (error) {
+    if (isApiRequestError(error) && releaseDashboardMissingStatuses.has(error.status)) {
+      releaseDashboardApiAvailability = 'unavailable'
+    }
     apiError = error instanceof Error ? error : new Error('Failed to load release dashboard data from API.')
   }
 
