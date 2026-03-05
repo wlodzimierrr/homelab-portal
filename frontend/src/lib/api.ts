@@ -2,6 +2,11 @@ import { clearToken, getToken } from '@/lib/auth'
 import { config } from '@/lib/config'
 
 export const UNAUTHORIZED_EVENT = 'portal:unauthorized'
+const serviceEndpointMissingStatuses = new Set([404, 405, 501])
+const enableServiceApi = import.meta.env.VITE_ENABLE_SERVICE_API === 'true'
+
+type ServiceApiAvailability = 'unknown' | 'available' | 'unavailable'
+let serviceApiAvailability: ServiceApiAvailability = enableServiceApi ? 'unknown' : 'unavailable'
 
 interface RequestOptions extends Omit<RequestInit, 'headers'> {
   headers?: HeadersInit
@@ -11,6 +16,20 @@ interface RequestOptions extends Omit<RequestInit, 'headers'> {
 interface ApiErrorPayload {
   detail?: string
   message?: string
+}
+
+export class ApiRequestError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiRequestError'
+    this.status = status
+  }
+}
+
+export function isApiRequestError(error: unknown): error is ApiRequestError {
+  return error instanceof ApiRequestError
 }
 
 export interface Project {
@@ -117,7 +136,7 @@ export async function request<T>(path: string, options: RequestOptions = {}) {
   }
 
   if (!response.ok) {
-    throw new Error(await getErrorMessage(response))
+    throw new ApiRequestError(await getErrorMessage(response), response.status)
   }
 
   if (response.status === 204) {
@@ -125,6 +144,23 @@ export async function request<T>(path: string, options: RequestOptions = {}) {
   }
 
   return (await response.json()) as T
+}
+
+async function requestServiceEndpoint<T>(path: string) {
+  if (serviceApiAvailability === 'unavailable') {
+    throw new ApiRequestError('Service endpoint is not available in this backend.', 404)
+  }
+
+  try {
+    const response = await request<T>(path)
+    serviceApiAvailability = 'available'
+    return response
+  } catch (error) {
+    if (isApiRequestError(error) && serviceEndpointMissingStatuses.has(error.status)) {
+      serviceApiAvailability = 'unavailable'
+    }
+    throw error
+  }
 }
 
 export function getProjects() {
@@ -147,11 +183,11 @@ export function login(payload: LoginPayload) {
 }
 
 export function getService(serviceId: string) {
-  return request<ServiceDetails>(`/services/${encodeURIComponent(serviceId)}`)
+  return requestServiceEndpoint<ServiceDetails>(`/services/${encodeURIComponent(serviceId)}`)
 }
 
 export function getServiceDeployments(serviceId: string) {
-  return request<{ deployments: ServiceDeployment[] }>(
+  return requestServiceEndpoint<{ deployments: ServiceDeployment[] }>(
     `/services/${encodeURIComponent(serviceId)}/deployments`,
   )
 }

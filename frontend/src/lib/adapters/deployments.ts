@@ -1,10 +1,21 @@
 import { getServiceDeployments, type ServiceDeployment } from '@/lib/api'
 
+export interface DeploymentMetricSnapshot {
+  before?: number
+  after?: number
+  delta?: number
+}
+
 export interface DeploymentHistoryItem {
   id: string
   version: string
   outcome: string
   deployedAt?: string
+  errorRatePct: DeploymentMetricSnapshot
+  p95LatencyMs: DeploymentMetricSnapshot
+  availabilityPct: DeploymentMetricSnapshot
+  hasComparisonWindow: boolean
+  regressionScore: number
 }
 
 interface DeploymentHistoryOptions {
@@ -14,11 +25,23 @@ interface DeploymentHistoryOptions {
 }
 
 function normalizeDeployment(item: ServiceDeployment): DeploymentHistoryItem {
+  const input = item as ServiceDeployment & Record<string, unknown>
+  const errorRate = getSnapshot(input, ['errorRatePct', 'errorRate'])
+  const latency = getSnapshot(input, ['p95LatencyMs', 'latencyP95Ms', 'latencyMs'])
+  const availability = getSnapshot(input, ['availabilityPct', 'availability'])
+
+  const hasComparisonWindow = hasSnapshotValues(errorRate) || hasSnapshotValues(latency) || hasSnapshotValues(availability)
+
   return {
     id: item.id,
     version: item.version ?? 'N/A',
     outcome: item.status ?? 'unknown',
     deployedAt: item.deployedAt,
+    errorRatePct: errorRate,
+    p95LatencyMs: latency,
+    availabilityPct: availability,
+    hasComparisonWindow,
+    regressionScore: computeRegressionScore(errorRate, latency, availability),
   }
 }
 
@@ -35,12 +58,116 @@ function createMockDeployments(serviceId: string, limit: number): DeploymentHist
   const now = Date.now()
   const count = Math.max(limit, 10)
 
-  return Array.from({ length: count }, (_, index) => ({
-    id: `${serviceId}-mock-deploy-${index + 1}`,
-    version: `v0.1.${count - index}`,
-    outcome: outcomes[index % outcomes.length],
-    deployedAt: new Date(now - index * 1000 * 60 * 60 * 8).toISOString(),
-  }))
+  return Array.from({ length: count }, (_, index) => {
+    const missingComparison = index % 5 === 4
+    const baselineError = 0.4 + index * 0.05
+    const baselineLatency = 180 + index * 12
+    const baselineAvailability = 99.95 - index * 0.02
+    const regressionFactor = index % 3 === 0 ? 1.4 : index % 3 === 1 ? 0.9 : 1.1
+
+    const errorRatePct: DeploymentMetricSnapshot = missingComparison
+      ? {}
+      : {
+          before: Number(baselineError.toFixed(2)),
+          after: Number((baselineError * regressionFactor).toFixed(2)),
+        }
+    const p95LatencyMs: DeploymentMetricSnapshot = missingComparison
+      ? {}
+      : {
+          before: Number(baselineLatency.toFixed(0)),
+          after: Number((baselineLatency * regressionFactor).toFixed(0)),
+        }
+    const availabilityPct: DeploymentMetricSnapshot = missingComparison
+      ? {}
+      : {
+          before: Number(baselineAvailability.toFixed(2)),
+          after: Number((baselineAvailability - (regressionFactor - 1) * 0.25).toFixed(2)),
+        }
+
+    attachDelta(errorRatePct)
+    attachDelta(p95LatencyMs)
+    attachDelta(availabilityPct)
+
+    const hasComparisonWindow =
+      hasSnapshotValues(errorRatePct) || hasSnapshotValues(p95LatencyMs) || hasSnapshotValues(availabilityPct)
+
+    return {
+      id: `${serviceId}-mock-deploy-${index + 1}`,
+      version: `v0.1.${count - index}`,
+      outcome: outcomes[index % outcomes.length],
+      deployedAt: new Date(now - index * 1000 * 60 * 60 * 8).toISOString(),
+      errorRatePct,
+      p95LatencyMs,
+      availabilityPct,
+      hasComparisonWindow,
+      regressionScore: computeRegressionScore(errorRatePct, p95LatencyMs, availabilityPct),
+    }
+  })
+}
+
+function toFiniteNumber(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return undefined
+  }
+  return value
+}
+
+function getSnapshot(input: Record<string, unknown>, keys: string[]): DeploymentMetricSnapshot {
+  for (const key of keys) {
+    const base = input[key]
+    if (typeof base === 'object' && base !== null) {
+      const before = toFiniteNumber((base as Record<string, unknown>).before)
+      const after = toFiniteNumber((base as Record<string, unknown>).after)
+      const delta = toFiniteNumber((base as Record<string, unknown>).delta)
+      if (before !== undefined || after !== undefined || delta !== undefined) {
+        const snapshot: DeploymentMetricSnapshot = { before, after, delta }
+        attachDelta(snapshot)
+        return snapshot
+      }
+    }
+
+    const before = toFiniteNumber(input[`${key}Before`])
+    const after = toFiniteNumber(input[`${key}After`])
+    const delta = toFiniteNumber(input[`${key}Delta`])
+    if (before !== undefined || after !== undefined || delta !== undefined) {
+      const snapshot: DeploymentMetricSnapshot = { before, after, delta }
+      attachDelta(snapshot)
+      return snapshot
+    }
+  }
+
+  return {}
+}
+
+function attachDelta(snapshot: DeploymentMetricSnapshot) {
+  if (snapshot.delta !== undefined) {
+    return
+  }
+
+  if (snapshot.before === undefined || snapshot.after === undefined) {
+    return
+  }
+
+  snapshot.delta = Number((snapshot.after - snapshot.before).toFixed(3))
+}
+
+function hasSnapshotValues(snapshot: DeploymentMetricSnapshot) {
+  return (
+    snapshot.before !== undefined ||
+    snapshot.after !== undefined ||
+    snapshot.delta !== undefined
+  )
+}
+
+function computeRegressionScore(
+  errorRate: DeploymentMetricSnapshot,
+  latency: DeploymentMetricSnapshot,
+  availability: DeploymentMetricSnapshot,
+) {
+  const errorPenalty = Math.max(0, errorRate.delta ?? 0) * 10
+  const latencyPenalty = Math.max(0, latency.delta ?? 0) / 40
+  const availabilityPenalty = Math.max(0, -(availability.delta ?? 0)) * 8
+  return Number((errorPenalty + latencyPenalty + availabilityPenalty).toFixed(3))
 }
 
 // TODO: Replace mock fallback with a dedicated backend adapter once deployment-history API is finalized.

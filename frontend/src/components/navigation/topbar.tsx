@@ -3,41 +3,46 @@ import { Menu, X } from 'lucide-react'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
 import { AppLink } from '@/components/navigation/app-link'
+import type { IncidentSeverity } from '@/lib/incident-alerts'
 import { cn } from '@/lib/utils'
-
-function getTitle(pathname: string) {
-  if (pathname.startsWith('/services/') && pathname.endsWith('/deployments')) {
-    return 'Service Deployments'
-  }
-  if (pathname.startsWith('/services/')) {
-    return 'Service Details'
-  }
-
-  const map: Record<string, string> = {
-    '/dashboard': 'Dashboard',
-    '/projects': 'Projects',
-    '/services': 'Services',
-    '/settings': 'Settings',
-    '/login': 'Login',
-  }
-  return map[pathname] ?? 'Portal'
-}
 
 interface TopbarProps {
   pathname: string
   theme: 'light' | 'dark'
   onThemeToggle: () => void
+  showIncidentBanner: boolean
+  incidentActiveCount: number
+  incidentHighestSeverity: IncidentSeverity | null
+  onIncidentDismiss: () => void
 }
 
 const mobileLinks = [
   { to: '/dashboard', label: 'Dashboard' },
   { to: '/projects', label: 'Projects' },
   { to: '/services', label: 'Services' },
+  { to: '/platform-health', label: 'Platform Health' },
   { to: '/settings', label: 'Settings' },
 ]
 
-export function Topbar({ pathname, theme, onThemeToggle }: TopbarProps) {
-  const title = getTitle(pathname)
+function getIncidentTone(severity: IncidentSeverity | null) {
+  if (severity === 'critical') {
+    return 'border-rose-500/60 bg-rose-500/10 text-rose-800 dark:text-rose-200'
+  }
+  if (severity === 'warning') {
+    return 'border-amber-500/60 bg-amber-500/10 text-amber-800 dark:text-amber-200'
+  }
+  return 'border-sky-500/60 bg-sky-500/10 text-sky-800 dark:text-sky-200'
+}
+
+export function Topbar({
+  pathname,
+  theme,
+  onThemeToggle,
+  showIncidentBanner,
+  incidentActiveCount,
+  incidentHighestSeverity,
+  onIncidentDismiss,
+}: TopbarProps) {
   const [mobileMenuState, setMobileMenuState] = useState<{ isOpen: boolean; pathname: string }>({
     isOpen: false,
     pathname,
@@ -45,9 +50,9 @@ export function Topbar({ pathname, theme, onThemeToggle }: TopbarProps) {
   const isMobileMenuOpen = mobileMenuState.isOpen && mobileMenuState.pathname === pathname
 
   return (
-    <header className="sticky top-0 z-10 border-b border-border bg-background/90 backdrop-blur">
-      <div className="flex h-16 items-center justify-between px-4 md:px-6">
-        <div className="flex items-center gap-3">
+    <header className="sticky top-0 z-10 bg-background/90 backdrop-blur">
+      <div className="flex h-14 items-center justify-between gap-2 px-4 md:px-6">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           <Button
             type="button"
             variant="ghost"
@@ -63,12 +68,32 @@ export function Topbar({ pathname, theme, onThemeToggle }: TopbarProps) {
           >
             {isMobileMenuOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
           </Button>
-          <h2 className="text-lg font-semibold">{title}</h2>
+          {showIncidentBanner ? (
+            <div
+              className={cn(
+                'flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md border px-2 py-1 text-xs',
+                getIncidentTone(incidentHighestSeverity),
+              )}
+            >
+              <span className="truncate font-medium">Active incidents: {incidentActiveCount}</span>
+              {incidentHighestSeverity !== 'critical' ? (
+                <button
+                  type="button"
+                  className="shrink-0 underline underline-offset-2"
+                  onClick={onIncidentDismiss}
+                >
+                  Dismiss
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
-        <ThemeToggle theme={theme} onToggle={onThemeToggle} />
+        <div className="md:hidden">
+          <ThemeToggle theme={theme} onToggle={onThemeToggle} />
+        </div>
       </div>
       {isMobileMenuOpen ? (
-        <nav className="border-t border-border bg-background px-4 py-3 md:hidden">
+        <nav className="bg-background px-4 py-3 md:hidden">
           <ul className="space-y-1">
             {mobileLinks.map((link) => (
               <li key={link.to}>

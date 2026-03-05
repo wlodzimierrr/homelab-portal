@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AppLink } from '@/components/navigation/app-link'
 import { ErrorState } from '@/components/error-state'
+import { GrafanaEmbedPanel } from '@/components/grafana-embed-panel'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
+import { ServiceHealthTimeline } from '@/components/service-health-timeline'
+import { ServiceMetricCard, type MetricSeverity } from '@/components/service-metric-card'
 import { StatusCard } from '@/components/status-card'
+import { UptimeIndicator } from '@/components/uptime-indicator'
 import { Button } from '@/components/ui/button'
 import {
   getProjects,
@@ -13,15 +17,26 @@ import {
   type ServiceDeployment,
   type ServiceEndpoint,
 } from '@/lib/api'
+import { getServiceMetricsSummary, type ServiceMetricsSummary } from '@/lib/adapters/service-metrics'
+import {
+  getServiceHealthTimeline,
+  type ServiceHealthTimeline as ServiceHealthTimelineData,
+  type TimelineWindow,
+} from '@/lib/adapters/service-health-timeline'
+import { summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
+import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
 import {
   buildArgoAppUrl,
   buildGrafanaDashboardUrl,
+  buildGrafanaErrorPanelUrl,
+  buildGrafanaLatencyPanelUrl,
   buildLogsUrl,
   isLogsConfigured,
 } from '@/lib/config'
 
 interface ServiceDetailsPageProps {
   serviceId: string
+  incidentServiceAlerts?: Record<string, ServiceIncidentBadge>
 }
 
 type HealthStatus = 'healthy' | 'degraded' | 'unknown'
@@ -35,12 +50,22 @@ interface ServiceOverviewData {
   sync: SyncStatus
   endpoints: ServiceEndpoint[]
   deployments: ServiceDeployment[]
+  metrics: ServiceMetricsSummary
 }
 
 interface QuickLinkCardProps {
   label: string
   description: string
-  href: string
+  href?: string
+}
+
+type LogsPresetId = 'errors' | 'restarts' | 'warnings'
+
+interface LogsPreset {
+  id: LogsPresetId
+  label: string
+  description: string
+  query: string
 }
 
 function normalizeHealthStatus(value?: string): HealthStatus {
@@ -103,6 +128,33 @@ function createMockDeployments(serviceId: string): ServiceDeployment[] {
   }))
 }
 
+function getMetricSeverity(
+  value: number | undefined,
+  thresholds: { warning: number; critical: number; direction: 'higher_is_better' | 'lower_is_better' },
+): MetricSeverity {
+  if (typeof value !== 'number') {
+    return 'unknown'
+  }
+
+  if (thresholds.direction === 'higher_is_better') {
+    if (value < thresholds.critical) {
+      return 'critical'
+    }
+    if (value < thresholds.warning) {
+      return 'warning'
+    }
+    return 'healthy'
+  }
+
+  if (value > thresholds.critical) {
+    return 'critical'
+  }
+  if (value > thresholds.warning) {
+    return 'warning'
+  }
+  return 'healthy'
+}
+
 function buildFromProjects(serviceId: string, projects: Project[]): ServiceOverviewData {
   const matches = projects.filter((project) => project.name.trim().toLowerCase() === serviceId.toLowerCase())
   const primary = matches[0]
@@ -133,6 +185,7 @@ function buildFromProjects(serviceId: string, projects: Project[]): ServiceOverv
     sync: normalizeSyncStatus(primary?.sync),
     endpoints: [...endpointMap.values()],
     deployments: [],
+    metrics: { serviceId },
   }
 }
 
@@ -175,6 +228,16 @@ function buildEndpointList(
 }
 
 function QuickLinkCard({ label, description, href }: QuickLinkCardProps) {
+  if (!href || href.trim() === '') {
+    return (
+      <div className="rounded-md border border-border bg-background p-3">
+        <p className="text-sm font-medium">{label}</p>
+        <p className="text-xs text-muted-foreground">{description}</p>
+        <p className="mt-2 text-xs text-muted-foreground">Unavailable due to missing monitoring URL configuration.</p>
+      </div>
+    )
+  }
+
   return (
     <a
       href={href}
@@ -188,21 +251,66 @@ function QuickLinkCard({ label, description, href }: QuickLinkCardProps) {
   )
 }
 
-export function ServiceDetailsPage({ serviceId }: ServiceDetailsPageProps) {
+function IncidentServiceBadge({ alert }: { alert: ServiceIncidentBadge }) {
+  const severity = alert.highestSeverity ?? 'info'
+  const tone =
+    severity === 'critical'
+      ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+      : severity === 'warning'
+        ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+        : 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
+  const label = severity === 'critical' ? 'Critical alerts' : severity === 'warning' ? 'Warning alerts' : 'Alerts'
+
+  return (
+    <span className={`rounded-md px-2 py-1 text-xs font-medium ${tone}`}>
+      {label}: {alert.total}
+    </span>
+  )
+}
+
+const logsPresets: LogsPreset[] = [
+  {
+    id: 'errors',
+    label: 'Errors',
+    description: 'HTTP 5xx or error-level logs',
+    query: '{namespace="{{namespace}}", app="{{app_label}}"} |= "error" or |= " 5" ',
+  },
+  {
+    id: 'restarts',
+    label: 'Restarts',
+    description: 'Container restart signals and crash loops',
+    query: '{namespace="{{namespace}}", app="{{app_label}}"} |= "restart" or |= "CrashLoopBackOff"',
+  },
+  {
+    id: 'warnings',
+    label: 'Warnings',
+    description: 'Recent warning/timeout style signals',
+    query: '{namespace="{{namespace}}", app="{{app_label}}"} |= "warn" or |= "timeout"',
+  },
+]
+
+export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: ServiceDetailsPageProps) {
   const decodedServiceId = useMemo(() => safeDecodeServiceId(serviceId), [serviceId])
   const [overview, setOverview] = useState<ServiceOverviewData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
+  const [timelineWindow, setTimelineWindow] = useState<TimelineWindow>('24h')
+  const [timeline, setTimeline] = useState<ServiceHealthTimelineData | null>(null)
+  const [timelineLoading, setTimelineLoading] = useState(true)
+  const [timelineError, setTimelineError] = useState('')
+  const [logsDrawerOpen, setLogsDrawerOpen] = useState(false)
+  const [activeLogsPreset, setActiveLogsPreset] = useState<LogsPresetId>('errors')
 
   const loadOverview = useCallback(async () => {
     setIsLoading(true)
     setError('')
 
     try {
-      const [serviceResult, projectsResult, deploymentsResult] = await Promise.allSettled([
+      const [serviceResult, projectsResult, deploymentsResult, metricsResult] = await Promise.allSettled([
         getService(decodedServiceId),
         getProjects(),
         getServiceDeployments(decodedServiceId),
+        getServiceMetricsSummary(decodedServiceId),
       ])
 
       const fallback =
@@ -224,6 +332,8 @@ export function ServiceDetailsPage({ serviceId }: ServiceDetailsPageProps) {
                 serviceResult.value.internalUrls,
               ),
               deployments: serviceResult.value.deployments ?? [],
+              metrics:
+                metricsResult.status === 'fulfilled' ? metricsResult.value : { serviceId: decodedServiceId },
             }
           : fallback
 
@@ -239,6 +349,9 @@ export function ServiceDetailsPage({ serviceId }: ServiceDetailsPageProps) {
         finalOverview.deployments = createMockDeployments(decodedServiceId)
       }
 
+      finalOverview.metrics =
+        metricsResult.status === 'fulfilled' ? metricsResult.value : { serviceId: decodedServiceId }
+
       setOverview(finalOverview)
     } catch (requestError) {
       const message =
@@ -253,18 +366,91 @@ export function ServiceDetailsPage({ serviceId }: ServiceDetailsPageProps) {
     void loadOverview()
   }, [loadOverview])
 
+  const loadTimeline = useCallback(async () => {
+    setTimelineLoading(true)
+    setTimelineError('')
+
+    try {
+      const response = await getServiceHealthTimeline(decodedServiceId, timelineWindow)
+      setTimeline(response)
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : 'Failed to load service timeline'
+      setTimelineError(message)
+    } finally {
+      setTimelineLoading(false)
+    }
+  }, [decodedServiceId, timelineWindow])
+
+  useEffect(() => {
+    void loadTimeline()
+  }, [loadTimeline])
+
   const argoUrl = useMemo(() => buildArgoAppUrl(decodedServiceId), [decodedServiceId])
-  const grafanaUrl = useMemo(() => buildGrafanaDashboardUrl(decodedServiceId), [decodedServiceId])
+  const grafanaTimeRange = '6h'
+  const grafanaUrl = useMemo(
+    () => buildGrafanaDashboardUrl(decodedServiceId, grafanaTimeRange),
+    [decodedServiceId],
+  )
+  const latencyPanelUrl = useMemo(
+    () => buildGrafanaLatencyPanelUrl(decodedServiceId, grafanaTimeRange),
+    [decodedServiceId],
+  )
+  const errorPanelUrl = useMemo(
+    () => buildGrafanaErrorPanelUrl(decodedServiceId, grafanaTimeRange),
+    [decodedServiceId],
+  )
+  const deploymentAlert = useMemo(() => {
+    const items =
+      overview?.deployments.map((deployment) => ({
+        outcome: deployment.status,
+      })) ?? []
+    return summarizeDeploymentAlerts(items)
+  }, [overview])
+  const effectiveHealth = useMemo(() => {
+    if (!overview) {
+      return 'unknown' as const
+    }
+    if (overview.health === 'degraded') {
+      return overview.health
+    }
+    return deploymentAlert.suspicious ? ('degraded' as const) : overview.health
+  }, [deploymentAlert.suspicious, overview])
+  const incidentAlert = useMemo(
+    () => incidentServiceAlerts[decodedServiceId] ?? incidentServiceAlerts[serviceId],
+    [decodedServiceId, incidentServiceAlerts, serviceId],
+  )
   const logsConfigured = isLogsConfigured()
+  const logsNamespace = 'default'
+  const logsAppLabel = decodedServiceId
+  const logsTimeRange = '6h'
   const logsUrl = useMemo(
     () =>
       buildLogsUrl({
         serviceId: decodedServiceId,
-        namespace: 'default',
-        appLabel: decodedServiceId,
-        timeRange: '6h',
+        namespace: logsNamespace,
+        appLabel: logsAppLabel,
+        timeRange: logsTimeRange,
       }),
-    [decodedServiceId],
+    [decodedServiceId, logsAppLabel, logsNamespace, logsTimeRange],
+  )
+  const presetLinks = useMemo(() => {
+    return logsPresets.map((preset) => ({
+      ...preset,
+      href: buildLogsUrl({
+        serviceId: decodedServiceId,
+        namespace: logsNamespace,
+        appLabel: logsAppLabel,
+        timeRange: logsTimeRange,
+        preset: preset.id,
+        query: preset.query
+          .replaceAll('{{namespace}}', logsNamespace)
+          .replaceAll('{{app_label}}', logsAppLabel),
+      }),
+    }))
+  }, [decodedServiceId, logsAppLabel, logsNamespace, logsTimeRange])
+  const activePreset = useMemo(
+    () => presetLinks.find((preset) => preset.id === activeLogsPreset) ?? presetLinks[0],
+    [activeLogsPreset, presetLinks],
   )
 
   return (
@@ -278,6 +464,7 @@ export function ServiceDetailsPage({ serviceId }: ServiceDetailsPageProps) {
             <span className="rounded-md bg-primary/10 px-2 py-1 text-xs font-medium text-primary">
               Overview
             </span>
+            {incidentAlert?.total ? <IncidentServiceBadge alert={incidentAlert} /> : null}
           </div>
           <Button asChild variant="outline">
             <AppLink to={`/services/${encodeURIComponent(decodedServiceId)}/deployments`}>
@@ -298,8 +485,19 @@ export function ServiceDetailsPage({ serviceId }: ServiceDetailsPageProps) {
                 <p className="mt-2 text-xl font-semibold">{overview.version}</p>
                 <p className="mt-1 text-xs text-muted-foreground">Placeholder until deployment metadata API lands</p>
               </article>
-              <StatusCard health={overview.health} sync={overview.sync} />
+              <StatusCard health={effectiveHealth} sync={overview.sync} />
             </div>
+
+            {deploymentAlert.suspicious ? (
+              <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                <p className="text-sm font-medium text-amber-800 dark:text-amber-300">
+                  Suspicious deployment activity detected
+                </p>
+                <p className="text-xs text-amber-700/90 dark:text-amber-200">
+                  Latest deployments triggered alert rules. Service status is highlighted as degraded.
+                </p>
+              </div>
+            ) : null}
 
             {import.meta.env.DEV ? (
               <section className="space-y-3">
@@ -311,6 +509,119 @@ export function ServiceDetailsPage({ serviceId }: ServiceDetailsPageProps) {
                 </div>
               </section>
             ) : null}
+
+            <section className="space-y-3">
+              <h2 className="text-sm font-semibold">Service Metrics</h2>
+              <p className="text-xs text-muted-foreground">
+                Summary metrics sourced from monitoring adapters using service identity metadata.
+              </p>
+              <UptimeIndicator
+                uptime24h={overview.metrics.uptime24hPct}
+                uptime7d={overview.metrics.uptime7dPct}
+                lastRefreshedAt={overview.metrics.lastRefreshedAt}
+              />
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <ServiceMetricCard
+                  label="Uptime (24h)"
+                  value={overview.metrics.uptime24hPct}
+                  formatValue={(value) => `${value.toFixed(2)}%`}
+                  lastRefreshedAt={overview.metrics.lastRefreshedAt}
+                  severity={getMetricSeverity(overview.metrics.uptime24hPct, {
+                    warning: 99.9,
+                    critical: 99.0,
+                    direction: 'higher_is_better',
+                  })}
+                />
+                <ServiceMetricCard
+                  label="P95 Latency"
+                  value={overview.metrics.p95LatencyMs}
+                  formatValue={(value) => `${Math.round(value)} ms`}
+                  lastRefreshedAt={overview.metrics.lastRefreshedAt}
+                  severity={getMetricSeverity(overview.metrics.p95LatencyMs, {
+                    warning: 250,
+                    critical: 500,
+                    direction: 'lower_is_better',
+                  })}
+                />
+                <ServiceMetricCard
+                  label="Error Rate"
+                  value={overview.metrics.errorRatePct}
+                  formatValue={(value) => `${value.toFixed(2)}%`}
+                  lastRefreshedAt={overview.metrics.lastRefreshedAt}
+                  severity={getMetricSeverity(overview.metrics.errorRatePct, {
+                    warning: 1,
+                    critical: 3,
+                    direction: 'lower_is_better',
+                  })}
+                />
+                <ServiceMetricCard
+                  label="Restart Count"
+                  value={overview.metrics.restartCount}
+                  formatValue={(value) => String(Math.round(value))}
+                  lastRefreshedAt={overview.metrics.lastRefreshedAt}
+                  severity={getMetricSeverity(overview.metrics.restartCount, {
+                    warning: 1,
+                    critical: 3,
+                    direction: 'lower_is_better',
+                  })}
+                />
+              </div>
+            </section>
+
+            <section className="space-y-3">
+              <h2 className="text-sm font-semibold">Latency & Error Trends</h2>
+              <p className="text-xs text-muted-foreground">
+                Embedded Grafana panels scoped to this service and the last {grafanaTimeRange}.
+              </p>
+              <div className="grid gap-3 xl:grid-cols-2">
+                <GrafanaEmbedPanel
+                  key={`latency-${decodedServiceId}`}
+                  title="P95 Latency Trend"
+                  description="Latency trend panel for current service scope."
+                  embedUrl={latencyPanelUrl}
+                  dashboardUrl={grafanaUrl}
+                  height={280}
+                />
+                <GrafanaEmbedPanel
+                  key={`errors-${decodedServiceId}`}
+                  title="Error Rate Trend"
+                  description="Error-rate trend panel for current service scope."
+                  embedUrl={errorPanelUrl}
+                  dashboardUrl={grafanaUrl}
+                  height={280}
+                />
+              </div>
+            </section>
+
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold">Service Health Timeline</h2>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  Window
+                  <select
+                    value={timelineWindow}
+                    onChange={(event) => setTimelineWindow(event.target.value as TimelineWindow)}
+                    className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+                  >
+                    <option value="6h">6h</option>
+                    <option value="24h">24h</option>
+                    <option value="7d">7d</option>
+                  </select>
+                </label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Status-over-time timeline for healthy, degraded, and down transitions.
+              </p>
+              {timelineError ? (
+                <ErrorState message={timelineError} onRetry={() => void loadTimeline()} />
+              ) : (
+                <ServiceHealthTimeline
+                  segments={timeline?.segments ?? []}
+                  lastRefreshedAt={timeline?.lastRefreshedAt}
+                  isLoading={timelineLoading}
+                />
+              )}
+            </section>
 
             <section className="space-y-3">
               <h2 className="text-sm font-semibold">Quick Links</h2>
@@ -330,20 +641,65 @@ export function ServiceDetailsPage({ serviceId }: ServiceDetailsPageProps) {
                   <p className="mb-3 text-xs text-muted-foreground">
                     Opens Grafana/Loki filtered by namespace, app label, and time range.
                   </p>
-                  {logsConfigured ? (
-                    <Button asChild size="sm">
-                      <a href={logsUrl} target="_blank" rel="noreferrer">
-                        Open Logs
-                      </a>
-                    </Button>
-                  ) : (
-                    <Button type="button" size="sm" disabled>
-                      Logs unavailable
-                    </Button>
-                  )}
+                  <div className="flex flex-wrap gap-2">
+                    {logsConfigured ? (
+                      <Button type="button" size="sm" variant="outline" onClick={() => setLogsDrawerOpen((open) => !open)}>
+                        {logsDrawerOpen ? 'Hide logs panel' : 'View logs'}
+                      </Button>
+                    ) : (
+                      <Button type="button" size="sm" disabled>
+                        Logs unavailable
+                      </Button>
+                    )}
+                    {logsConfigured ? (
+                      <Button asChild size="sm">
+                        <a href={logsUrl} target="_blank" rel="noreferrer">
+                          Open full logs
+                        </a>
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             </section>
+
+            {logsDrawerOpen && logsConfigured ? (
+              <section className="space-y-3">
+                <h2 className="text-sm font-semibold">Logs Quick View</h2>
+                <p className="text-xs text-muted-foreground">
+                  Preset Loki investigations scoped to namespace and service label.
+                </p>
+                <div className="rounded-md border border-border bg-background p-3">
+                  <div className="mb-3 flex flex-wrap gap-2">
+                    {presetLinks.map((preset) => (
+                      <Button
+                        key={preset.id}
+                        type="button"
+                        size="sm"
+                        variant={activeLogsPreset === preset.id ? 'default' : 'outline'}
+                        onClick={() => setActiveLogsPreset(preset.id)}
+                      >
+                        {preset.label}
+                      </Button>
+                    ))}
+                  </div>
+                  {activePreset ? (
+                    <div className="space-y-2 rounded-md border border-border/70 bg-muted/20 p-3">
+                      <p className="text-sm font-medium">{activePreset.label}</p>
+                      <p className="text-xs text-muted-foreground">{activePreset.description}</p>
+                      <p className="break-all rounded bg-background px-2 py-1 font-mono text-xs">{activePreset.query}</p>
+                      <div className="pt-1">
+                        <Button asChild size="sm">
+                          <a href={activePreset.href} target="_blank" rel="noreferrer">
+                            Open in Grafana
+                          </a>
+                        </Button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+            ) : null}
 
             <section className="space-y-3">
               <h2 className="text-sm font-semibold">Endpoints</h2>

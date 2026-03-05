@@ -1,4 +1,5 @@
-import { FolderKanban, LayoutDashboard, Server, Settings } from 'lucide-react'
+import { FolderKanban, HeartPulse, LayoutDashboard, Server, Settings } from 'lucide-react'
+import { ThemeToggle } from '@/components/theme-toggle'
 import { cn } from '@/lib/utils'
 import { AppLink } from '@/components/navigation/app-link'
 
@@ -6,19 +7,25 @@ const links = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/projects', label: 'Projects', icon: FolderKanban },
   { to: '/services', label: 'Services', icon: Server },
+  { to: '/platform-health', label: 'Platform Health', icon: HeartPulse },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
 interface PortalSidebarProps {
   pathname: string
+  theme: 'light' | 'dark'
+  onThemeToggle: () => void
 }
 
-export function PortalSidebar({ pathname }: PortalSidebarProps) {
+export function PortalSidebar({ pathname, theme, onThemeToggle }: PortalSidebarProps) {
   return (
     <aside className="sticky top-0 hidden h-screen w-64 shrink-0 border-r border-border bg-sidebar p-4 md:block">
-      <div className="mb-6">
-        <p className="text-sm text-muted-foreground">Center of Homelab</p>
-        <h1 className="text-lg font-semibold">Homelab Control</h1>
+      <div className="mb-6 flex items-center justify-between gap-2">
+        <div>
+          <p className="text-sm text-muted-foreground">Center of Homelab</p>
+          <h1 className="text-lg font-semibold">Homelab Control</h1>
+        </div>
+        <ThemeToggle theme={theme} onToggle={onThemeToggle} />
       </div>
       <nav className="space-y-1">
         {links.map(({ to, label, icon: Icon }) => (

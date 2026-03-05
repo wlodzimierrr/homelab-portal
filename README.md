@@ -53,6 +53,8 @@ Frontend runtime config (see `src/lib/config.ts`):
 - `VITE_GRAFANA_BASE_URL` (default: empty)
 - `VITE_ARGO_APP_PATH_TEMPLATE` (default: `/applications/{serviceId}`)
 - `VITE_GRAFANA_DASHBOARD_PATH_TEMPLATE` (default: `/d/service-overview?var-service={serviceId}`)
+- `VITE_GRAFANA_LATENCY_PANEL_PATH_TEMPLATE` (default: `/d-solo/service-overview/service-overview?panelId=2&var-service={serviceId}&from=now-{timeRange}&to=now`)
+- `VITE_GRAFANA_ERROR_PANEL_PATH_TEMPLATE` (default: `/d-solo/service-overview/service-overview?panelId=3&var-service={serviceId}&from=now-{timeRange}&to=now`)
 - `VITE_LOKI_LOGS_PATH_TEMPLATE` (default: `/explore?var-namespace={{namespace}}&var-app={{app_label}}&from=now-{{time_range}}&to=now`)
 
 ### Runtime config examples
@@ -77,7 +79,9 @@ npm run dev
 
 Notes:
 - If `VITE_ARGO_BASE_URL` or `VITE_GRAFANA_BASE_URL` is empty, related external links are unavailable.
-- Logs templates support both `{var}` and `{{var}}` placeholders, including `{{namespace}}`, `{{app_label}}`, and `{{time_range}}`.
+- Logs templates support both `{var}` and `{{var}}` placeholders, including `{{namespace}}`, `{{app_label}}`, `{{time_range}}`, and optional `{{preset}}`/`{{query}}`.
+- Grafana dashboard/panel templates support `serviceId`, `namespace`, `environment`, and `timeRange` placeholders.
+- In development mode, missing/unresolved template variables emit `[monitoring-url]` console warnings and fall back to safe links.
 
 ### Services registry fallback (MVP)
 
@@ -97,11 +101,62 @@ The dashboard uses API-first release metadata and falls back to local sample dat
   - `GET /api/projects` (minimal status-only mapping)
   - local sample payload
 
+### Service metrics summary fallback (T4.3.2)
+
+Service detail metric cards use API-first loading and degrade safely to sample or no-data values.
+
+- Sample file path: `apps/portal/frontend/service-metrics.sample.json`
+- Adapter path: `apps/portal/frontend/src/lib/adapters/service-metrics.ts`
+- Current load order:
+  - `GET /api/services/{serviceId}/metrics-summary` (if implemented)
+  - local sample payload by `serviceId`
+  - safe no-data fallback
+
+### Uptime indicator status mapping (T4.3.3)
+
+Shared uptime severity thresholds and stale-data rules are centralized in:
+
+- `apps/portal/frontend/src/lib/uptime-status.ts`
+
+This mapping powers the reusable component:
+
+- `apps/portal/frontend/src/components/uptime-indicator.tsx`
+
+Unit tests:
+
+- `apps/portal/frontend/tests/uptime-status.test.ts`
+- run with `npm run test:unit`
+
+### Service health timeline fallback (T4.3.6)
+
+Service detail timeline is API-first with safe fallback behavior:
+
+- Sample file path: `apps/portal/frontend/service-health-timeline.sample.json`
+- Adapter path: `apps/portal/frontend/src/lib/adapters/service-health-timeline.ts`
+- Current load order:
+  - `GET /api/services/{serviceId}/health-timeline?range={window}` (if implemented)
+  - local sample payload by service + window (`6h`, `24h`, `7d`)
+  - safe empty timeline state
+
+### Deployment alerting rules (T4.3.8)
+
+Deployment-health detection rules are centralized in:
+
+- `apps/portal/frontend/src/lib/deployment-alerts.ts`
+
+The helper is consumed by deployment history, service detail, and services list pages to apply consistent degraded highlighting.
+
+Unit tests:
+
+- `apps/portal/frontend/tests/deployment-alerts.test.ts`
+- run with `npm run test:unit`
+
 ## Available scripts
 
 - `npm run dev` - start Vite dev server
 - `npm run build` - type-check and create production build in `dist/`
 - `npm run lint` - run ESLint
+- `npm run test:unit` - run unit tests for shared status mapping helpers
 - `npm run format` - check formatting with Prettier
 - `npm run format:write` - apply Prettier formatting
 

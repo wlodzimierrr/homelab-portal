@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test:unit": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/**/*.test.js && rm -rf .tmp-tests",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "preview": "vite preview"

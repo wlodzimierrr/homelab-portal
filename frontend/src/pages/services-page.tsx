@@ -4,7 +4,11 @@ import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
 import { AppLink } from '@/components/navigation/app-link'
+import { getDeploymentHistory } from '@/lib/adapters/deployments'
+import { UptimeIndicator } from '@/components/uptime-indicator'
 import { getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
+import { summarizeDeploymentAlerts, type DeploymentAlertLevel } from '@/lib/deployment-alerts'
+import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
 import { cn } from '@/lib/utils'
 
 type HealthStatus = 'healthy' | 'degraded' | 'unknown'
@@ -13,6 +17,15 @@ type SyncStatus = 'synced' | 'out_of_sync' | 'unknown'
 interface ServiceRow extends ServiceRegistryItem {
   health: HealthStatus
   sync: SyncStatus
+}
+
+interface ServiceAlertState {
+  level: DeploymentAlertLevel
+  suspicious: boolean
+}
+
+interface ServicesPageProps {
+  incidentServiceAlerts?: Record<string, ServiceIncidentBadge>
 }
 
 function formatLastDeploy(value?: string) {
@@ -47,8 +60,25 @@ function StatusBadge({ label, value }: { label: string; value: string }) {
   )
 }
 
-export function ServicesPage() {
+function IncidentCountBadge({ alert }: { alert: ServiceIncidentBadge }) {
+  const severity = alert.highestSeverity ?? 'info'
+  const tone =
+    severity === 'critical'
+      ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+      : severity === 'warning'
+        ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+        : 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
+
+  return (
+    <span className={cn('inline-flex items-center rounded-full px-2 py-1 text-xs font-medium', tone)}>
+      Alerts: {alert.total}
+    </span>
+  )
+}
+
+export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) {
   const [services, setServices] = useState<ServiceRow[]>([])
+  const [serviceAlerts, setServiceAlerts] = useState<Record<string, ServiceAlertState>>({})
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
@@ -60,6 +90,26 @@ export function ServicesPage() {
     try {
       const response = await getServicesRegistry()
       setServices(response)
+      const alerts = await Promise.all(
+        response.map(async (service) => {
+          try {
+            const deployments = await getDeploymentHistory(service.id, { limit: 3 })
+            const summary = summarizeDeploymentAlerts(
+              deployments.map((item) => ({
+                outcome: item.outcome,
+                regressionScore: item.regressionScore,
+                errorRateDeltaPct: item.errorRatePct.delta,
+                latencyDeltaMs: item.p95LatencyMs.delta,
+                availabilityDeltaPct: item.availabilityPct.delta,
+              })),
+            )
+            return [service.id, { suspicious: summary.suspicious, level: summary.level }] as const
+          } catch {
+            return [service.id, { suspicious: false, level: 'none' as const }] as const
+          }
+        }),
+      )
+      setServiceAlerts(Object.fromEntries(alerts))
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : 'Failed to load services'
       setError(message)
@@ -170,13 +220,34 @@ export function ServicesPage() {
                     <AppLink to={`/services/${encodeURIComponent(service.id)}`} className="hover:underline">
                       {service.name}
                     </AppLink>
+                    {incidentServiceAlerts[service.id]?.total ? (
+                      <div className="mt-2">
+                        <IncidentCountBadge alert={incidentServiceAlerts[service.id]} />
+                      </div>
+                    ) : null}
                   </td>
                   <td className="px-3 py-3 text-muted-foreground">{service.environments.join(', ')}</td>
                   <td className="px-3 py-3">
-                    <div className="flex flex-wrap gap-2">
-                      <StatusBadge label="Health" value={service.health} />
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      <StatusBadge
+                        label="Health"
+                        value={
+                          service.health === 'degraded' || serviceAlerts[service.id]?.suspicious
+                            ? 'degraded'
+                            : service.health
+                        }
+                      />
                       <StatusBadge label="Sync" value={service.sync} />
+                      {serviceAlerts[service.id]?.suspicious ? (
+                        <StatusBadge label="Alert" value="degraded" />
+                      ) : null}
                     </div>
+                    <UptimeIndicator
+                      className="p-3"
+                      uptime24h={service.uptime24hPct}
+                      uptime7d={service.uptime7dPct}
+                      lastRefreshedAt={service.metricsLastRefreshedAt}
+                    />
                   </td>
                   <td className="px-3 py-3">
                     {service.publicUrl ? (

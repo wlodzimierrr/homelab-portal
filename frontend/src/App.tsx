@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ToastMessage } from '@/components/toast-message'
 import { UNAUTHORIZED_EVENT } from '@/lib/api'
+import { getPlatformIncidentFeed } from '@/lib/adapters/platform-health'
 import { useAuth } from '@/lib/auth'
+import { config } from '@/lib/config'
+import {
+  buildIncidentAlertSnapshot,
+  normalizeIncidentSeverityThreshold,
+  shouldShowIncidentBanner,
+  type IncidentAlertSnapshot,
+} from '@/lib/incident-alerts'
 import { LoginPage } from '@/pages/login-page'
 import { DashboardPage } from '@/pages/dashboard-page'
+import { PlatformHealthPage } from '@/pages/platform-health-page'
 import { ProjectsPage } from '@/pages/projects-page'
 import { ServiceDeploymentsPage } from '@/pages/service-deployments-page'
 import { ServiceDetailsPage } from '@/pages/service-details-page'
@@ -13,11 +22,22 @@ import { PortalLayout } from '@/components/layout/portal-layout'
 import { getServiceIdFromPath, isServiceDeploymentsPath, isServiceDetailsPath } from '@/lib/routes'
 
 type Theme = 'light' | 'dark'
+const INCIDENT_BANNER_DISMISSED_KEY = 'portal-incident-banner-dismissed'
+const INCIDENT_POLL_INTERVAL_MS = 60_000
+const EMPTY_INCIDENT_SNAPSHOT: IncidentAlertSnapshot = {
+  activeCount: 0,
+  highestSeverity: null,
+  serviceAlerts: {},
+}
 
 function App() {
   const { token, clearToken } = useAuth()
   const [pathname, setPathname] = useState(window.location.pathname)
   const [toastMessage, setToastMessage] = useState('')
+  const [incidentSnapshot, setIncidentSnapshot] = useState<IncidentAlertSnapshot>(EMPTY_INCIDENT_SNAPSHOT)
+  const [isIncidentBannerDismissed, setIsIncidentBannerDismissed] = useState(() => {
+    return window.sessionStorage.getItem(INCIDENT_BANNER_DISMISSED_KEY) === '1'
+  })
   const [theme, setTheme] = useState<Theme>(() => {
     const stored = window.localStorage.getItem('portal-theme')
     return stored === 'dark' ? 'dark' : 'light'
@@ -79,7 +99,56 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [toastMessage])
 
+  useEffect(() => {
+    if (!token) {
+      return
+    }
+
+    let cancelled = false
+
+    const loadIncidents = async () => {
+      try {
+        const feed = await getPlatformIncidentFeed()
+        if (cancelled) {
+          return
+        }
+        setIncidentSnapshot(buildIncidentAlertSnapshot(feed.incidents))
+      } catch {
+        if (cancelled) {
+          return
+        }
+        setIncidentSnapshot(EMPTY_INCIDENT_SNAPSHOT)
+      }
+    }
+
+    void loadIncidents()
+    const intervalId = window.setInterval(() => void loadIncidents(), INCIDENT_POLL_INTERVAL_MS)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [token])
+
+  const dismissIncidentBanner = useCallback(() => {
+    setIsIncidentBannerDismissed(true)
+    window.sessionStorage.setItem(INCIDENT_BANNER_DISMISSED_KEY, '1')
+  }, [])
+
   const serviceId = useMemo(() => getServiceIdFromPath(pathname), [pathname])
+  const incidentThreshold = useMemo(
+    () => normalizeIncidentSeverityThreshold(config.incidentBannerMinSeverity),
+    [],
+  )
+  const showIncidentBanner = useMemo(
+    () =>
+      pathname !== '/login' &&
+      shouldShowIncidentBanner(incidentSnapshot, {
+        threshold: incidentThreshold,
+        dismissed: isIncidentBannerDismissed,
+      }),
+    [incidentSnapshot, incidentThreshold, isIncidentBannerDismissed, pathname],
+  )
   const handleLoginSuccess = useCallback(() => navigate('/dashboard', true), [navigate])
 
   const content = useMemo(() => {
@@ -93,19 +162,22 @@ function App() {
       return <ProjectsPage />
     }
     if (pathname === '/services') {
-      return <ServicesPage />
+      return <ServicesPage incidentServiceAlerts={incidentSnapshot.serviceAlerts} />
+    }
+    if (pathname === '/platform-health') {
+      return <PlatformHealthPage />
     }
     if (isServiceDeploymentsPath(pathname)) {
       return <ServiceDeploymentsPage serviceId={serviceId} />
     }
     if (isServiceDetailsPath(pathname)) {
-      return <ServiceDetailsPage serviceId={serviceId} />
+      return <ServiceDetailsPage serviceId={serviceId} incidentServiceAlerts={incidentSnapshot.serviceAlerts} />
     }
     if (pathname === '/settings') {
       return <SettingsPage />
     }
     return <DashboardPage />
-  }, [handleLoginSuccess, pathname, serviceId])
+  }, [handleLoginSuccess, incidentSnapshot.serviceAlerts, pathname, serviceId])
 
   if (pathname === '/login') {
     return (
@@ -118,7 +190,15 @@ function App() {
 
   return (
     <>
-      <PortalLayout pathname={pathname} theme={theme} onThemeToggle={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
+      <PortalLayout
+        pathname={pathname}
+        theme={theme}
+        onThemeToggle={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+        showIncidentBanner={showIncidentBanner}
+        incidentActiveCount={incidentSnapshot.activeCount}
+        incidentHighestSeverity={incidentSnapshot.highestSeverity}
+        onIncidentDismiss={dismissIncidentBanner}
+      >
         {content}
       </PortalLayout>
       {toastMessage ? <ToastMessage message={toastMessage} onClose={() => setToastMessage('')} /> : null}

@@ -9,6 +9,9 @@ export interface ServiceRegistryItem {
   environments: string[]
   health: ServiceHealth
   sync: ServiceSync
+  uptime24hPct?: number
+  uptime7dPct?: number
+  metricsLastRefreshedAt?: string
   publicUrl?: string
   internalUrls?: string[]
   lastDeployAt?: string
@@ -147,6 +150,18 @@ function adaptSampleToServices(payload: ServicesSamplePayload): ServiceRegistryI
 
       if (typeof service.lastDeployAt === 'string') {
         normalized.lastDeployAt = service.lastDeployAt
+      }
+
+      if (typeof service.uptime24hPct === 'number' && Number.isFinite(service.uptime24hPct)) {
+        normalized.uptime24hPct = service.uptime24hPct
+      }
+
+      if (typeof service.uptime7dPct === 'number' && Number.isFinite(service.uptime7dPct)) {
+        normalized.uptime7dPct = service.uptime7dPct
+      }
+
+      if (typeof service.metricsLastRefreshedAt === 'string') {
+        normalized.metricsLastRefreshedAt = service.metricsLastRefreshedAt
       }
 
       if (typeof service.namespace === 'string') {

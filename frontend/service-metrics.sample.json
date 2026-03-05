@@ -1,0 +1,22 @@
+{
+  "services": [
+    {
+      "serviceId": "homelab-api",
+      "uptime24hPct": 99.96,
+      "uptime7dPct": 99.91,
+      "p95LatencyMs": 182,
+      "errorRatePct": 0.22,
+      "restartCount": 0,
+      "lastRefreshedAt": "2026-03-05T10:42:00Z"
+    },
+    {
+      "serviceId": "homelab-web",
+      "uptime24hPct": 99.72,
+      "uptime7dPct": 99.48,
+      "p95LatencyMs": 438,
+      "errorRatePct": 1.41,
+      "restartCount": 2,
+      "lastRefreshedAt": "2026-03-05T10:42:00Z"
+    }
+  ]
+}
