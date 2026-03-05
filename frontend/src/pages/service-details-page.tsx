@@ -23,6 +23,12 @@ import {
   type ServiceMetricsRange,
   type ServiceMetricsSummary,
 } from '@/lib/adapters/service-metrics'
+import {
+  getServiceLogsQuickView,
+  type LogsQuickViewPreset,
+  type LogsQuickViewRange,
+  type ServiceLogsQuickView,
+} from '@/lib/adapters/logs-quickview'
 import { getServiceIdentity } from '@/lib/adapters/services'
 import {
   getServiceHealthTimeline,
@@ -66,13 +72,11 @@ interface QuickLinkCardProps {
   href?: string
 }
 
-type LogsPresetId = 'errors' | 'restarts' | 'warnings'
-
 interface LogsPreset {
-  id: LogsPresetId
+  id: LogsQuickViewPreset
   label: string
   description: string
-  query: string
+  queryTemplate: string
 }
 
 function normalizeHealthStatus(value?: string): HealthStatus {
@@ -279,20 +283,27 @@ const logsPresets: LogsPreset[] = [
     id: 'errors',
     label: 'Errors',
     description: 'HTTP 5xx or error-level logs',
-    query: '{namespace="{{namespace}}", app="{{app_label}}"} |= "error" or |= " 5" ',
+    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"} |= "error" or |= " 5" ',
   },
   {
     id: 'restarts',
     label: 'Restarts',
     description: 'Container restart signals and crash loops',
-    query: '{namespace="{{namespace}}", app="{{app_label}}"} |= "restart" or |= "CrashLoopBackOff"',
+    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"} |= "restart" or |= "CrashLoopBackOff"',
   },
   {
     id: 'warnings',
     label: 'Warnings',
     description: 'Recent warning/timeout style signals',
-    query: '{namespace="{{namespace}}", app="{{app_label}}"} |= "warn" or |= "timeout"',
+    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"} |= "warn" or |= "timeout"',
   },
+]
+
+const logsRangeOptions: Array<{ value: LogsQuickViewRange; label: string }> = [
+  { value: '15m', label: '15m' },
+  { value: '1h', label: '1h' },
+  { value: '6h', label: '6h' },
+  { value: '24h', label: '24h' },
 ]
 
 export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: ServiceDetailsPageProps) {
@@ -314,7 +325,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [timelineLoading, setTimelineLoading] = useState(true)
   const [timelineError, setTimelineError] = useState('')
   const [logsDrawerOpen, setLogsDrawerOpen] = useState(false)
-  const [activeLogsPreset, setActiveLogsPreset] = useState<LogsPresetId>('errors')
+  const [activeLogsPreset, setActiveLogsPreset] = useState<LogsQuickViewPreset>('errors')
+  const [logsRange, setLogsRange] = useState<LogsQuickViewRange>('1h')
+  const [logsResult, setLogsResult] = useState<ServiceLogsQuickView | null>(null)
+  const [logsLoading, setLogsLoading] = useState(false)
+  const [logsError, setLogsError] = useState('')
 
   const loadOverview = useCallback(async () => {
     setIsLoading(true)
@@ -454,38 +469,57 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     [decodedServiceId, incidentServiceAlerts, serviceId],
   )
   const logsConfigured = isLogsConfigured()
-  const logsNamespace = serviceIdentity.namespace
-  const logsAppLabel = serviceIdentity.appLabel
-  const logsTimeRange = '6h'
-  const logsUrl = useMemo(
-    () =>
-      buildLogsUrl({
-        serviceId: decodedServiceId,
-        namespace: logsNamespace,
-        appLabel: logsAppLabel,
-        timeRange: logsTimeRange,
-      }),
-    [decodedServiceId, logsAppLabel, logsNamespace, logsTimeRange],
-  )
+  const logsNamespace = serviceIdentity.namespace || 'default'
+  const logsAppLabel = serviceIdentity.appLabel || decodedServiceId
   const presetLinks = useMemo(() => {
     return logsPresets.map((preset) => ({
       ...preset,
+      query: preset.queryTemplate
+        .replaceAll('{{namespace}}', logsNamespace)
+        .replaceAll('{{app_label}}', logsAppLabel),
       href: buildLogsUrl({
         serviceId: decodedServiceId,
         namespace: logsNamespace,
         appLabel: logsAppLabel,
-        timeRange: logsTimeRange,
+        timeRange: logsRange,
         preset: preset.id,
-        query: preset.query
+        query: preset.queryTemplate
           .replaceAll('{{namespace}}', logsNamespace)
           .replaceAll('{{app_label}}', logsAppLabel),
       }),
     }))
-  }, [decodedServiceId, logsAppLabel, logsNamespace, logsTimeRange])
+  }, [decodedServiceId, logsAppLabel, logsNamespace, logsRange])
   const activePreset = useMemo(
     () => presetLinks.find((preset) => preset.id === activeLogsPreset) ?? presetLinks[0],
     [activeLogsPreset, presetLinks],
   )
+  const logsUrl = activePreset?.href ?? ''
+
+  const loadQuickViewLogs = useCallback(async () => {
+    setLogsLoading(true)
+    setLogsError('')
+
+    try {
+      const response = await getServiceLogsQuickView(serviceIdentity, {
+        preset: activeLogsPreset,
+        range: logsRange,
+      })
+      setLogsResult(response)
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : 'Failed to load logs quick view'
+      setLogsError(message)
+      setLogsResult(null)
+    } finally {
+      setLogsLoading(false)
+    }
+  }, [activeLogsPreset, logsRange, serviceIdentity])
+
+  useEffect(() => {
+    if (!logsDrawerOpen || !logsConfigured) {
+      return
+    }
+    void loadQuickViewLogs()
+  }, [loadQuickViewLogs, logsConfigured, logsDrawerOpen])
 
   return (
     <PageShell
@@ -734,9 +768,25 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
 
             {logsDrawerOpen && logsConfigured ? (
               <section className="space-y-3">
-                <h2 className="text-sm font-semibold">Logs Quick View</h2>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h2 className="text-sm font-semibold">Logs Quick View</h2>
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    Range
+                    <select
+                      value={logsRange}
+                      onChange={(event) => setLogsRange(event.target.value as LogsQuickViewRange)}
+                      className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+                    >
+                      {logsRangeOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
                 <p className="text-xs text-muted-foreground">
-                  Preset Loki investigations scoped to namespace and service label.
+                  Live Loki quick-view lines from <code>/api/services/:serviceId/logs/quickview</code>.
                 </p>
                 <div className="rounded-md border border-border bg-background p-3">
                   <div className="mb-3 flex flex-wrap gap-2">
@@ -752,18 +802,54 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                       </Button>
                     ))}
                   </div>
-                  {activePreset ? (
-                    <div className="space-y-2 rounded-md border border-border/70 bg-muted/20 p-3">
-                      <p className="text-sm font-medium">{activePreset.label}</p>
-                      <p className="text-xs text-muted-foreground">{activePreset.description}</p>
-                      <p className="break-all rounded bg-background px-2 py-1 font-mono text-xs">{activePreset.query}</p>
-                      <div className="pt-1">
-                        <Button asChild size="sm">
-                          <a href={activePreset.href} target="_blank" rel="noreferrer">
-                            Open in Grafana
-                          </a>
-                        </Button>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/70 bg-muted/20 p-3">
+                    <div>
+                      <p className="text-sm font-medium">{activePreset?.label ?? 'Preset'}</p>
+                      <p className="text-xs text-muted-foreground">{activePreset?.description}</p>
+                    </div>
+                    {activePreset?.href ? (
+                      <Button asChild size="sm">
+                        <a href={activePreset.href} target="_blank" rel="noreferrer">
+                          Open full logs
+                        </a>
+                      </Button>
+                    ) : (
+                      <Button type="button" size="sm" disabled>
+                        Open full logs
+                      </Button>
+                    )}
+                  </div>
+                  {logsLoading ? <LoadingState label="Loading logs..." rows={3} /> : null}
+                  {!logsLoading && logsError ? (
+                    <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                      <p className="text-xs text-amber-900 dark:text-amber-200">{logsError}</p>
+                      <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => void loadQuickViewLogs()}>
+                        Retry logs
+                      </Button>
+                    </div>
+                  ) : null}
+                  {!logsLoading && !logsError && (logsResult?.lines.length ?? 0) === 0 ? (
+                    <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                      No logs found for this preset and range.
+                    </p>
+                  ) : null}
+                  {!logsLoading && !logsError && (logsResult?.lines.length ?? 0) > 0 ? (
+                    <div className="space-y-2">
+                      <div className="text-xs text-muted-foreground">
+                        Returned {logsResult?.returned ?? 0} line(s)
+                        {logsResult?.moreAvailable ? '; more logs are available.' : '.'}
                       </div>
+                      <div className="max-h-80 space-y-2 overflow-y-auto rounded-md border border-border/70 bg-muted/10 p-2">
+                        {logsResult?.lines.map((line) => (
+                          <article key={`${line.timestamp}-${line.message.slice(0, 40)}`} className="rounded border border-border/60 bg-background p-2">
+                            <p className="text-[11px] text-muted-foreground">{formatDate(line.timestamp)}</p>
+                            <p className="mt-1 break-words font-mono text-xs">{line.message}</p>
+                          </article>
+                        ))}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Last refreshed: {formatDate(logsResult?.generatedAt)}
+                      </p>
                     </div>
                   ) : null}
                 </div>

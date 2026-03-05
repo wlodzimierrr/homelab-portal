@@ -211,11 +211,11 @@ export function PlatformHealthPage() {
 
               <section className="rounded-md border border-border bg-background p-4">
                 <div className="mb-3 flex items-center justify-between gap-3">
-                  <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Latest Incidents</h2>
+                  <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Latest Alerts</h2>
                 </div>
 
                 {visibleIncidents.length === 0 ? (
-                  <EmptyState title="No incident entries available." />
+                  <EmptyState title="No active alerts available." />
                 ) : (
                   <ul className="space-y-2">
                     {visibleIncidents.map((incident) => {
@@ -230,6 +230,9 @@ export function PlatformHealthPage() {
                             <span className="text-xs text-muted-foreground">{formatDate(incident.startedAt)}</span>
                           </div>
                           <p className="mt-2 text-sm font-medium">{incident.title}</p>
+                          {incident.description ? (
+                            <p className="mt-1 text-xs text-muted-foreground">{incident.description}</p>
+                          ) : null}
                           <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
                             {incident.source ? <span className="text-muted-foreground">Source: {incident.source}</span> : null}
                             {serviceUrl ? <AppLink to={serviceUrl} className="text-primary hover:underline">Service details</AppLink> : null}

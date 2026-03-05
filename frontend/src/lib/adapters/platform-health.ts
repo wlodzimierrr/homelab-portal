@@ -9,6 +9,7 @@ export type IncidentStatus = 'active' | 'resolved'
 export interface PlatformIncident {
   id: string
   title: string
+  description?: string
   severity: IncidentSeverity
   status: IncidentStatus
   startedAt?: string
@@ -49,6 +50,17 @@ interface IncidentsResponse {
   incidents?: PlatformIncident[]
 }
 
+interface ActiveAlertItem {
+  id?: string
+  severity?: string
+  title?: string
+  description?: string
+  startsAt?: string
+  labels?: Record<string, string>
+  serviceId?: string
+  env?: string
+}
+
 const sampleUrl = new URL('../../../platform-health.sample.json', import.meta.url).toString()
 const incidentsMissingStatuses = new Set([404, 405, 501])
 
@@ -81,6 +93,7 @@ function normalizeIncidents(input: unknown): PlatformIncident[] {
       return {
         id,
         title,
+        description: typeof item.description === 'string' ? item.description : undefined,
         severity: normalizeSeverity(typeof item.severity === 'string' ? item.severity : undefined),
         status: normalizeStatus(typeof item.status === 'string' ? item.status : undefined),
         startedAt: typeof item.startedAt === 'string' ? item.startedAt : undefined,
@@ -96,14 +109,53 @@ function normalizeIncidents(input: unknown): PlatformIncident[] {
     })
 }
 
+function normalizeActiveAlerts(input: unknown): PlatformIncident[] {
+  if (!Array.isArray(input)) return []
+
+  return input
+    .map((raw, index): PlatformIncident | null => {
+      if (typeof raw !== 'object' || raw === null) return null
+      const item = raw as ActiveAlertItem
+      const id = typeof item.id === 'string' && item.id.trim() ? item.id : `alert-${index}`
+      const title = typeof item.title === 'string' && item.title.trim() ? item.title : 'Untitled alert'
+
+      return {
+        id,
+        title,
+        description: typeof item.description === 'string' ? item.description : undefined,
+        severity: normalizeSeverity(item.severity),
+        status: 'active',
+        startedAt: typeof item.startsAt === 'string' ? item.startsAt : undefined,
+        source: 'alertmanager',
+        serviceId: typeof item.serviceId === 'string' ? item.serviceId : undefined,
+      }
+    })
+    .filter((item): item is PlatformIncident => item !== null)
+    .sort((a, b) => {
+      const left = a.startedAt ? new Date(a.startedAt).getTime() : 0
+      const right = b.startedAt ? new Date(b.startedAt).getTime() : 0
+      return right - left
+    })
+}
+
 async function getIncidentsFromApi() {
   if (incidentsApiAvailability === 'unavailable') {
-    throw new ApiRequestError('Incidents endpoint is not available in this backend.', 404)
+    throw new ApiRequestError('Alerts endpoint is not available in this backend.', 404)
   }
 
-  const response = await request<IncidentsResponse>('/monitoring/incidents')
+  try {
+    const response = await request<ActiveAlertItem[]>('/alerts/active')
+    incidentsApiAvailability = 'available'
+    return normalizeActiveAlerts(response)
+  } catch (error) {
+    if (!(isApiRequestError(error) && incidentsMissingStatuses.has(error.status))) {
+      throw error
+    }
+  }
+
+  const compat = await request<IncidentsResponse>('/monitoring/incidents')
   incidentsApiAvailability = 'available'
-  return normalizeIncidents(response.incidents)
+  return normalizeIncidents(compat.incidents)
 }
 
 async function getIncidentsFromSample() {
@@ -190,7 +242,7 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
     ) {
       incidentsApiAvailability = 'unavailable'
     }
-    warnings.push('Incidents API unavailable, using sample incident feed.')
+    warnings.push('Active alerts feed unavailable, using sample incident feed.')
     try {
       incidents = await getIncidentsFromSample()
     } catch {
@@ -233,7 +285,7 @@ export async function getPlatformIncidentFeed(): Promise<PlatformIncidentFeed> {
     if (isApiRequestError(error) && incidentsMissingStatuses.has(error.status)) {
       incidentsApiAvailability = 'unavailable'
     }
-    warnings.push('Incidents API unavailable, using sample incident feed.')
+    warnings.push('Active alerts feed unavailable, using sample incident feed.')
   }
 
   try {
