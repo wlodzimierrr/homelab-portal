@@ -9,7 +9,10 @@ FastAPI backend scaffold for task `T1.2.1`.
 - `GET /projects`
 - `GET /services/{serviceId}/metrics/summary?range=1h|24h|7d`
 - `GET /services/{serviceId}/health/timeline?range=24h|7d&step=5m..1h`
+- `GET /alerts/active?env=dev&serviceId=...`
+- `GET /monitoring/incidents` (compatibility envelope for existing frontend adapter)
 - `GET /releases?env=dev&limit=50&serviceId=...`
+- `GET /services/{serviceId}/logs/quickview?preset=errors&range=1h`
 
 ## Development
 
@@ -65,6 +68,48 @@ Deterministic drift rule for `/releases`:
 2. else `expectedRevision != liveRevision` when both values exist => drifted
 3. else `expectedImageRef != liveImageRef` when both values exist => drifted
 4. otherwise not drifted
+
+Logs quick-view config:
+
+- `LOKI_BASE_URL` (default: `http://loki.monitoring.svc.cluster.local:3100`)
+- `LOGS_DEFAULT_NAMESPACE` (default: `default`)
+- `LOGS_QUICKVIEW_RATE_LIMIT_PER_MIN` (default: `60`)
+
+Quick-view supports only approved presets (`errors`, `restarts`, `warnings`) and does not allow arbitrary client queries.
+
+Active alerts feed config:
+
+- `ALERTMANAGER_BASE_URL` (default: `http://alertmanager-operated.monitoring.svc.cluster.local:9093`)
+- `ALERT_SEVERITY_CRITICAL_VALUES` (CSV, default: `critical,error,page`)
+- `ALERT_SEVERITY_WARNING_VALUES` (CSV, default: `warning,warn,info`)
+
+Severity mapping for `/alerts/active` is normalized to `warning|critical` for consistency with frontend badge tones.
+
+Observability hardening config:
+
+- Allowed ranges:
+  - `OBS_METRICS_ALLOWED_RANGES` (default: `1h,24h,7d`)
+  - `OBS_TIMELINE_ALLOWED_RANGES` (default: `24h,7d`)
+  - `OBS_LOGS_ALLOWED_RANGES` (default: `15m,1h,6h,24h`)
+- Limits:
+  - `OBS_TIMELINE_STEP_MIN` (default: `5m`)
+  - `OBS_TIMELINE_STEP_MAX` (default: `1h`)
+  - `OBS_TIMELINE_MAX_POINTS` (default: `1000`)
+  - `OBS_LOGS_MAX_LINES` (default: `200`)
+  - `OBS_ALERTS_MAX_ROWS` (default: `200`)
+- Cache TTLs:
+  - `OBS_METRICS_CACHE_TTL_SECONDS` (default: `20`)
+  - `OBS_TIMELINE_CACHE_TTL_SECONDS` (default: `30`)
+  - `OBS_LOGS_CACHE_TTL_SECONDS` (default: `15`)
+  - `OBS_ALERTS_CACHE_TTL_SECONDS` (default: `15`)
+- Query templates (see `docs/monitoring/query-templates.md`):
+  - `OBS_QUERY_METRICS_UPTIME`
+  - `OBS_QUERY_METRICS_P95_LATENCY`
+  - `OBS_QUERY_METRICS_ERROR_RATE`
+  - `OBS_QUERY_METRICS_RESTART_COUNT`
+  - `OBS_QUERY_TIMELINE_AVAILABILITY`
+  - `OBS_QUERY_TIMELINE_ERROR_RATE`
+  - `OBS_QUERY_TIMELINE_READINESS`
 
 ## Container Image
 

@@ -2,12 +2,20 @@ import json
 from io import BytesIO
 from urllib.error import HTTPError
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app, clear_observability_caches_for_tests
+from app.logs_quickview import clear_rate_limit_state_for_tests
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _clear_caches_between_tests() -> None:
+    clear_rate_limit_state_for_tests()
+    clear_observability_caches_for_tests()
 
 
 def test_health_endpoint() -> None:
@@ -390,3 +398,276 @@ def test_release_dashboard_compat_endpoint_available(monkeypatch) -> None:
     body = response.json()
     assert "releases" in body
     assert len(body["releases"]) == 1
+
+
+def test_logs_quickview_requires_approved_presets(monkeypatch) -> None:
+    response = client.get(
+        "/services/homelab-api/logs/quickview?preset=custom",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+    assert response.status_code == 422
+
+
+def test_logs_quickview_returns_bounded_results_with_more_available(monkeypatch) -> None:
+    clear_rate_limit_state_for_tests()
+    payload = {
+        "status": "success",
+        "data": {
+            "result": [
+                {
+                    "stream": {"namespace": "default", "app": "homelab-api"},
+                    "values": [
+                        ["1700000002000000000", "line-2"],
+                        ["1700000001000000000", "line-1"],
+                    ],
+                }
+            ]
+        },
+    }
+
+    def _mock_urlopen(*args, **kwargs):
+        return _MockPrometheusResponse(payload)
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+
+    response = client.get(
+        "/services/homelab-api/logs/quickview?preset=errors&range=1h&limit=1",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["returned"] == 1
+    assert body["moreAvailable"] is True
+    assert body["nextCursor"]
+    assert len(body["lines"]) == 1
+
+
+def test_logs_quickview_enforces_rate_limit(monkeypatch) -> None:
+    monkeypatch.setenv("LOGS_QUICKVIEW_RATE_LIMIT_PER_MIN", "1")
+    payload = {"status": "success", "data": {"result": []}}
+
+    def _mock_urlopen(*args, **kwargs):
+        return _MockPrometheusResponse(payload)
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+
+    first = client.get(
+        "/services/homelab-api/logs/quickview?preset=errors",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+    second = client.get(
+        "/services/homelab-api/logs/quickview?preset=errors",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+
+
+def test_metrics_summary_uses_cache_for_repeated_service_and_range(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    def _mock_urlopen(*args, **kwargs):
+        calls["count"] += 1
+        return _MockPrometheusResponse(
+            {"status": "success", "data": {"result": [{"value": [0, "1"]}]}}
+        )
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setenv("OBS_METRICS_CACHE_TTL_SECONDS", "60")
+
+    first = client.get(
+        "/services/homelab-api/metrics/summary?range=24h",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+    second = client.get(
+        "/services/homelab-api/metrics/summary?range=24h",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    # 4 Prometheus queries for first call, second call should hit cache.
+    assert calls["count"] == 4
+
+
+def test_logs_quickview_caps_limit_by_config(monkeypatch) -> None:
+    payload = {
+        "status": "success",
+        "data": {
+            "result": [
+                {
+                    "stream": {"namespace": "default", "app": "homelab-api"},
+                    "values": [
+                        ["1700000003000000000", "line-3"],
+                        ["1700000002000000000", "line-2"],
+                        ["1700000001000000000", "line-1"],
+                    ],
+                }
+            ]
+        },
+    }
+
+    def _mock_urlopen(*args, **kwargs):
+        return _MockPrometheusResponse(payload)
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setenv("OBS_LOGS_MAX_LINES", "2")
+
+    response = client.get(
+        "/services/homelab-api/logs/quickview?preset=errors&range=1h&limit=200",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["limit"] == 2
+    assert body["returned"] == 2
+
+
+def test_alerts_active_caps_limit_by_config(monkeypatch) -> None:
+    payload = [
+        {
+            "status": {"state": "active"},
+            "labels": {"alertname": "A", "severity": "warning"},
+            "annotations": {"summary": "A"},
+            "startsAt": "2026-03-05T12:00:00Z",
+        },
+        {
+            "status": {"state": "active"},
+            "labels": {"alertname": "B", "severity": "critical"},
+            "annotations": {"summary": "B"},
+            "startsAt": "2026-03-05T12:01:00Z",
+        },
+    ]
+
+    def _mock_urlopen(*args, **kwargs):
+        return _MockPrometheusResponse(payload)
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setenv("OBS_ALERTS_MAX_ROWS", "1")
+
+    response = client.get(
+        "/alerts/active?limit=50",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+
+
+def test_alerts_active_returns_mapped_alerts(monkeypatch) -> None:
+    payload = [
+        {
+            "status": {"state": "active"},
+            "labels": {
+                "alertname": "HighErrorRate",
+                "severity": "critical",
+                "service": "homelab-api",
+                "env": "dev",
+            },
+            "annotations": {
+                "summary": "High error rate",
+                "description": "5xx exceeded threshold",
+            },
+            "startsAt": "2026-03-05T12:00:00Z",
+        }
+    ]
+
+    def _mock_urlopen(*args, **kwargs):
+        return _MockPrometheusResponse(payload)
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+
+    response = client.get(
+        "/alerts/active",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["severity"] == "critical"
+    assert body[0]["title"] == "High error rate"
+    assert body[0]["serviceId"] == "homelab-api"
+    assert body[0]["env"] == "dev"
+
+
+def test_alerts_active_supports_filters(monkeypatch) -> None:
+    payload = [
+        {
+            "status": {"state": "active"},
+            "labels": {"alertname": "A", "severity": "warning", "service": "homelab-api", "env": "dev"},
+            "annotations": {"summary": "A"},
+            "startsAt": "2026-03-05T12:00:00Z",
+        },
+        {
+            "status": {"state": "active"},
+            "labels": {"alertname": "B", "severity": "critical", "service": "homelab-web", "env": "prod"},
+            "annotations": {"summary": "B"},
+            "startsAt": "2026-03-05T12:10:00Z",
+        },
+    ]
+
+    def _mock_urlopen(*args, **kwargs):
+        return _MockPrometheusResponse(payload)
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+
+    response = client.get(
+        "/alerts/active?serviceId=homelab-api&env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["serviceId"] == "homelab-api"
+    assert body[0]["env"] == "dev"
+
+
+def test_alerts_active_gracefully_degrades_on_upstream_failure(monkeypatch) -> None:
+    def _mock_urlopen(*args, **kwargs):
+        raise HTTPError(
+            url="http://alertmanager.local/api/v2/alerts",
+            code=503,
+            msg="Service Unavailable",
+            hdrs=None,
+            fp=BytesIO(b'{"status":"error","error":"provider down"}'),
+        )
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+
+    response = client.get(
+        "/alerts/active",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_monitoring_incidents_compat_route_available(monkeypatch) -> None:
+    payload = [
+        {
+            "status": {"state": "active"},
+            "labels": {"alertname": "HighLatency", "severity": "warning", "service": "homelab-api"},
+            "annotations": {"summary": "High latency"},
+            "startsAt": "2026-03-05T11:00:00Z",
+        }
+    ]
+
+    def _mock_urlopen(*args, **kwargs):
+        return _MockPrometheusResponse(payload)
+
+    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+
+    response = client.get(
+        "/monitoring/incidents",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "incidents" in body
+    assert len(body["incidents"]) == 1
+    assert body["incidents"][0]["severity"] == "warning"

@@ -14,6 +14,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, ConfigDict
 
+from app.alerts_feed import (
+    get_alertmanager_base_url,
+    normalize_active_alerts,
+)
 from app.db import get_psycopg_database_url
 from app.health_timeline import (
     TimelinePoint,
@@ -24,16 +28,40 @@ from app.health_timeline import (
     parse_range,
     parse_step,
 )
+from app.logs_quickview import (
+    build_preset_query,
+    build_time_window,
+    encode_cursor_ns,
+    enforce_logs_rate_limit,
+    get_logs_default_namespace,
+    validate_preset,
+)
 from app.release_traceability import (
     build_release_traceability_rows,
     load_argo_metadata_rows,
     load_ci_metadata_rows,
+)
+from app.observability_cache import TTLCache
+from app.observability_config import (
+    load_observability_config,
+    render_query_template,
 )
 
 app = FastAPI(title="Homelab Backend API", version="0.1.0")
 logger = logging.getLogger("homelab.backend.monitoring")
 
 bearer_auth = HTTPBearer(auto_error=False)
+metrics_summary_cache = TTLCache()
+timeline_cache = TTLCache()
+logs_quickview_cache = TTLCache()
+alerts_cache = TTLCache()
+
+
+def clear_observability_caches_for_tests() -> None:
+    metrics_summary_cache.clear()
+    timeline_cache.clear()
+    logs_quickview_cache.clear()
+    alerts_cache.clear()
 
 
 class HealthResponse(BaseModel):
@@ -86,6 +114,55 @@ class ServiceHealthTimelineSegmentResponse(BaseModel):
     end: str
     status: str
     reason: str | None = None
+
+
+class QuickViewLogLineResponse(BaseModel):
+    timestamp: str
+    message: str
+    labels: dict[str, str]
+
+
+class LogsQuickViewResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    preset: str
+    range_value: str = Field(alias="range")
+    generated_at: str = Field(alias="generatedAt")
+    limit: int
+    returned: int
+    more_available: bool = Field(alias="moreAvailable")
+    next_cursor: str | None = Field(default=None, alias="nextCursor")
+    lines: list[QuickViewLogLineResponse]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ActiveAlertResponse(BaseModel):
+    id: str
+    severity: str
+    title: str
+    description: str | None = None
+    starts_at: str = Field(alias="startsAt")
+    labels: dict[str, str]
+    service_id: str | None = Field(default=None, alias="serviceId")
+    env: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class MonitoringIncidentCompatResponse(BaseModel):
+    id: str
+    severity: str
+    title: str
+    status: str = "active"
+    started_at: str = Field(alias="startedAt")
+    source: str = "alertmanager"
+    service_id: str | None = Field(default=None, alias="serviceId")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class MonitoringIncidentsCompatEnvelope(BaseModel):
+    incidents: list[MonitoringIncidentCompatResponse]
 
 
 class ReleaseArgoStateResponse(BaseModel):
@@ -411,50 +488,233 @@ def _query_prometheus_range(
     return points
 
 
+def _loki_base_url() -> str:
+    return os.getenv(
+        "LOKI_BASE_URL",
+        "http://loki.monitoring.svc.cluster.local:3100",
+    ).rstrip("/")
+
+
+def _query_loki_range(
+    *,
+    query: str,
+    start: datetime,
+    end: datetime,
+    limit: int,
+) -> list[tuple[int, str, dict[str, str]]]:
+    encoded = urlparse.urlencode(
+        {
+            "query": query,
+            "start": str(int(start.timestamp() * 1_000_000_000)),
+            "end": str(int(end.timestamp() * 1_000_000_000)),
+            "limit": str(limit),
+            "direction": "backward",
+        }
+    )
+    endpoint = f"{_loki_base_url()}/loki/api/v1/query_range?{encoded}"
+    correlation_id = str(uuid4())
+
+    try:
+        with urlrequest.urlopen(
+            endpoint,
+            timeout=_prometheus_timeout_seconds(),
+        ) as response:
+            payload = json.loads(response.read())
+    except urlerror.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:400]
+        logger.error(
+            "loki_http_error correlation_id=%s status=%s body=%s",
+            correlation_id,
+            exc.code,
+            body,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Loki query failed. correlation_id={correlation_id}",
+        ) from exc
+    except Exception as exc:
+        logger.error(
+            "loki_query_error correlation_id=%s error=%s",
+            correlation_id,
+            str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Loki query failed. correlation_id={correlation_id}",
+        ) from exc
+
+    if payload.get("status") != "success":
+        logger.error(
+            "loki_bad_payload correlation_id=%s payload_status=%s",
+            correlation_id,
+            payload.get("status"),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Loki query failed. correlation_id={correlation_id}",
+        )
+
+    result = payload.get("data", {}).get("result", [])
+    if not isinstance(result, list):
+        return []
+
+    lines: list[tuple[int, str, dict[str, str]]] = []
+    for stream in result:
+        labels = stream.get("stream")
+        values = stream.get("values")
+        if not isinstance(labels, dict) or not isinstance(values, list):
+            continue
+        safe_labels = {str(k): str(v) for k, v in labels.items()}
+        for value in values:
+            if (
+                not isinstance(value, list)
+                or len(value) < 2
+                or not isinstance(value[0], str)
+                or not isinstance(value[1], str)
+            ):
+                continue
+            try:
+                ts_ns = int(value[0])
+            except ValueError:
+                continue
+            lines.append((ts_ns, value[1], safe_labels))
+
+    lines.sort(key=lambda item: item[0], reverse=True)
+    return lines
+
+
+def _query_alertmanager_active_alerts() -> list[dict]:
+    endpoint = f"{get_alertmanager_base_url()}/api/v2/alerts"
+    correlation_id = str(uuid4())
+
+    try:
+        with urlrequest.urlopen(
+            endpoint,
+            timeout=_prometheus_timeout_seconds(),
+        ) as response:
+            payload = json.loads(response.read())
+    except urlerror.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:400]
+        logger.error(
+            "alertmanager_http_error correlation_id=%s status=%s body=%s",
+            correlation_id,
+            exc.code,
+            body,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Alertmanager query failed. correlation_id={correlation_id}",
+        ) from exc
+    except Exception as exc:
+        logger.error(
+            "alertmanager_query_error correlation_id=%s error=%s",
+            correlation_id,
+            str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Alertmanager query failed. correlation_id={correlation_id}",
+        ) from exc
+
+    if not isinstance(payload, list):
+        logger.error(
+            "alertmanager_bad_payload correlation_id=%s payload_type=%s",
+            correlation_id,
+            type(payload).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Alertmanager query failed. correlation_id={correlation_id}",
+        )
+
+    return payload
+
+
+def _validate_selected_range(
+    *,
+    selected_range: str,
+    allowed_ranges: tuple[str, ...],
+    field_name: str,
+) -> str:
+    if selected_range not in allowed_ranges:
+        allowed = ",".join(allowed_ranges)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"{field_name} must be one of: {allowed}",
+        )
+    return selected_range
+
+
+def _effective_limit(requested: int, configured_max: int) -> int:
+    return min(max(1, requested), max(1, configured_max))
+
+
 def _build_service_metrics_queries(
+    *,
     namespace: str,
     app_label: str,
     selected_range: str,
+    config,
 ) -> dict[str, str]:
     pod_pattern = re.escape(app_label)
+    values = {
+        "namespace": namespace,
+        "app_label": app_label,
+        "selected_range": selected_range,
+        "pod_pattern": pod_pattern,
+    }
     return {
-        "uptimePct": (
-            f'100 * avg_over_time(up{{namespace="{namespace}", app="{app_label}"}}'
-            f"[{selected_range}])"
+        "uptimePct": render_query_template(
+            config.metrics_query_uptime_template,
+            values,
+            "metrics.uptime",
         ),
-        "p95LatencyMs": (
-            f'1000 * histogram_quantile(0.95, sum by (le) (rate('
-            f'http_request_duration_seconds_bucket{{namespace="{namespace}", app="{app_label}"}}[5m])))'
+        "p95LatencyMs": render_query_template(
+            config.metrics_query_p95_latency_template,
+            values,
+            "metrics.p95_latency",
         ),
-        "errorRatePct": (
-            f'100 * (sum(rate(http_requests_total{{namespace="{namespace}", app="{app_label}", status=~"5.."}}[5m]))'
-            f' / sum(rate(http_requests_total{{namespace="{namespace}", app="{app_label}"}}[5m])))'
+        "errorRatePct": render_query_template(
+            config.metrics_query_error_rate_template,
+            values,
+            "metrics.error_rate",
         ),
-        "restartCount": (
-            f'sum(increase(kube_pod_container_status_restarts_total{{namespace="{namespace}", pod=~"{pod_pattern}.*"}}'
-            f"[{selected_range}]))"
+        "restartCount": render_query_template(
+            config.metrics_query_restart_count_template,
+            values,
+            "metrics.restart_count",
         ),
     }
 
 
-def _build_health_timeline_queries(namespace: str, app_label: str) -> dict[str, str]:
+def _build_health_timeline_queries(*, namespace: str, app_label: str, config) -> dict[str, str]:
     deployment_name = app_label
+    values = {
+        "namespace": namespace,
+        "app_label": app_label,
+        "deployment_name": deployment_name,
+    }
     return {
-        "availability": (
-            f'avg_over_time(up{{namespace="{namespace}", app="{app_label}"}}[5m])'
+        "availability": render_query_template(
+            config.timeline_query_availability_template,
+            values,
+            "timeline.availability",
         ),
-        "errorRatePct": (
-            f'100 * (sum(rate(http_requests_total{{namespace="{namespace}", app="{app_label}", status=~"5.."}}[5m]))'
-            f' / sum(rate(http_requests_total{{namespace="{namespace}", app="{app_label}"}}[5m])))'
+        "errorRatePct": render_query_template(
+            config.timeline_query_error_rate_template,
+            values,
+            "timeline.error_rate",
         ),
-        "readiness": (
-            f'avg_over_time(kube_deployment_status_replicas_available{{namespace="{namespace}", deployment="{deployment_name}"}}[5m])'
-            f' / clamp_min(avg_over_time(kube_deployment_spec_replicas{{namespace="{namespace}", deployment="{deployment_name}"}}[5m]), 1)'
+        "readiness": render_query_template(
+            config.timeline_query_readiness_template,
+            values,
+            "timeline.readiness",
         ),
     }
 
 
-def _validate_step_for_range(range_value: str, step_value: str) -> int:
+def _validate_step_for_range(*, range_value: str, step_value: str) -> int:
+    config = load_observability_config()
     try:
         step_delta = parse_step(step_value)
         window_delta = parse_range(range_value)
@@ -464,16 +724,19 @@ def _validate_step_for_range(range_value: str, step_value: str) -> int:
             detail=str(exc),
         ) from exc
 
-    min_step = timedelta(minutes=5)
-    max_step = timedelta(hours=1)
+    min_step = config.timeline_step_min
+    max_step = config.timeline_step_max
     if step_delta < min_step or step_delta > max_step:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="step must be between 5m and 1h",
+            detail=(
+                f"step must be between "
+                f"{int(min_step.total_seconds() // 60)}m and {int(max_step.total_seconds() // 60)}m"
+            ),
         )
 
     points = int(window_delta.total_seconds() / step_delta.total_seconds())
-    if points > 1000:
+    if points > config.timeline_max_points:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="step produces too many samples for selected range",
@@ -558,39 +821,57 @@ def get_service_metrics_summary(
     selected_range: str = Query(
         default="24h",
         alias="range",
-        pattern="^(1h|24h|7d)$",
+        pattern="^([1-9][0-9]*)(m|h|d)$",
     ),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceMetricsSummaryResponse:
-    now = datetime.now(tz=timezone.utc)
-    durations = {
-        "1h": timedelta(hours=1),
-        "24h": timedelta(hours=24),
-        "7d": timedelta(days=7),
-    }
-    window_start = now - durations[selected_range]
+    config = load_observability_config()
+    safe_range = _validate_selected_range(
+        selected_range=selected_range,
+        allowed_ranges=config.metrics_allowed_ranges,
+        field_name="range",
+    )
     namespace = "default"
     app_label = service_id
 
-    queries = _build_service_metrics_queries(namespace, app_label, selected_range)
-    values: dict[str, float | None] = {}
-    no_data: dict[str, bool] = {}
+    def _load_summary() -> ServiceMetricsSummaryResponse:
+        now = datetime.now(tz=timezone.utc)
+        durations = {
+            "1h": timedelta(hours=1),
+            "24h": timedelta(hours=24),
+            "7d": timedelta(days=7),
+        }
+        window_start = now - durations[safe_range]
+        queries = _build_service_metrics_queries(
+            namespace=namespace,
+            app_label=app_label,
+            selected_range=safe_range,
+            config=config,
+        )
+        values: dict[str, float | None] = {}
+        no_data: dict[str, bool] = {}
 
-    for field_name, query in queries.items():
-        value = _query_prometheus_scalar(query, field_name)
-        values[field_name] = value
-        no_data[field_name] = value is None
+        for field_name, query in queries.items():
+            value = _query_prometheus_scalar(query, field_name)
+            values[field_name] = value
+            no_data[field_name] = value is None
 
-    return ServiceMetricsSummaryResponse(
-        serviceId=service_id,
-        uptimePct=values["uptimePct"],
-        p95LatencyMs=values["p95LatencyMs"],
-        errorRatePct=values["errorRatePct"],
-        restartCount=values["restartCount"],
-        windowStart=window_start.isoformat(),
-        windowEnd=now.isoformat(),
-        generatedAt=now.isoformat(),
-        noData=no_data,
+        return ServiceMetricsSummaryResponse(
+            serviceId=service_id,
+            uptimePct=values["uptimePct"],
+            p95LatencyMs=values["p95LatencyMs"],
+            errorRatePct=values["errorRatePct"],
+            restartCount=values["restartCount"],
+            windowStart=window_start.isoformat(),
+            windowEnd=now.isoformat(),
+            generatedAt=now.isoformat(),
+            noData=no_data,
+        )
+
+    return metrics_summary_cache.get_or_set(
+        key=("metrics-summary", service_id, safe_range),
+        ttl_seconds=config.metrics_cache_ttl_seconds,
+        loader=_load_summary,
     )
 
 
@@ -604,7 +885,7 @@ def get_service_metrics_summary_legacy(
     selected_range: str = Query(
         default="24h",
         alias="range",
-        pattern="^(1h|24h|7d)$",
+        pattern="^([1-9][0-9]*)(m|h|d)$",
     ),
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceMetricsSummaryResponse:
@@ -625,80 +906,183 @@ def get_service_health_timeline(
     selected_range: str = Query(
         default="24h",
         alias="range",
-        pattern="^(24h|7d)$",
+        pattern="^([1-9][0-9]*)(m|h|d)$",
     ),
     step: str = Query(default="5m", pattern="^([1-9][0-9]*)(m|h)$"),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> list[ServiceHealthTimelineSegmentResponse]:
-    step_seconds = _validate_step_for_range(selected_range, step)
-    end = now_utc()
-    window = parse_range(selected_range)
-    start = end - window
-
-    namespace = "default"
-    app_label = service_id
-    queries = _build_health_timeline_queries(namespace, app_label)
-
-    availability_points = _query_prometheus_range(
-        queries["availability"],
-        "availability",
-        start=start,
-        end=end,
-        step_seconds=step_seconds,
+    config = load_observability_config()
+    safe_range = _validate_selected_range(
+        selected_range=selected_range,
+        allowed_ranges=config.timeline_allowed_ranges,
+        field_name="range",
     )
-    error_points = _query_prometheus_range(
-        queries["errorRatePct"],
-        "errorRatePct",
-        start=start,
-        end=end,
-        step_seconds=step_seconds,
-    )
-    readiness_points = _query_prometheus_range(
-        queries["readiness"],
-        "readiness",
-        start=start,
-        end=end,
-        step_seconds=step_seconds,
-    )
+    step_seconds = _validate_step_for_range(range_value=safe_range, step_value=step)
 
-    all_timestamps = sorted(
-        set(availability_points.keys())
-        .union(error_points.keys())
-        .union(readiness_points.keys())
-    )
+    def _load_timeline() -> list[ServiceHealthTimelineSegmentResponse]:
+        end = now_utc()
+        window = parse_range(safe_range)
+        start = end - window
 
-    thresholds = load_timeline_thresholds()
-    points: list[TimelinePoint] = []
-    for ts in all_timestamps:
-        status, reason = classify_timeline_status(
-            availability=availability_points.get(ts),
-            error_rate_pct=error_points.get(ts),
-            readiness=readiness_points.get(ts),
-            thresholds=thresholds,
+        namespace = "default"
+        app_label = service_id
+        queries = _build_health_timeline_queries(
+            namespace=namespace,
+            app_label=app_label,
+            config=config,
         )
-        points.append(
-            TimelinePoint(
-                timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
-                status=status,
-                reason=reason,
+
+        availability_points = _query_prometheus_range(
+            queries["availability"],
+            "availability",
+            start=start,
+            end=end,
+            step_seconds=step_seconds,
+        )
+        error_points = _query_prometheus_range(
+            queries["errorRatePct"],
+            "errorRatePct",
+            start=start,
+            end=end,
+            step_seconds=step_seconds,
+        )
+        readiness_points = _query_prometheus_range(
+            queries["readiness"],
+            "readiness",
+            start=start,
+            end=end,
+            step_seconds=step_seconds,
+        )
+
+        all_timestamps = sorted(
+            set(availability_points.keys())
+            .union(error_points.keys())
+            .union(readiness_points.keys())
+        )
+
+        thresholds = load_timeline_thresholds()
+        points: list[TimelinePoint] = []
+        for ts in all_timestamps:
+            status_label, reason = classify_timeline_status(
+                availability=availability_points.get(ts),
+                error_rate_pct=error_points.get(ts),
+                readiness=readiness_points.get(ts),
+                thresholds=thresholds,
             )
-        )
+            points.append(
+                TimelinePoint(
+                    timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
+                    status=status_label,
+                    reason=reason,
+                )
+            )
 
-    segments = compact_timeline_points(
-        points,
-        window_start=start,
-        window_end=end,
-        step=timedelta(seconds=step_seconds),
-    )
-    return [
-        ServiceHealthTimelineSegmentResponse(
-            start=segment.start.isoformat(),
-            end=segment.end.isoformat(),
-            status=segment.status,
-            reason=segment.reason,
+        segments = compact_timeline_points(
+            points,
+            window_start=start,
+            window_end=end,
+            step=timedelta(seconds=step_seconds),
         )
-        for segment in segments
+        return [
+            ServiceHealthTimelineSegmentResponse(
+                start=segment.start.isoformat(),
+                end=segment.end.isoformat(),
+                status=segment.status,
+                reason=segment.reason,
+            )
+            for segment in segments
+        ]
+
+    return timeline_cache.get_or_set(
+        key=("health-timeline", service_id, safe_range, step_seconds),
+        ttl_seconds=config.timeline_cache_ttl_seconds,
+        loader=_load_timeline,
+    )
+
+
+@app.get(
+    "/alerts/active",
+    response_model=list[ActiveAlertResponse],
+    tags=["monitoring"],
+)
+def get_active_alerts(
+    env: str | None = Query(default=None),
+    service_id: str | None = Query(default=None, alias="serviceId"),
+    limit: int = Query(default=100, ge=1, le=500),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> list[ActiveAlertResponse]:
+    config = load_observability_config()
+    safe_limit = _effective_limit(limit, config.alerts_max_rows)
+
+    def _load_active_alerts() -> list:
+        return normalize_active_alerts(_query_alertmanager_active_alerts())
+
+    try:
+        normalized = alerts_cache.get_or_set(
+            key=("alerts-active",),
+            ttl_seconds=config.alerts_cache_ttl_seconds,
+            loader=_load_active_alerts,
+        )
+    except HTTPException as exc:
+        # Graceful degradation for dashboard/banner UX: keep API usable with explicit metadata.
+        if exc.status_code == status.HTTP_502_BAD_GATEWAY and isinstance(exc.detail, str):
+            logger.warning("alerts_active_degraded detail=%s", exc.detail)
+            return []
+        raise
+
+    filtered = [
+        alert
+        for alert in normalized
+        if (not env or alert.env == env)
+        and (not service_id or alert.service_id == service_id)
+    ][:safe_limit]
+
+    return [
+        ActiveAlertResponse(
+            id=alert.id,
+            severity=alert.severity,
+            title=alert.title,
+            description=alert.description,
+            startsAt=alert.starts_at,
+            labels=alert.labels,
+            serviceId=alert.service_id,
+            env=alert.env,
+        )
+        for alert in filtered
     ]
+
+
+@app.get(
+    "/monitoring/incidents",
+    response_model=MonitoringIncidentsCompatEnvelope,
+    tags=["monitoring"],
+)
+def get_monitoring_incidents_compat(
+    env: str | None = Query(default=None),
+    service_id: str | None = Query(default=None, alias="serviceId"),
+    limit: int = Query(default=100, ge=1, le=500),
+    identity: tuple[str, set[str]] = Depends(get_current_user),
+) -> MonitoringIncidentsCompatEnvelope:
+    active_alerts = get_active_alerts(
+        env=env,
+        service_id=service_id,
+        limit=limit,
+        _=identity,
+    )
+    return MonitoringIncidentsCompatEnvelope(
+        incidents=[
+            MonitoringIncidentCompatResponse(
+                id=item.id,
+                severity=item.severity,
+                title=item.title,
+                status="active",
+                startedAt=item.starts_at,
+                source="alertmanager",
+                serviceId=item.service_id,
+            )
+            for item in active_alerts
+        ]
+    )
 
 
 @app.get(
@@ -781,4 +1165,101 @@ def get_release_dashboard_compat(
             )
             for row in rows
         ]
+    )
+
+
+@app.get(
+    "/services/{service_id}/logs/quickview",
+    response_model=LogsQuickViewResponse,
+    tags=["monitoring"],
+)
+def get_service_logs_quickview(
+    service_id: str,
+    preset: str = Query(default="errors"),
+    selected_range: str = Query(default="1h", alias="range"),
+    limit: int = Query(default=100, ge=1, le=200),
+    cursor: str | None = Query(default=None),
+    namespace: str | None = Query(default=None),
+    identity: tuple[str, set[str]] = Depends(get_current_user),
+) -> LogsQuickViewResponse:
+    config = load_observability_config()
+    safe_range = _validate_selected_range(
+        selected_range=selected_range,
+        allowed_ranges=config.logs_allowed_ranges,
+        field_name="range",
+    )
+    safe_limit = _effective_limit(limit, config.logs_max_lines)
+    user, _groups = identity
+    now = datetime.now(tz=timezone.utc)
+
+    try:
+        enforce_logs_rate_limit(identity_key=user, now=now)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+        ) from exc
+
+    try:
+        safe_preset = validate_preset(preset)
+        window = build_time_window(
+            now=now,
+            range_value=safe_range,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    safe_namespace = namespace.strip() if namespace and namespace.strip() else get_logs_default_namespace()
+    query = build_preset_query(
+        service_id=service_id,
+        namespace=safe_namespace,
+        preset=safe_preset,
+    )
+
+    fetch_limit = min(safe_limit + 1, max(2, config.logs_max_lines + 1))
+    cache_key = (
+        "logs-quickview",
+        service_id,
+        safe_namespace,
+        safe_preset,
+        safe_range,
+        cursor or "",
+        safe_limit,
+    )
+    lines = logs_quickview_cache.get_or_set(
+        key=cache_key,
+        ttl_seconds=config.logs_cache_ttl_seconds,
+        loader=lambda: _query_loki_range(
+            query=query,
+            start=window.start,
+            end=window.end,
+            limit=fetch_limit,
+        ),
+    )
+
+    more_available = len(lines) > safe_limit
+    visible = lines[:safe_limit]
+    next_cursor = encode_cursor_ns(visible[-1][0]) if more_available and visible else None
+
+    return LogsQuickViewResponse(
+        serviceId=service_id,
+        preset=safe_preset,
+        range=safe_range,
+        generatedAt=now.isoformat(),
+        limit=safe_limit,
+        returned=len(visible),
+        moreAvailable=more_available,
+        nextCursor=next_cursor,
+        lines=[
+            QuickViewLogLineResponse(
+                timestamp=datetime.fromtimestamp(item[0] / 1_000_000_000, tz=timezone.utc).isoformat(),
+                message=item[1],
+                labels=item[2],
+            )
+            for item in visible
+        ],
     )
