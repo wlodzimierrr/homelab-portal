@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
 
 from app import gitops_project_sync
 
@@ -60,6 +61,53 @@ def test_resolve_default_workloads_repo_path_does_not_raise_for_shallow_containe
     )
 
     assert resolved == Path("/app/app/workloads")
+
+
+def test_discover_gitops_project_records_fetches_configured_repo_when_path_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo_path = tmp_path / "source-workloads"
+    _write(
+        repo_path / "apps" / "homelab-api" / "envs" / "dev" / "kustomization.yaml",
+        "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../../base\n",
+    )
+    _write(
+        repo_path / "apps" / "homelab-api" / "base" / "namespace.yaml",
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: homelab-api\n",
+    )
+    _write(
+        repo_path / "apps" / "homelab-api" / "base" / "deployment.yaml",
+        (
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
+            "  name: homelab-api\n  namespace: homelab-api\n"
+            "  labels:\n    app.kubernetes.io/name: homelab-api\n"
+        ),
+    )
+
+    monkeypatch.setenv("GITOPS_WORKLOADS_REPO_URL", "https://example.invalid/homelab-workloads.git")
+    monkeypatch.setenv("GITOPS_WORKLOADS_REF", "main")
+
+    def _fake_clone(repo_url: str, clone_path: Path, *, ref: str | None = None) -> None:
+        assert repo_url == "https://example.invalid/homelab-workloads.git"
+        assert ref == "main"
+        shutil.copytree(repo_path, clone_path)
+
+    monkeypatch.setattr(gitops_project_sync, "_clone_workloads_repo", _fake_clone)
+
+    synced_at = datetime(2026, 3, 6, tzinfo=timezone.utc)
+    rows, failures = gitops_project_sync.discover_gitops_project_records(
+        repo_path=tmp_path / "missing-workloads",
+        env_name="dev",
+        synced_at=synced_at,
+    )
+
+    assert failures == []
+    assert len(rows) == 1
+    assert rows[0].project_id == "homelab-api"
+    assert rows[0].source_ref.startswith(
+        "https://example.invalid/homelab-workloads.git@"
+    )
 
 
 def test_sync_project_registry_from_gitops_collects_failures(monkeypatch) -> None:

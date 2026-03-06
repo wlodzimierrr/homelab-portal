@@ -58,7 +58,7 @@ The second command is a no-op when schema is already at `head`.
 
 Prometheus access:
 
-- `PROMETHEUS_BASE_URL` (default: `http://prometheus.monitoring.svc.cluster.local:9090`)
+- `PROMETHEUS_BASE_URL` (default: `http://prometheus-operated.monitoring.svc.cluster.local:9090`)
 - `PROMETHEUS_TIMEOUT_SECONDS` (default: `8`)
 
 Provider diagnostics:
@@ -122,7 +122,8 @@ The in-cluster scheduler lives in `workloads/apps/homelab-api/base/catalog-sync-
 GitOps project sync config:
 
 - `GITOPS_WORKLOADS_REPO_PATH` (default: repo-local `workloads/`)
-- `GITOPS_WORKLOADS_REPO_URL` (optional override for provenance in `sourceRef`)
+- `GITOPS_WORKLOADS_REPO_URL` (optional repo URL used for in-cluster fetch and provenance in `sourceRef`)
+- `GITOPS_WORKLOADS_REF` (optional branch or tag used when fetching the repo on demand)
 - `GITOPS_WORKLOADS_REVISION` (optional override for provenance in `sourceRef`)
 
 Observability hardening config:

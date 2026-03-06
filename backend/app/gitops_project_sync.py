@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+from tempfile import TemporaryDirectory
 import time
 from uuid import uuid4
 
@@ -69,6 +70,20 @@ def _workloads_repo_path() -> Path:
     return DEFAULT_WORKLOADS_REPO_PATH.resolve()
 
 
+def _workloads_repo_url() -> str | None:
+    configured = os.getenv("GITOPS_WORKLOADS_REPO_URL")
+    if configured and configured.strip():
+        return configured.strip()
+    return None
+
+
+def _workloads_repo_ref() -> str | None:
+    configured = os.getenv("GITOPS_WORKLOADS_REF")
+    if configured and configured.strip():
+        return configured.strip()
+    return None
+
+
 def _run_git(repo_path: Path, *args: str) -> str | None:
     try:
         completed = subprocess.run(
@@ -83,10 +98,18 @@ def _run_git(repo_path: Path, *args: str) -> str | None:
     return value or None
 
 
+def _clone_workloads_repo(repo_url: str, clone_path: Path, *, ref: str | None = None) -> None:
+    command = ["git", "clone", "--depth", "1"]
+    if ref:
+        command.extend(["--branch", ref])
+    command.extend([repo_url, str(clone_path)])
+    subprocess.run(command, check=True, capture_output=True, text=True)
+
+
 def _repo_origin(repo_path: Path) -> str:
-    configured = os.getenv("GITOPS_WORKLOADS_REPO_URL")
+    configured = _workloads_repo_url()
     if configured:
-        return configured.strip()
+        return configured
     return _run_git(repo_path, "config", "--get", "remote.origin.url") or repo_path.name
 
 
@@ -158,28 +181,16 @@ def _build_source_ref(repo_path: Path, project_path: Path) -> str:
     return f"{repo_origin}@{repo_revision}:{relative_path}"
 
 
-def discover_gitops_project_records(
+def _discover_records_from_repo(
     *,
-    repo_path: Path | None = None,
-    env_name: str | None = None,
-    synced_at: datetime | None = None,
+    repo_path: Path,
+    env_name: str | None,
+    synced_at: datetime,
 ) -> tuple[list[ProjectRegistryRecord], list[dict[str, str]]]:
-    safe_repo_path = (repo_path or _workloads_repo_path()).resolve()
-    safe_synced_at = synced_at or _utc_now()
-
-    if not safe_repo_path.exists():
-        return [], [
-            {
-                "source": DEFAULT_SOURCE,
-                "scope": str(safe_repo_path),
-                "error": "GitOps workloads repo path does not exist",
-            }
-        ]
-
     records: list[ProjectRegistryRecord] = []
     failures: list[dict[str, str]] = []
 
-    env_kustomizations = sorted(safe_repo_path.glob("apps/*/envs/*/kustomization.yaml"))
+    env_kustomizations = sorted(repo_path.glob("apps/*/envs/*/kustomization.yaml"))
     for kustomization_path in env_kustomizations:
         env_dir = kustomization_path.parent
         env_value = env_dir.name
@@ -196,7 +207,7 @@ def discover_gitops_project_records(
             failures.append(
                 {
                     "source": DEFAULT_SOURCE,
-                    "scope": env_dir.relative_to(safe_repo_path).as_posix(),
+                    "scope": env_dir.relative_to(repo_path).as_posix(),
                     "error": "Missing namespace or app label metadata in GitOps app definition",
                 }
             )
@@ -210,12 +221,61 @@ def discover_gitops_project_records(
                 env=env_value,
                 app_label=app_label,
                 source=DEFAULT_SOURCE,
-                source_ref=_build_source_ref(safe_repo_path, env_dir),
-                last_synced_at=safe_synced_at,
+                source_ref=_build_source_ref(repo_path, env_dir),
+                last_synced_at=synced_at,
             )
         )
 
     return records, failures
+
+
+def discover_gitops_project_records(
+    *,
+    repo_path: Path | None = None,
+    env_name: str | None = None,
+    synced_at: datetime | None = None,
+) -> tuple[list[ProjectRegistryRecord], list[dict[str, str]]]:
+    safe_repo_path = (repo_path or _workloads_repo_path()).resolve()
+    safe_synced_at = synced_at or _utc_now()
+
+    if safe_repo_path.exists():
+        return _discover_records_from_repo(
+            repo_path=safe_repo_path,
+            env_name=env_name,
+            synced_at=safe_synced_at,
+        )
+
+    repo_url = _workloads_repo_url()
+    if not repo_url:
+        return [], [
+            {
+                "source": DEFAULT_SOURCE,
+                "scope": str(safe_repo_path),
+                "error": "GitOps workloads repo path does not exist",
+            }
+        ]
+
+    try:
+        with TemporaryDirectory(prefix="gitops-workloads-") as temp_dir:
+            checkout_path = Path(temp_dir) / "workloads"
+            _clone_workloads_repo(repo_url, checkout_path, ref=_workloads_repo_ref())
+            return _discover_records_from_repo(
+                repo_path=checkout_path.resolve(),
+                env_name=env_name,
+                synced_at=safe_synced_at,
+            )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        error = (
+            f"Failed to fetch GitOps workloads repo from {repo_url}: "
+            f"{exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) and exc.stderr else str(exc)}"
+        )
+        return [], [
+            {
+                "source": DEFAULT_SOURCE,
+                "scope": repo_url,
+                "error": error,
+            }
+        ]
 
 
 def _upsert_project_registry_records(

@@ -16,7 +16,7 @@ from app.alerts_feed import get_alertmanager_base_url
 def get_prometheus_base_url() -> str:
     return os.getenv(
         "PROMETHEUS_BASE_URL",
-        "http://prometheus.monitoring.svc.cluster.local:9090",
+        "http://prometheus-operated.monitoring.svc.cluster.local:9090",
     ).rstrip("/")
 
 
@@ -336,4 +336,3 @@ def load_json_from_provider(
             latency_ms=latency_ms,
             message=message,
         )
-
