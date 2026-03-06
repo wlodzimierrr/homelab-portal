@@ -22,17 +22,10 @@ export interface ServiceHealthTimeline {
 
 interface ApiSegment {
   id?: string
-  startAt?: string
-  endAt?: string
+  start?: string
+  end?: string
   status?: string
   reason?: string
-}
-
-interface ApiPayload {
-  serviceId?: string
-  window?: string
-  lastRefreshedAt?: string
-  segments?: ApiSegment[]
 }
 
 function normalizeStatus(value?: string): TimelineStatus {
@@ -61,8 +54,8 @@ function adaptSegments(segments: ApiSegment[] | undefined): ServiceHealthTimelin
 
   const adapted = segments
     .map((segment, index): ServiceHealthTimelineSegment | null => {
-      const startAt = typeof segment.startAt === 'string' ? segment.startAt : ''
-      const endAt = typeof segment.endAt === 'string' ? segment.endAt : ''
+      const startAt = typeof segment.start === 'string' ? segment.start : ''
+      const endAt = typeof segment.end === 'string' ? segment.end : ''
       if (!startAt || !endAt) {
         return null
       }
@@ -96,19 +89,19 @@ function emptyTimeline(identity: ServiceIdentity, window: TimelineWindow): Servi
   }
 }
 
-function adaptApi(identity: ServiceIdentity, window: TimelineWindow, payload: ApiPayload): ServiceHealthTimeline {
+function adaptApi(identity: ServiceIdentity, window: TimelineWindow, payload: ApiSegment[]): ServiceHealthTimeline {
   return {
-    serviceId: typeof payload.serviceId === 'string' ? payload.serviceId : identity.serviceId,
+    serviceId: identity.serviceId,
     identity,
-    window: asWindow(payload.window ?? window),
-    lastRefreshedAt: typeof payload.lastRefreshedAt === 'string' ? payload.lastRefreshedAt : undefined,
-    segments: adaptSegments(payload.segments),
+    window: asWindow(window),
+    lastRefreshedAt: new Date().toISOString(),
+    segments: adaptSegments(payload),
   }
 }
 
 async function getFromApi(serviceId: string, window: TimelineWindow) {
-  const payload = await request<ApiPayload>(
-    `/services/${encodeURIComponent(serviceId)}/health-timeline?range=${encodeURIComponent(window)}`,
+  const payload = await request<ApiSegment[]>(
+    `/services/${encodeURIComponent(serviceId)}/health/timeline?range=${encodeURIComponent(window)}`,
   )
   return payload
 }
