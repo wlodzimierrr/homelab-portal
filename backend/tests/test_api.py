@@ -884,7 +884,7 @@ def test_service_metrics_summary_uses_service_registry_metadata_for_queries(monk
     )
 
     def _mock_urlopen(request, **kwargs):
-        requested_urls.append(request.full_url)
+        requested_urls.append(getattr(request, "full_url", request))
         return _MockPrometheusResponse(next(payloads))
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
@@ -1098,7 +1098,7 @@ def test_service_health_timeline_uses_service_registry_metadata_for_queries(monk
     )
 
     def _mock_urlopen(request, **kwargs):
-        requested_urls.append(request.full_url)
+        requested_urls.append(getattr(request, "full_url", request))
         return _MockPrometheusResponse(next(payloads))
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
