@@ -9,6 +9,7 @@ FastAPI backend scaffold for task `T1.2.1`.
 - `GET /projects?env=dev`
 - `GET /services?env=dev&namespace=homelab-api`
 - `GET /services/{serviceId}?env=dev`
+- `GET /catalog/reconciliation?env=dev`
 - `POST /service-registry/sync?source=cluster_services|gitops_apps&env=dev`
 - `GET /service-registry/diagnostics?env=dev`
 - `GET /services/{serviceId}/metrics/summary?range=1h|24h|7d`
@@ -102,6 +103,7 @@ Service registry sync config:
 - `REGISTRY_STALE_AFTER_MINUTES` (default: `30`) used by `/service-registry/diagnostics`
 
 Cluster sync populates `service_registry` with `source=cluster_services`; `GET /services` reads only those live cluster-backed rows.
+`GET /catalog/reconciliation` provides the deterministic bridge between GitOps projects and live cluster services.
 
 GitOps project sync config:
 

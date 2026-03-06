@@ -1,4 +1,12 @@
-import { ApiRequestError, getProjects, isApiRequestError, request, type Project } from '@/lib/api'
+import {
+  ApiRequestError,
+  getCatalogReconciliation,
+  getProjects,
+  isApiRequestError,
+  request,
+  type CatalogJoinRow,
+  type Project,
+} from '@/lib/api'
 import { getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
 import { buildArgoAppUrl } from '@/lib/config'
 import { normalizeServiceId } from '@/lib/service-identity'
@@ -186,6 +194,46 @@ function normalizeLookup(value: string) {
   return normalizeServiceId(value) || value.trim().toLowerCase()
 }
 
+function joinRowsWithCatalog(rows: ReleaseDashboardEntry[], catalogRows: CatalogJoinRow[]) {
+  const byProjectKey = new Map<string, CatalogJoinRow>()
+  const byPrimaryServiceKey = new Map<string, CatalogJoinRow>()
+  const byAnyServiceKey = new Map<string, CatalogJoinRow>()
+
+  for (const row of catalogRows) {
+    const envKey = row.env.trim().toLowerCase()
+    byProjectKey.set(`${envKey}:${normalizeLookup(row.projectId)}`, row)
+    if (row.primaryServiceId) {
+      byPrimaryServiceKey.set(`${envKey}:${normalizeLookup(row.primaryServiceId)}`, row)
+    }
+    for (const serviceId of row.serviceIds) {
+      byAnyServiceKey.set(`${envKey}:${normalizeLookup(serviceId)}`, row)
+    }
+  }
+
+  const unresolvedKeys: string[] = []
+  const joined = rows.map((row) => {
+    const lookupKey = `${row.environment.trim().toLowerCase()}:${normalizeLookup(row.serviceId)}`
+    const match = byProjectKey.get(lookupKey) ?? byPrimaryServiceKey.get(lookupKey) ?? byAnyServiceKey.get(lookupKey)
+    if (!match) {
+      unresolvedKeys.push(`${row.serviceId}|${row.serviceName}|${row.environment}`)
+      return row
+    }
+
+    return {
+      ...row,
+      serviceId: match.primaryServiceId ?? row.serviceId,
+      serviceName: match.projectName || row.serviceName,
+      argoApp: row.argoApp ?? match.services[0]?.argoAppName,
+    }
+  })
+
+  return {
+    rows: joined,
+    unresolved: unresolvedKeys.length,
+    unresolvedKeys,
+  }
+}
+
 function joinRowsWithServices(rows: ReleaseDashboardEntry[], services: ServiceRegistryItem[]) {
   const byId = new Map<string, ServiceRegistryItem>()
   const byName = new Map<string, ServiceRegistryItem>()
@@ -271,14 +319,17 @@ export async function getReleaseDashboardEntries(): Promise<ReleaseDashboardResu
 
   if (baseRows.length > 0) {
     try {
-      const services = await getServicesRegistry()
-      const joined = joinRowsWithServices(baseRows, services)
-      if (joined.unresolved > 0) {
+      const [catalog, services] = await Promise.all([getCatalogReconciliation(), getServicesRegistry()])
+      const catalogJoined = joinRowsWithCatalog(baseRows, catalog.rows)
+      const joined = joinRowsWithServices(catalogJoined.rows, services)
+      const unresolved = catalogJoined.unresolved + joined.unresolved
+      const unresolvedKeys = [...catalogJoined.unresolvedKeys, ...joined.unresolvedKeys]
+      if (unresolved > 0) {
         warnings.push(
-          `Service identity join incomplete: ${joined.unresolved} release row(s) are not mapped to registry metadata.`,
+          `Service identity join incomplete: ${unresolved} release row(s) are not mapped to registry metadata.`,
         )
-        const keysPreview = joined.unresolvedKeys.slice(0, 5).join(', ')
-        warnings.push(`Unmatched release keys: ${keysPreview}${joined.unresolvedKeys.length > 5 ? ', ...' : ''}`)
+        const keysPreview = unresolvedKeys.slice(0, 5).join(', ')
+        warnings.push(`Unmatched release keys: ${keysPreview}${unresolvedKeys.length > 5 ? ', ...' : ''}`)
       }
       return {
         rows: joined.rows,

@@ -18,6 +18,7 @@ from app.alerts_feed import (
     get_alertmanager_base_url,
     normalize_active_alerts,
 )
+from app.catalog_reconciliation import build_catalog_join
 from app.db import get_psycopg_database_url
 from app.health_timeline import (
     TimelinePoint,
@@ -173,11 +174,59 @@ class ServiceRegistryJoinMismatchResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class CatalogJoinServiceRefResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    service_name: str = Field(alias="serviceName")
+    namespace: str
+    app_label: str = Field(alias="appLabel")
+    argo_app_name: str | None = Field(default=None, alias="argoAppName")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CatalogJoinRowResponse(BaseModel):
+    project_id: str = Field(alias="projectId")
+    project_name: str = Field(alias="projectName")
+    env: str
+    namespace: str
+    app_label: str = Field(alias="appLabel")
+    join_source: str = Field(alias="joinSource")
+    primary_service_id: str | None = Field(default=None, alias="primaryServiceId")
+    service_count: int = Field(alias="serviceCount")
+    service_ids: list[str] = Field(alias="serviceIds")
+    services: list[CatalogJoinServiceRefResponse]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CatalogJoinDiagnosticsResponse(BaseModel):
+    project_only_count: int = Field(alias="projectOnlyCount")
+    service_only_count: int = Field(alias="serviceOnlyCount")
+    one_to_many_count: int = Field(alias="oneToManyCount")
+    ambiguous_join_count: int = Field(alias="ambiguousJoinCount")
+    project_only_keys: list[str] = Field(alias="projectOnlyKeys")
+    service_only_keys: list[str] = Field(alias="serviceOnlyKeys")
+    one_to_many_keys: list[str] = Field(alias="oneToManyKeys")
+    ambiguous_join_keys: list[str] = Field(alias="ambiguousJoinKeys")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CatalogJoinResponse(BaseModel):
+    generated_at: str = Field(alias="generatedAt")
+    env: str | None = None
+    rows: list[CatalogJoinRowResponse]
+    diagnostics: CatalogJoinDiagnosticsResponse
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ServiceRegistryDiagnosticsResponse(BaseModel):
     generated_at: str = Field(alias="generatedAt")
     env: str | None = None
     freshness: ServiceRegistryFreshnessResponse
     join_mismatch: ServiceRegistryJoinMismatchResponse = Field(alias="joinMismatch")
+    catalog_join: CatalogJoinDiagnosticsResponse = Field(alias="catalogJoin")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -392,6 +441,46 @@ def _load_project_rows(env: str | None = None) -> list[dict[str, str]]:
     ]
 
 
+def _load_project_catalog_rows(
+    *,
+    env: str | None = None,
+    project_id: str | None = None,
+) -> list[dict[str, str]]:
+    conditions = ["source = %s"]
+    params: list[str] = ["gitops_apps"]
+    if env:
+        conditions.append("env = %s")
+        params.append(env)
+    if project_id:
+        conditions.append("project_id = %s")
+        params.append(project_id)
+
+    where_clause = " AND ".join(conditions)
+    with _with_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT project_id, project_name, env, namespace, app_label
+                FROM project_registry
+                WHERE {where_clause}
+                ORDER BY project_id ASC, env ASC
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "project_id": row[0],
+            "project_name": row[1],
+            "env": row[2],
+            "namespace": row[3],
+            "app_label": row[4],
+        }
+        for row in rows
+    ]
+
+
 def _load_service_rows(
     *,
     env: str | None = None,
@@ -438,6 +527,14 @@ def _load_service_rows(
         }
         for row in rows
     ]
+
+
+def _load_service_catalog_rows(
+    *,
+    env: str | None = None,
+    service_id: str | None = None,
+) -> list[dict[str, str | None]]:
+    return _load_service_rows(env=env, service_id=service_id)
 
 
 def _registry_stale_after_minutes() -> int:
@@ -996,6 +1093,29 @@ def get_service(
     )
 
 
+@app.get("/catalog/reconciliation", response_model=CatalogJoinResponse, tags=["metadata"])
+def get_catalog_reconciliation(
+    env: str | None = Query(default=None),
+    project_id: str | None = Query(default=None, alias="projectId"),
+    service_id: str | None = Query(default=None, alias="serviceId"),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> CatalogJoinResponse:
+    now = datetime.now(tz=timezone.utc)
+    result = build_catalog_join(
+        project_rows=_load_project_catalog_rows(env=env, project_id=project_id),
+        service_rows=_load_service_catalog_rows(env=env, service_id=service_id),
+        env_filter=env,
+        project_id_filter=project_id,
+        service_id_filter=service_id,
+    )
+    return CatalogJoinResponse(
+        generatedAt=now.isoformat(),
+        env=env,
+        rows=[CatalogJoinRowResponse(**row) for row in result["rows"]],
+        diagnostics=CatalogJoinDiagnosticsResponse(**result["diagnostics"]),
+    )
+
+
 @app.post(
     "/service-registry/sync",
     response_model=ServiceRegistrySyncResponse,
@@ -1072,6 +1192,13 @@ def get_service_registry_diagnostics(
         env_filter=env,
         service_id_filter=None,
     )
+    catalog_join = build_catalog_join(
+        project_rows=_load_project_catalog_rows(env=env),
+        service_rows=_load_service_catalog_rows(env=env),
+        env_filter=env,
+        project_id_filter=None,
+        service_id_filter=None,
+    )
 
     return ServiceRegistryDiagnosticsResponse(
         generatedAt=now.isoformat(),
@@ -1085,6 +1212,7 @@ def get_service_registry_diagnostics(
             state=state,
         ),
         joinMismatch=ServiceRegistryJoinMismatchResponse(**mismatches),
+        catalogJoin=CatalogJoinDiagnosticsResponse(**catalog_join["diagnostics"]),
     )
 
 

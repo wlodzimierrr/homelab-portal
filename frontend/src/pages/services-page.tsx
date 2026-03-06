@@ -4,6 +4,7 @@ import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
 import { AppLink } from '@/components/navigation/app-link'
+import { getCatalogReconciliation, type CatalogJoinRow } from '@/lib/api'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import { UptimeIndicator } from '@/components/uptime-indicator'
 import { deriveServiceIdentity, getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
@@ -26,6 +27,10 @@ interface ServiceAlertState {
 
 interface ServicesPageProps {
   incidentServiceAlerts?: Record<string, ServiceIncidentBadge>
+}
+
+function projectAnchor(projectId: string, env: string) {
+  return `${projectId}-${env}`.toLowerCase()
 }
 
 function formatLastDeploy(value?: string) {
@@ -78,6 +83,7 @@ function IncidentCountBadge({ alert }: { alert: ServiceIncidentBadge }) {
 
 export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) {
   const [services, setServices] = useState<ServiceRow[]>([])
+  const [catalogRows, setCatalogRows] = useState<CatalogJoinRow[]>([])
   const [serviceAlerts, setServiceAlerts] = useState<Record<string, ServiceAlertState>>({})
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
@@ -88,8 +94,14 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
     setIsLoading(true)
     setError('')
     try {
-      const response = await getServicesRegistry()
+      const [servicesResult, catalogResult] = await Promise.allSettled([getServicesRegistry(), getCatalogReconciliation()])
+      if (servicesResult.status !== 'fulfilled') {
+        throw servicesResult.reason
+      }
+
+      const response = servicesResult.value
       setServices(response)
+      setCatalogRows(catalogResult.status === 'fulfilled' ? catalogResult.value.rows : [])
       const alerts = await Promise.all(
         response.map(async (service) => {
           try {
@@ -161,6 +173,18 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
       return searchable.includes(query)
     })
   }, [environmentFilter, search, services])
+  const projectByServiceKey = useMemo(() => {
+    const map = new Map<string, CatalogJoinRow>()
+    for (const row of catalogRows) {
+      for (const serviceId of row.serviceIds) {
+        map.set(`${serviceId}:${row.env}`, row)
+      }
+      if (row.primaryServiceId) {
+        map.set(`${row.primaryServiceId}:${row.env}`, row)
+      }
+    }
+    return map
+  }, [catalogRows])
 
   return (
     <PageShell
@@ -210,6 +234,7 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                 <th className="px-3 py-3 font-medium text-muted-foreground">Service</th>
                 <th className="px-3 py-3 font-medium text-muted-foreground">Environment(s)</th>
                 <th className="px-3 py-3 font-medium text-muted-foreground">Status</th>
+                <th className="px-3 py-3 font-medium text-muted-foreground">Project</th>
                 <th className="px-3 py-3 font-medium text-muted-foreground">Public URL</th>
                 <th className="px-3 py-3 font-medium text-muted-foreground">Last Deploy</th>
               </tr>
@@ -249,6 +274,24 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                       uptime7d={service.uptime7dPct}
                       lastRefreshedAt={service.metricsLastRefreshedAt}
                     />
+                  </td>
+                  <td className="px-3 py-3 text-muted-foreground">
+                    {(() => {
+                      const matchingRow = service.environments
+                        .map((env) => projectByServiceKey.get(`${service.id}:${env}`))
+                        .find((row) => row)
+                      if (!matchingRow) {
+                        return 'Unmatched'
+                      }
+                      return (
+                        <AppLink
+                          to={`/projects#${encodeURIComponent(projectAnchor(matchingRow.projectId, matchingRow.env))}`}
+                          className="text-primary hover:underline"
+                        >
+                          {matchingRow.projectName}
+                        </AppLink>
+                      )
+                    })()}
                   </td>
                   <td className="px-3 py-3">
                     {service.publicUrl ? (

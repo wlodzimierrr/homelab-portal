@@ -428,6 +428,124 @@
         }
       }
     },
+    "/catalog/reconciliation": {
+      "get": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Get Catalog Reconciliation",
+        "operationId": "get_catalog_reconciliation_catalog_reconciliation_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "env",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Env"
+            }
+          },
+          {
+            "name": "projectId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Projectid"
+            }
+          },
+          {
+            "name": "serviceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Serviceid"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogJoinResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/service-registry/sync": {
       "post": {
         "tags": [
@@ -1574,6 +1692,211 @@
         ],
         "title": "ActiveAlertResponse"
       },
+      "CatalogJoinDiagnosticsResponse": {
+        "properties": {
+          "projectOnlyCount": {
+            "type": "integer",
+            "title": "Projectonlycount"
+          },
+          "serviceOnlyCount": {
+            "type": "integer",
+            "title": "Serviceonlycount"
+          },
+          "oneToManyCount": {
+            "type": "integer",
+            "title": "Onetomanycount"
+          },
+          "ambiguousJoinCount": {
+            "type": "integer",
+            "title": "Ambiguousjoincount"
+          },
+          "projectOnlyKeys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Projectonlykeys"
+          },
+          "serviceOnlyKeys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Serviceonlykeys"
+          },
+          "oneToManyKeys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Onetomanykeys"
+          },
+          "ambiguousJoinKeys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ambiguousjoinkeys"
+          }
+        },
+        "type": "object",
+        "required": [
+          "projectOnlyCount",
+          "serviceOnlyCount",
+          "oneToManyCount",
+          "ambiguousJoinCount",
+          "projectOnlyKeys",
+          "serviceOnlyKeys",
+          "oneToManyKeys",
+          "ambiguousJoinKeys"
+        ],
+        "title": "CatalogJoinDiagnosticsResponse"
+      },
+      "CatalogJoinResponse": {
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "title": "Generatedat"
+          },
+          "env": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogJoinRowResponse"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "diagnostics": {
+            "$ref": "#/components/schemas/CatalogJoinDiagnosticsResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generatedAt",
+          "rows",
+          "diagnostics"
+        ],
+        "title": "CatalogJoinResponse"
+      },
+      "CatalogJoinRowResponse": {
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "title": "Projectid"
+          },
+          "projectName": {
+            "type": "string",
+            "title": "Projectname"
+          },
+          "env": {
+            "type": "string",
+            "title": "Env"
+          },
+          "namespace": {
+            "type": "string",
+            "title": "Namespace"
+          },
+          "appLabel": {
+            "type": "string",
+            "title": "Applabel"
+          },
+          "joinSource": {
+            "type": "string",
+            "title": "Joinsource"
+          },
+          "primaryServiceId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Primaryserviceid"
+          },
+          "serviceCount": {
+            "type": "integer",
+            "title": "Servicecount"
+          },
+          "serviceIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Serviceids"
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogJoinServiceRefResponse"
+            },
+            "type": "array",
+            "title": "Services"
+          }
+        },
+        "type": "object",
+        "required": [
+          "projectId",
+          "projectName",
+          "env",
+          "namespace",
+          "appLabel",
+          "joinSource",
+          "serviceCount",
+          "serviceIds",
+          "services"
+        ],
+        "title": "CatalogJoinRowResponse"
+      },
+      "CatalogJoinServiceRefResponse": {
+        "properties": {
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "serviceName": {
+            "type": "string",
+            "title": "Servicename"
+          },
+          "namespace": {
+            "type": "string",
+            "title": "Namespace"
+          },
+          "appLabel": {
+            "type": "string",
+            "title": "Applabel"
+          },
+          "argoAppName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Argoappname"
+          }
+        },
+        "type": "object",
+        "required": [
+          "serviceId",
+          "serviceName",
+          "namespace",
+          "appLabel"
+        ],
+        "title": "CatalogJoinServiceRefResponse"
+      },
       "CreateProjectRequest": {
         "properties": {
           "id": {
@@ -2281,13 +2604,17 @@
           },
           "joinMismatch": {
             "$ref": "#/components/schemas/ServiceRegistryJoinMismatchResponse"
+          },
+          "catalogJoin": {
+            "$ref": "#/components/schemas/CatalogJoinDiagnosticsResponse"
           }
         },
         "type": "object",
         "required": [
           "generatedAt",
           "freshness",
-          "joinMismatch"
+          "joinMismatch",
+          "catalogJoin"
         ],
         "title": "ServiceRegistryDiagnosticsResponse"
       },

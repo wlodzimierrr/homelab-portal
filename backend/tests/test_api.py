@@ -323,6 +323,63 @@ def test_service_detail_returns_cluster_backed_row(monkeypatch) -> None:
     }
 
 
+def test_catalog_reconciliation_returns_join_rows(monkeypatch) -> None:
+    class _Cursor:
+        def __init__(self):
+            self.last_sql = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql: str, *_args, **_kwargs):
+            self.last_sql = " ".join(sql.split()).upper()
+
+        def fetchall(self):
+            if "FROM PROJECT_REGISTRY" in self.last_sql:
+                return [("homelab-api", "Homelab API", "dev", "homelab-api", "homelab-api")]
+            return [
+                (
+                    "homelab-api",
+                    "homelab-api",
+                    "dev",
+                    "homelab-api",
+                    "homelab-api",
+                    "homelab-api-dev",
+                    "cluster_services",
+                    "kubernetes_api",
+                    None,
+                )
+            ]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+
+    response = client.get(
+        "/catalog/reconciliation?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["diagnostics"]["projectOnlyCount"] == 0
+    assert body["diagnostics"]["serviceOnlyCount"] == 0
+    assert body["rows"][0]["projectId"] == "homelab-api"
+    assert body["rows"][0]["primaryServiceId"] == "homelab-api"
+    assert body["rows"][0]["serviceIds"] == ["homelab-api"]
+
+
 def test_service_registry_sync_requires_auth() -> None:
     response = client.post("/service-registry/sync")
     assert response.status_code == 401
@@ -435,6 +492,8 @@ def test_service_registry_diagnostics_reports_empty_registry(monkeypatch) -> Non
 
     monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
     monkeypatch.setattr("app.main._load_project_rows", lambda: [])
+    monkeypatch.setattr("app.main._load_project_catalog_rows", lambda env=None, project_id=None: [])
+    monkeypatch.setattr("app.main._load_service_catalog_rows", lambda env=None, service_id=None: [])
     monkeypatch.setattr("app.main.load_ci_metadata_rows", lambda: [])
     monkeypatch.setattr("app.main.load_argo_metadata_rows", lambda: [])
 
@@ -450,6 +509,8 @@ def test_service_registry_diagnostics_reports_empty_registry(monkeypatch) -> Non
     assert body["freshness"]["isStale"] is False
     assert body["joinMismatch"]["ciUnmatchedCount"] == 0
     assert body["joinMismatch"]["argoUnmatchedCount"] == 0
+    assert body["catalogJoin"]["projectOnlyCount"] == 0
+    assert body["catalogJoin"]["serviceOnlyCount"] == 0
 
 
 def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
@@ -489,6 +550,34 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
         lambda: [{"service_id": "homelab-api", "service_name": "Homelab API", "env": "dev"}],
     )
     monkeypatch.setattr(
+        "app.main._load_project_catalog_rows",
+        lambda env=None, project_id=None: [
+            {
+                "project_id": "portal-project",
+                "project_name": "Portal Project",
+                "env": "dev",
+                "namespace": "portal",
+                "app_label": "portal-project",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_catalog_rows",
+        lambda env=None, service_id=None: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
         "app.main.load_ci_metadata_rows",
         lambda: [{"serviceId": "portal-project", "serviceName": "Portal Project", "env": "dev"}],
     )
@@ -509,6 +598,8 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
     assert body["joinMismatch"]["ciUnmatchedKeys"] == [
         "portal-project|Portal Project|dev"
     ]
+    assert body["catalogJoin"]["projectOnlyCount"] == 1
+    assert body["catalogJoin"]["serviceOnlyCount"] == 1
 
 
 class _MockPrometheusResponse:

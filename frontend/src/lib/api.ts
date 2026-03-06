@@ -125,6 +125,45 @@ export interface ServicesResponse {
   services: ServiceRegistryApiRow[]
 }
 
+export interface CatalogJoinServiceRef {
+  serviceId: string
+  serviceName: string
+  namespace: string
+  appLabel: string
+  argoAppName?: string
+}
+
+export interface CatalogJoinRow {
+  projectId: string
+  projectName: string
+  env: string
+  namespace: string
+  appLabel: string
+  joinSource: 'primary_key' | 'fallback_service_id' | 'unmatched' | string
+  primaryServiceId?: string
+  serviceCount: number
+  serviceIds: string[]
+  services: CatalogJoinServiceRef[]
+}
+
+export interface CatalogJoinDiagnostics {
+  projectOnlyCount: number
+  serviceOnlyCount: number
+  oneToManyCount: number
+  ambiguousJoinCount: number
+  projectOnlyKeys: string[]
+  serviceOnlyKeys: string[]
+  oneToManyKeys: string[]
+  ambiguousJoinKeys: string[]
+}
+
+export interface CatalogJoinResponse {
+  generatedAt: string
+  env?: string
+  rows: CatalogJoinRow[]
+  diagnostics: CatalogJoinDiagnostics
+}
+
 async function getErrorMessage(response: Response) {
   const fallback = `Request failed (${response.status})`
   const contentType = response.headers.get('content-type') ?? ''
@@ -276,6 +315,10 @@ export function getService(serviceId: string) {
 
 export function getServices() {
   return requestServiceEndpoint<ServicesResponse>('/services')
+}
+
+export function getCatalogReconciliation() {
+  return request<CatalogJoinResponse>('/catalog/reconciliation')
 }
 
 export function getServiceDeployments(serviceId: string) {
