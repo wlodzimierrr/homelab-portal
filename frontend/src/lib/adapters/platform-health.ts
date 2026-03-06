@@ -250,8 +250,8 @@ export async function getPlatformIncidentFeed(): Promise<PlatformIncidentFeed> {
   const warnings: string[] = []
 
   try {
-    const incidents = await getIncidentsFromApi()
-    return { incidents, warnings }
+    const result = await getIncidentsFromApi()
+    return { incidents: result.incidents, warnings }
   } catch (error) {
     if (isApiRequestError(error) && incidentsMissingStatuses.has(error.status)) {
       incidentsApiAvailability = 'unavailable'
