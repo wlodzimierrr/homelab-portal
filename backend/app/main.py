@@ -2,13 +2,15 @@ from datetime import datetime, timedelta, timezone
 import logging
 import math
 import os
+import time
 from uuid import uuid4
 from urllib import parse as urlparse
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, ConfigDict
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from app.alerts_feed import (
     get_alertmanager_base_url,
@@ -65,6 +67,18 @@ metrics_summary_cache = TTLCache()
 timeline_cache = TTLCache()
 logs_quickview_cache = TTLCache()
 alerts_cache = TTLCache()
+metrics_namespace_label = os.getenv("OBS_METRICS_NAMESPACE", os.getenv("POD_NAMESPACE", "default"))
+metrics_app_label = os.getenv("OBS_METRICS_APP_LABEL", "homelab-api")
+http_requests_total = Counter(
+    "http_requests_total",
+    "Total HTTP requests handled by the homelab API.",
+    labelnames=("namespace", "app", "method", "path", "status"),
+)
+http_request_duration_seconds = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request latency for the homelab API.",
+    labelnames=("namespace", "app", "method", "path"),
+)
 
 
 def clear_observability_caches_for_tests() -> None:
@@ -72,6 +86,31 @@ def clear_observability_caches_for_tests() -> None:
     timeline_cache.clear()
     logs_quickview_cache.clear()
     alerts_cache.clear()
+
+
+@app.middleware("http")
+async def observe_http_requests(request, call_next):
+    if request.url.path == "/metrics":
+        return await call_next(request)
+
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        labels = {
+            "namespace": metrics_namespace_label,
+            "app": metrics_app_label,
+            "method": request.method,
+            "path": request.url.path,
+        }
+        http_request_duration_seconds.labels(**labels).observe(time.perf_counter() - started)
+        http_requests_total.labels(
+            **labels,
+            status=str(status_code),
+        ).inc()
 
 
 class MonitoringProviderStatusResponse(BaseModel):
@@ -1031,6 +1070,11 @@ def health(
         status=overall,
         providers=[MonitoringProviderStatusResponse(**item) for item in providers],
     )
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/auth/login", response_model=LoginResponse, tags=["auth"])
