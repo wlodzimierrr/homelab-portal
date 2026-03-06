@@ -256,10 +256,12 @@ jobs:
 
           api_patch="homelab-workloads/apps/homelab-api/envs/dev/patch-deployment.yaml"
           api_migration_patch="homelab-workloads/apps/homelab-api/envs/dev/patch-migration-job.yaml"
+          api_catalog_sync_patch="homelab-workloads/apps/homelab-api/envs/dev/patch-catalog-sync-cronjob.yaml"
           web_patch="homelab-workloads/apps/homelab-web/envs/dev/patch-deployment.yaml"
 
           sed -E -i "s#(image:[[:space:]]*ghcr\\.io/[^/]+/homelab-api:).*#\\1${DEV_IMAGE_TAG}#" "$api_patch"
           sed -E -i "s#(image:[[:space:]]*ghcr\\.io/[^/]+/homelab-api:).*#\\1${DEV_IMAGE_TAG}#" "$api_migration_patch"
+          sed -E -i "s#(image:[[:space:]]*ghcr\\.io/[^/]+/homelab-api:).*#\\1${DEV_IMAGE_TAG}#" "$api_catalog_sync_patch"
           sed -E -i "s#(image:[[:space:]]*ghcr\\.io/[^/]+/homelab-web:).*#\\1${DEV_IMAGE_TAG}#" "$web_patch"
 
           if git -C homelab-workloads diff --quiet; then
@@ -271,6 +273,7 @@ jobs:
           git -C homelab-workloads diff -- \
             apps/homelab-api/envs/dev/patch-deployment.yaml \
             apps/homelab-api/envs/dev/patch-migration-job.yaml \
+            apps/homelab-api/envs/dev/patch-catalog-sync-cronjob.yaml \
             apps/homelab-web/envs/dev/patch-deployment.yaml
 
       - name: Create PR in GitOps repo
@@ -288,6 +291,7 @@ jobs:
 
             - backend -> `ghcr.io/${{ github.repository_owner }}/homelab-api:${{ env.DEV_IMAGE_TAG }}`
             - backend migration job -> `ghcr.io/${{ github.repository_owner }}/homelab-api:${{ env.DEV_IMAGE_TAG }}`
+            - backend catalog sync job -> `ghcr.io/${{ github.repository_owner }}/homelab-api:${{ env.DEV_IMAGE_TAG }}`
             - frontend -> `ghcr.io/${{ github.repository_owner }}/homelab-web:${{ env.DEV_IMAGE_TAG }}`
 
             Trigger commit: `${{ github.sha }}`

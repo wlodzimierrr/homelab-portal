@@ -240,10 +240,12 @@ jobs:
 
           api_target_patch="homelab-workloads/apps/homelab-api/envs/$TARGET_ENV/patch-deployment.yaml"
           api_target_migration_patch="homelab-workloads/apps/homelab-api/envs/$TARGET_ENV/patch-migration-job.yaml"
+          api_target_catalog_sync_patch="homelab-workloads/apps/homelab-api/envs/$TARGET_ENV/patch-catalog-sync-cronjob.yaml"
           web_target_patch="homelab-workloads/apps/homelab-web/envs/$TARGET_ENV/patch-deployment.yaml"
 
           sed -E -i "s#(image:[[:space:]]*ghcr\.io/[^/]+/homelab-api:).*#\\1${API_TAG}#" "$api_target_patch"
           sed -E -i "s#(image:[[:space:]]*ghcr\.io/[^/]+/homelab-api:).*#\\1${API_TAG}#" "$api_target_migration_patch"
+          sed -E -i "s#(image:[[:space:]]*ghcr\.io/[^/]+/homelab-api:).*#\\1${API_TAG}#" "$api_target_catalog_sync_patch"
           sed -E -i "s#(image:[[:space:]]*ghcr\.io/[^/]+/homelab-web:).*#\\1${WEB_TAG}#" "$web_target_patch"
 
           changed_files=$(git -C homelab-workloads diff --name-only)
@@ -255,6 +257,7 @@ jobs:
           expected_files="$(printf '%s\n' \
             "apps/homelab-api/envs/$TARGET_ENV/patch-deployment.yaml" \
             "apps/homelab-api/envs/$TARGET_ENV/patch-migration-job.yaml" \
+            "apps/homelab-api/envs/$TARGET_ENV/patch-catalog-sync-cronjob.yaml" \
             "apps/homelab-web/envs/$TARGET_ENV/patch-deployment.yaml")"
 
           while IFS= read -r changed; do
