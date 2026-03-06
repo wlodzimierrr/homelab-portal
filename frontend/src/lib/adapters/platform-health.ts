@@ -1,6 +1,12 @@
 import { deriveServiceIdentity, getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
-import { ApiRequestError, isApiRequestError, request } from '@/lib/api'
+import {
+  ApiRequestError,
+  getMonitoringProvidersDiagnostics,
+  isApiRequestError,
+  request,
+  type MonitoringProviderStatus,
+} from '@/lib/api'
 import { summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
 
 export type IncidentSeverity = 'info' | 'warning' | 'critical'
@@ -38,6 +44,7 @@ export interface PlatformHealthOverview {
   summary: PlatformHealthSummary
   unhealthyServices: PlatformServiceHealthItem[]
   incidents: PlatformIncident[]
+  providers: MonitoringProviderStatus[]
   warnings: string[]
 }
 
@@ -55,6 +62,11 @@ interface ActiveAlertItem {
   labels?: Record<string, string>
   serviceId?: string
   env?: string
+}
+
+interface ActiveAlertsResponse {
+  alerts?: ActiveAlertItem[]
+  providerStatus?: MonitoringProviderStatus
 }
 
 const incidentsMissingStatuses = new Set([404, 405, 501])
@@ -104,9 +116,12 @@ async function getIncidentsFromApi() {
     throw new ApiRequestError('Alerts endpoint is not available in this backend.', 404)
   }
 
-  const response = await request<ActiveAlertItem[]>('/alerts/active')
+  const response = await request<ActiveAlertsResponse>('/alerts/active')
   incidentsApiAvailability = 'available'
-  return normalizeActiveAlerts(response)
+  return {
+    incidents: normalizeActiveAlerts(response.alerts ?? []),
+    providerStatus: response.providerStatus,
+  }
 }
 
 async function buildServiceHealthItems(services: ServiceRegistryItem[]): Promise<PlatformServiceHealthItem[]> {
@@ -161,9 +176,10 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
     warnings.push('Service registry source unavailable.')
   }
 
-  const [healthItemsResult, incidentsApiResult] = await Promise.allSettled([
+  const [healthItemsResult, incidentsApiResult, providersResult] = await Promise.allSettled([
     buildServiceHealthItems(services),
     getIncidentsFromApi(),
+    getMonitoringProvidersDiagnostics(),
   ])
 
   let serviceHealthItems: PlatformServiceHealthItem[] = []
@@ -174,8 +190,14 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
   }
 
   let incidents: PlatformIncident[] = []
+  let providers: MonitoringProviderStatus[] = []
   if (incidentsApiResult.status === 'fulfilled') {
-    incidents = incidentsApiResult.value
+    incidents = incidentsApiResult.value.incidents
+    if (incidentsApiResult.value.providerStatus && incidentsApiResult.value.providerStatus.status !== 'healthy') {
+      warnings.push(
+        `Alerts provider is ${incidentsApiResult.value.providerStatus.status.replace(/_/g, ' ')}.`,
+      )
+    }
   } else {
     if (
       isApiRequestError(incidentsApiResult.reason) &&
@@ -184,6 +206,18 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
       incidentsApiAvailability = 'unavailable'
     }
     warnings.push('Active alerts feed unavailable from /api/alerts/active.')
+  }
+
+  if (providersResult.status === 'fulfilled') {
+    providers = providersResult.value.providers
+    const degradedProviders = providers.filter((provider) => provider.status !== 'healthy')
+    for (const provider of degradedProviders) {
+      warnings.push(
+        `${provider.provider} is ${provider.status.replace(/_/g, ' ')}${provider.error ? `: ${provider.error}` : '.'}`,
+      )
+    }
+  } else {
+    warnings.push('Monitoring provider diagnostics are unavailable.')
   }
 
   const unhealthyServices = serviceHealthItems
@@ -207,7 +241,8 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
     summary,
     unhealthyServices,
     incidents,
-    warnings,
+    providers,
+    warnings: [...new Set(warnings)],
   }
 }
 

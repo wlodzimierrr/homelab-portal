@@ -4,7 +4,13 @@ import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
 import { AppLink } from '@/components/navigation/app-link'
-import { getCatalogReconciliation, type CatalogJoinRow } from '@/lib/api'
+import {
+  getCatalogReconciliation,
+  getServiceRegistryDiagnostics,
+  type CatalogJoinDiagnostics,
+  type CatalogJoinRow,
+  type ServiceRegistryDiagnosticsResponse,
+} from '@/lib/api'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import { UptimeIndicator } from '@/components/uptime-indicator'
 import { deriveServiceIdentity, getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
@@ -31,6 +37,22 @@ interface ServicesPageProps {
 
 function projectAnchor(projectId: string, env: string) {
   return `${projectId}-${env}`.toLowerCase()
+}
+
+function formatTimestamp(value?: string) {
+  if (!value) {
+    return 'N/A'
+  }
+
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return 'N/A'
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(parsed)
 }
 
 function formatLastDeploy(value?: string) {
@@ -65,6 +87,48 @@ function StatusBadge({ label, value }: { label: string; value: string }) {
   )
 }
 
+function SourceStateBadge({ state }: { state?: string }) {
+  const normalized = state?.toLowerCase() ?? 'unknown'
+  const tone =
+    normalized === 'fresh'
+      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+      : normalized === 'stale'
+        ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+        : normalized === 'empty'
+          ? 'bg-slate-500/10 text-slate-700 dark:text-slate-300'
+          : 'bg-muted text-muted-foreground'
+
+  return <span className={cn('inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize', tone)}>{normalized}</span>
+}
+
+function ReconciliationBadge({ diagnostics }: { diagnostics?: CatalogJoinDiagnostics }) {
+  const mismatchCount =
+    (diagnostics?.projectOnlyCount ?? 0) +
+    (diagnostics?.serviceOnlyCount ?? 0) +
+    (diagnostics?.oneToManyCount ?? 0) +
+    (diagnostics?.ambiguousJoinCount ?? 0)
+  const tone =
+    mismatchCount === 0
+      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+      : 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+
+  return (
+    <span className={cn('inline-flex rounded-full px-2 py-1 text-xs font-medium', tone)}>
+      {mismatchCount === 0 ? 'Aligned' : `${mismatchCount} mismatch${mismatchCount === 1 ? '' : 'es'}`}
+    </span>
+  )
+}
+
+function SummaryCard({ label, value, meta }: { label: string; value: string; meta?: string }) {
+  return (
+    <article className="rounded-md border border-border bg-background p-4">
+      <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="mt-2 text-2xl font-semibold">{value}</p>
+      {meta ? <p className="mt-1 text-xs text-muted-foreground">{meta}</p> : null}
+    </article>
+  )
+}
+
 function IncidentCountBadge({ alert }: { alert: ServiceIncidentBadge }) {
   const severity = alert.highestSeverity ?? 'info'
   const tone =
@@ -84,7 +148,9 @@ function IncidentCountBadge({ alert }: { alert: ServiceIncidentBadge }) {
 export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) {
   const [services, setServices] = useState<ServiceRow[]>([])
   const [catalogRows, setCatalogRows] = useState<CatalogJoinRow[]>([])
+  const [diagnostics, setDiagnostics] = useState<ServiceRegistryDiagnosticsResponse | null>(null)
   const [serviceAlerts, setServiceAlerts] = useState<Record<string, ServiceAlertState>>({})
+  const [warnings, setWarnings] = useState<string[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
@@ -93,15 +159,42 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
   const loadServices = useCallback(async () => {
     setIsLoading(true)
     setError('')
+    setWarnings([])
     try {
-      const [servicesResult, catalogResult] = await Promise.allSettled([getServicesRegistry(), getCatalogReconciliation()])
+      const [servicesResult, catalogResult, diagnosticsResult] = await Promise.allSettled([
+        getServicesRegistry(),
+        getCatalogReconciliation(),
+        getServiceRegistryDiagnostics(),
+      ])
       if (servicesResult.status !== 'fulfilled') {
         throw servicesResult.reason
       }
 
       const response = servicesResult.value
+      const nextWarnings: string[] = []
       setServices(response)
       setCatalogRows(catalogResult.status === 'fulfilled' ? catalogResult.value.rows : [])
+      if (catalogResult.status !== 'fulfilled') {
+        nextWarnings.push('Catalog reconciliation is unavailable; project links may be incomplete.')
+      }
+      if (diagnosticsResult.status === 'fulfilled') {
+        setDiagnostics(diagnosticsResult.value)
+        if (diagnosticsResult.value.freshness.state === 'stale') {
+          nextWarnings.push('Service registry data is stale; rerun cluster sync to refresh the live catalog.')
+        }
+        if (diagnosticsResult.value.freshness.state === 'empty') {
+          nextWarnings.push('Service registry is reachable but returned zero live services.')
+        }
+        if (
+          diagnosticsResult.value.joinMismatch.ciUnmatchedCount > 0 ||
+          diagnosticsResult.value.joinMismatch.argoUnmatchedCount > 0
+        ) {
+          nextWarnings.push('Release metadata has unmatched CI or Argo rows; some service status links may be incomplete.')
+        }
+      } else {
+        setDiagnostics(null)
+        nextWarnings.push('Service freshness diagnostics are unavailable.')
+      }
       const alerts = await Promise.all(
         response.map(async (service) => {
           try {
@@ -123,9 +216,11 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
         }),
       )
       setServiceAlerts(Object.fromEntries(alerts))
+      setWarnings(nextWarnings)
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : 'Failed to load services'
       setError(message)
+      setDiagnostics(null)
     } finally {
       setIsLoading(false)
     }
@@ -185,12 +280,63 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
     }
     return map
   }, [catalogRows])
+  const mismatchCount =
+    (diagnostics?.catalogJoin.projectOnlyCount ?? 0) +
+    (diagnostics?.catalogJoin.serviceOnlyCount ?? 0) +
+    (diagnostics?.catalogJoin.oneToManyCount ?? 0) +
+    (diagnostics?.catalogJoin.ambiguousJoinCount ?? 0)
 
   return (
     <PageShell
       title="Services"
       description="Read-only service catalog with environments, runtime status, and external links."
     >
+      {!isLoading ? (
+        <div className="mb-4 grid gap-3 md:grid-cols-3">
+          <SummaryCard
+            label="Catalog source"
+            value={diagnostics?.freshness.state === 'fresh' ? 'Live' : diagnostics?.freshness.state === 'stale' ? 'Stale' : diagnostics?.freshness.state === 'empty' ? 'Empty' : 'Unknown'}
+            meta={`Last sync: ${formatTimestamp(diagnostics?.freshness.lastSyncedAt)}`}
+          />
+          <SummaryCard
+            label="Services tracked"
+            value={String(services.length)}
+            meta={diagnostics ? `Rows in registry: ${diagnostics.freshness.rowCount}` : 'Diagnostics unavailable'}
+          />
+          <SummaryCard
+            label="Join drift"
+            value={String(mismatchCount)}
+            meta={
+              diagnostics?.joinMismatch.ciUnmatchedCount || diagnostics?.joinMismatch.argoUnmatchedCount
+                ? 'Release metadata has unmatched rows.'
+                : mismatchCount === 0
+                  ? 'Project and service joins are aligned.'
+                  : 'Catalog reconciliation needs review.'
+            }
+          />
+        </div>
+      ) : null}
+
+      {!isLoading && diagnostics ? (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-border bg-background p-3 text-sm">
+          <span className="text-muted-foreground">Source state</span>
+          <SourceStateBadge state={diagnostics.freshness.state} />
+          <span className="ml-2 text-muted-foreground">Reconciliation</span>
+          <ReconciliationBadge diagnostics={diagnostics.catalogJoin} />
+        </div>
+      ) : null}
+
+      {!isLoading && warnings.length > 0 ? (
+        <div className="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+          <p className="text-sm font-medium text-amber-900 dark:text-amber-200">Partial service readiness</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-amber-900 dark:text-amber-200">
+            {warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       <div className="mb-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
         <label className="space-y-1">
           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Search</span>

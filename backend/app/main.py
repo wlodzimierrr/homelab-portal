@@ -1,13 +1,10 @@
 from datetime import datetime, timedelta, timezone
-import json
 import logging
 import math
 import os
 import re
 from uuid import uuid4
-from urllib import error as urlerror
 from urllib import parse as urlparse
-from urllib import request as urlrequest
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
@@ -36,6 +33,15 @@ from app.logs_quickview import (
     enforce_logs_rate_limit,
     get_logs_default_namespace,
     validate_preset,
+)
+from app.monitoring_providers import (
+    build_provider_status,
+    get_loki_base_url,
+    get_monitoring_timeout_seconds,
+    get_prometheus_base_url,
+    load_json_from_provider,
+    probe_monitoring_provider,
+    raise_provider_bad_payload_error,
 )
 from app.gitops_project_sync import sync_project_registry_from_gitops
 from app.release_traceability import (
@@ -68,8 +74,40 @@ def clear_observability_caches_for_tests() -> None:
     alerts_cache.clear()
 
 
+class MonitoringProviderStatusResponse(BaseModel):
+    provider: str
+    base_url: str = Field(alias="baseUrl")
+    status: str
+    reachable: bool
+    checked_at: str = Field(alias="checkedAt")
+    correlation_id: str | None = Field(default=None, alias="correlationId")
+    latency_ms: int | None = Field(default=None, alias="latencyMs")
+    http_status: int | None = Field(default=None, alias="httpStatus")
+    error: str | None = None
+    probe_path: str | None = Field(default=None, alias="probePath")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class HealthResponse(BaseModel):
     status: str = "ok"
+    providers: list[MonitoringProviderStatusResponse] | None = None
+
+
+class MonitoringProviderErrorDetailResponse(BaseModel):
+    message: str
+    correlation_id: str | None = Field(default=None, alias="correlationId")
+    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class MonitoringProvidersDiagnosticsResponse(BaseModel):
+    generated_at: str = Field(alias="generatedAt")
+    overall_status: str = Field(alias="overallStatus")
+    providers: list[MonitoringProviderStatusResponse]
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class LoginRequest(BaseModel):
@@ -212,6 +250,15 @@ class CatalogJoinDiagnosticsResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ProjectCatalogDiagnosticsResponse(BaseModel):
+    generated_at: str = Field(alias="generatedAt")
+    env: str | None = None
+    freshness: ServiceRegistryFreshnessResponse
+    catalog_join: CatalogJoinDiagnosticsResponse = Field(alias="catalogJoin")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class CatalogJoinResponse(BaseModel):
     generated_at: str = Field(alias="generatedAt")
     env: str | None = None
@@ -241,6 +288,7 @@ class ServiceMetricsSummaryResponse(BaseModel):
     window_end: str = Field(alias="windowEnd")
     generated_at: str = Field(alias="generatedAt")
     no_data: dict[str, bool] = Field(alias="noData")
+    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -268,6 +316,7 @@ class LogsQuickViewResponse(BaseModel):
     more_available: bool = Field(alias="moreAvailable")
     next_cursor: str | None = Field(default=None, alias="nextCursor")
     lines: list[QuickViewLogLineResponse]
+    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -281,6 +330,13 @@ class ActiveAlertResponse(BaseModel):
     labels: dict[str, str]
     service_id: str | None = Field(default=None, alias="serviceId")
     env: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ActiveAlertsResponse(BaseModel):
+    alerts: list[ActiveAlertResponse]
+    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -299,6 +355,12 @@ class MonitoringIncidentCompatResponse(BaseModel):
 
 class MonitoringIncidentsCompatEnvelope(BaseModel):
     incidents: list[MonitoringIncidentCompatResponse]
+    provider_status: MonitoringProviderStatusResponse | None = Field(
+        default=None,
+        alias="providerStatus",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ReleaseArgoStateResponse(BaseModel):
@@ -546,68 +608,39 @@ def _registry_stale_after_minutes() -> int:
     return value if value > 0 else 30
 
 
-def _prometheus_base_url() -> str:
-    return os.getenv(
-        "PROMETHEUS_BASE_URL",
-        "http://prometheus.monitoring.svc.cluster.local:9090",
-    ).rstrip("/")
-
-
-def _prometheus_timeout_seconds() -> float:
-    raw = os.getenv("PROMETHEUS_TIMEOUT_SECONDS", "8")
-    try:
-        value = float(raw)
-    except ValueError:
-        return 8.0
-    return value if value > 0 else 8.0
-
-
-def _query_prometheus_scalar(query: str, metric_name: str) -> float | None:
+def _query_prometheus_scalar(
+    query: str,
+    metric_name: str,
+    *,
+    correlation_id: str,
+) -> float | None:
     encoded = urlparse.urlencode({"query": query})
-    endpoint = f"{_prometheus_base_url()}/api/v1/query?{encoded}"
-    correlation_id = str(uuid4())
+    endpoint = f"{get_prometheus_base_url()}/api/v1/query?{encoded}"
+    payload, _provider_status = load_json_from_provider(
+        provider="prometheus",
+        endpoint=endpoint,
+        correlation_id=correlation_id,
+        timeout_seconds=get_monitoring_timeout_seconds(),
+        message="Monitoring provider query failed.",
+    )
 
-    try:
-        with urlrequest.urlopen(
-            endpoint,
-            timeout=_prometheus_timeout_seconds(),
-        ) as response:
-            payload = json.loads(response.read())
-    except urlerror.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:400]
-        logger.error(
-            "prometheus_http_error correlation_id=%s metric=%s status=%s body=%s",
-            correlation_id,
-            metric_name,
-            exc.code,
-            body,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Monitoring provider query failed. correlation_id={correlation_id}",
-        ) from exc
-    except Exception as exc:
-        logger.error(
-            "prometheus_query_error correlation_id=%s metric=%s error=%s",
-            correlation_id,
-            metric_name,
-            str(exc),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Monitoring provider query failed. correlation_id={correlation_id}",
-        ) from exc
-
-    if payload.get("status") != "success":
+    if not isinstance(payload, dict) or payload.get("status") != "success":
         logger.error(
             "prometheus_bad_payload correlation_id=%s metric=%s payload_status=%s",
             correlation_id,
             metric_name,
-            payload.get("status"),
+            payload.get("status") if isinstance(payload, dict) else type(payload).__name__,
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Monitoring provider query failed. correlation_id={correlation_id}",
+        raise_provider_bad_payload_error(
+            provider="prometheus",
+            base_url=get_prometheus_base_url(),
+            correlation_id=correlation_id,
+            checked_at=datetime.now(tz=timezone.utc).isoformat(),
+            error=(
+                f"unexpected payload status="
+                f"{payload.get('status') if isinstance(payload, dict) else type(payload).__name__}"
+            ),
+            message="Monitoring provider query failed.",
         )
 
     results = payload.get("data", {}).get("result", [])
@@ -639,6 +672,7 @@ def _query_prometheus_range(
     start: datetime,
     end: datetime,
     step_seconds: int,
+    correlation_id: str,
 ) -> dict[int, float]:
     encoded = urlparse.urlencode(
         {
@@ -648,50 +682,32 @@ def _query_prometheus_range(
             "step": str(step_seconds),
         }
     )
-    endpoint = f"{_prometheus_base_url()}/api/v1/query_range?{encoded}"
-    correlation_id = str(uuid4())
+    endpoint = f"{get_prometheus_base_url()}/api/v1/query_range?{encoded}"
+    payload, _provider_status = load_json_from_provider(
+        provider="prometheus",
+        endpoint=endpoint,
+        correlation_id=correlation_id,
+        timeout_seconds=get_monitoring_timeout_seconds(),
+        message="Monitoring provider query failed.",
+    )
 
-    try:
-        with urlrequest.urlopen(
-            endpoint,
-            timeout=_prometheus_timeout_seconds(),
-        ) as response:
-            payload = json.loads(response.read())
-    except urlerror.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:400]
-        logger.error(
-            "prometheus_range_http_error correlation_id=%s metric=%s status=%s body=%s",
-            correlation_id,
-            metric_name,
-            exc.code,
-            body,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Monitoring provider query failed. correlation_id={correlation_id}",
-        ) from exc
-    except Exception as exc:
-        logger.error(
-            "prometheus_range_query_error correlation_id=%s metric=%s error=%s",
-            correlation_id,
-            metric_name,
-            str(exc),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Monitoring provider query failed. correlation_id={correlation_id}",
-        ) from exc
-
-    if payload.get("status") != "success":
+    if not isinstance(payload, dict) or payload.get("status") != "success":
         logger.error(
             "prometheus_range_bad_payload correlation_id=%s metric=%s payload_status=%s",
             correlation_id,
             metric_name,
-            payload.get("status"),
+            payload.get("status") if isinstance(payload, dict) else type(payload).__name__,
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Monitoring provider query failed. correlation_id={correlation_id}",
+        raise_provider_bad_payload_error(
+            provider="prometheus",
+            base_url=get_prometheus_base_url(),
+            correlation_id=correlation_id,
+            checked_at=datetime.now(tz=timezone.utc).isoformat(),
+            error=(
+                f"unexpected payload status="
+                f"{payload.get('status') if isinstance(payload, dict) else type(payload).__name__}"
+            ),
+            message="Monitoring provider query failed.",
         )
 
     results = payload.get("data", {}).get("result", [])
@@ -722,19 +738,13 @@ def _query_prometheus_range(
     return points
 
 
-def _loki_base_url() -> str:
-    return os.getenv(
-        "LOKI_BASE_URL",
-        "http://loki.monitoring.svc.cluster.local:3100",
-    ).rstrip("/")
-
-
 def _query_loki_range(
     *,
     query: str,
     start: datetime,
     end: datetime,
     limit: int,
+    correlation_id: str,
 ) -> list[tuple[int, str, dict[str, str]]]:
     encoded = urlparse.urlencode(
         {
@@ -745,47 +755,31 @@ def _query_loki_range(
             "direction": "backward",
         }
     )
-    endpoint = f"{_loki_base_url()}/loki/api/v1/query_range?{encoded}"
-    correlation_id = str(uuid4())
+    endpoint = f"{get_loki_base_url()}/loki/api/v1/query_range?{encoded}"
+    payload, _provider_status = load_json_from_provider(
+        provider="loki",
+        endpoint=endpoint,
+        correlation_id=correlation_id,
+        timeout_seconds=get_monitoring_timeout_seconds(),
+        message="Monitoring provider query failed.",
+    )
 
-    try:
-        with urlrequest.urlopen(
-            endpoint,
-            timeout=_prometheus_timeout_seconds(),
-        ) as response:
-            payload = json.loads(response.read())
-    except urlerror.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:400]
-        logger.error(
-            "loki_http_error correlation_id=%s status=%s body=%s",
-            correlation_id,
-            exc.code,
-            body,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Loki query failed. correlation_id={correlation_id}",
-        ) from exc
-    except Exception as exc:
-        logger.error(
-            "loki_query_error correlation_id=%s error=%s",
-            correlation_id,
-            str(exc),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Loki query failed. correlation_id={correlation_id}",
-        ) from exc
-
-    if payload.get("status") != "success":
+    if not isinstance(payload, dict) or payload.get("status") != "success":
         logger.error(
             "loki_bad_payload correlation_id=%s payload_status=%s",
             correlation_id,
-            payload.get("status"),
+            payload.get("status") if isinstance(payload, dict) else type(payload).__name__,
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Loki query failed. correlation_id={correlation_id}",
+        raise_provider_bad_payload_error(
+            provider="loki",
+            base_url=get_loki_base_url(),
+            correlation_id=correlation_id,
+            checked_at=datetime.now(tz=timezone.utc).isoformat(),
+            error=(
+                f"unexpected payload status="
+                f"{payload.get('status') if isinstance(payload, dict) else type(payload).__name__}"
+            ),
+            message="Monitoring provider query failed.",
         )
 
     result = payload.get("data", {}).get("result", [])
@@ -817,38 +811,18 @@ def _query_loki_range(
     return lines
 
 
-def _query_alertmanager_active_alerts() -> list[dict]:
+def _query_alertmanager_active_alerts(
+    *,
+    correlation_id: str,
+) -> tuple[list[dict], dict[str, object]]:
     endpoint = f"{get_alertmanager_base_url()}/api/v2/alerts"
-    correlation_id = str(uuid4())
-
-    try:
-        with urlrequest.urlopen(
-            endpoint,
-            timeout=_prometheus_timeout_seconds(),
-        ) as response:
-            payload = json.loads(response.read())
-    except urlerror.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:400]
-        logger.error(
-            "alertmanager_http_error correlation_id=%s status=%s body=%s",
-            correlation_id,
-            exc.code,
-            body,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Alertmanager query failed. correlation_id={correlation_id}",
-        ) from exc
-    except Exception as exc:
-        logger.error(
-            "alertmanager_query_error correlation_id=%s error=%s",
-            correlation_id,
-            str(exc),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Alertmanager query failed. correlation_id={correlation_id}",
-        ) from exc
+    payload, provider_status = load_json_from_provider(
+        provider="alertmanager",
+        endpoint=endpoint,
+        correlation_id=correlation_id,
+        timeout_seconds=get_monitoring_timeout_seconds(),
+        message="Monitoring provider query failed.",
+    )
 
     if not isinstance(payload, list):
         logger.error(
@@ -856,12 +830,16 @@ def _query_alertmanager_active_alerts() -> list[dict]:
             correlation_id,
             type(payload).__name__,
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Alertmanager query failed. correlation_id={correlation_id}",
+        raise_provider_bad_payload_error(
+            provider="alertmanager",
+            base_url=get_alertmanager_base_url(),
+            correlation_id=correlation_id,
+            checked_at=datetime.now(tz=timezone.utc).isoformat(),
+            error=f"unexpected payload type={type(payload).__name__}",
+            message="Monitoring provider query failed.",
         )
 
-    return payload
+    return payload, provider_status
 
 
 def _validate_selected_range(
@@ -979,9 +957,28 @@ def _validate_step_for_range(*, range_value: str, step_value: str) -> int:
     return int(step_delta.total_seconds())
 
 
-@app.get("/health", response_model=HealthResponse, tags=["system"])
-def health() -> HealthResponse:
-    return HealthResponse(status="ok")
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    response_model_exclude_none=True,
+    tags=["system"],
+)
+def health(
+    include_providers: bool = Query(default=False, alias="includeProviders"),
+) -> HealthResponse:
+    if not include_providers:
+        return HealthResponse(status="ok")
+
+    providers = [
+        probe_monitoring_provider("prometheus", correlation_id=str(uuid4())),
+        probe_monitoring_provider("loki", correlation_id=str(uuid4())),
+        probe_monitoring_provider("alertmanager", correlation_id=str(uuid4())),
+    ]
+    overall = "ok" if all(item["status"] == "healthy" for item in providers) else "degraded"
+    return HealthResponse(
+        status=overall,
+        providers=[MonitoringProviderStatusResponse(**item) for item in providers],
+    )
 
 
 @app.post("/auth/login", response_model=LoginResponse, tags=["auth"])
@@ -1014,6 +1011,77 @@ def list_projects(
             )
             for row in rows
         ]
+    )
+
+
+@app.get(
+    "/projects/diagnostics",
+    response_model=ProjectCatalogDiagnosticsResponse,
+    tags=["metadata"],
+)
+def get_project_catalog_diagnostics(
+    env: str | None = Query(default=None),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> ProjectCatalogDiagnosticsResponse:
+    with _with_connection() as conn:
+        with conn.cursor() as cur:
+            if env:
+                cur.execute(
+                    """
+                    SELECT COUNT(*), MAX(last_synced_at)
+                    FROM project_registry
+                    WHERE source = %s
+                      AND env = %s
+                    """,
+                    ("gitops_apps", env),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT COUNT(*), MAX(last_synced_at)
+                    FROM project_registry
+                    WHERE source = %s
+                    """,
+                    ("gitops_apps",),
+                )
+            count_row = cur.fetchone()
+
+    row_count = int(count_row[0] or 0)
+    last_synced_at = count_row[1]
+    stale_after_minutes = _registry_stale_after_minutes()
+    now = datetime.now(tz=timezone.utc)
+
+    is_empty = row_count == 0
+    if is_empty:
+        is_stale = False
+        state = "empty"
+    else:
+        if last_synced_at is None:
+            is_stale = True
+        else:
+            is_stale = (now - last_synced_at) > timedelta(minutes=stale_after_minutes)
+        state = "stale" if is_stale else "fresh"
+
+    catalog_join = build_catalog_join(
+        project_rows=_load_project_catalog_rows(env=env),
+        service_rows=_load_service_catalog_rows(env=env),
+        env_filter=env,
+        project_id_filter=None,
+        service_id_filter=None,
+    )
+
+    return ProjectCatalogDiagnosticsResponse(
+        generatedAt=now.isoformat(),
+        env=env,
+        freshness=ServiceRegistryFreshnessResponse(
+            rowCount=row_count,
+            lastSyncedAt=last_synced_at.isoformat() if last_synced_at else None,
+            staleAfterMinutes=stale_after_minutes,
+            isEmpty=is_empty,
+            isStale=is_stale,
+            state=state,
+        ),
+        catalogJoin=CatalogJoinDiagnosticsResponse(**catalog_join["diagnostics"]),
     )
 
 
@@ -1217,6 +1285,30 @@ def get_service_registry_diagnostics(
 
 
 @app.get(
+    "/monitoring/providers/diagnostics",
+    response_model=MonitoringProvidersDiagnosticsResponse,
+    tags=["monitoring"],
+)
+def get_monitoring_provider_diagnostics(
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> MonitoringProvidersDiagnosticsResponse:
+    generated_at = datetime.now(tz=timezone.utc).isoformat()
+    providers = [
+        probe_monitoring_provider("prometheus", correlation_id=str(uuid4())),
+        probe_monitoring_provider("loki", correlation_id=str(uuid4())),
+        probe_monitoring_provider("alertmanager", correlation_id=str(uuid4())),
+    ]
+    overall_status = (
+        "healthy" if all(item["status"] == "healthy" for item in providers) else "degraded"
+    )
+    return MonitoringProvidersDiagnosticsResponse(
+        generatedAt=generated_at,
+        overallStatus=overall_status,
+        providers=[MonitoringProviderStatusResponse(**item) for item in providers],
+    )
+
+
+@app.get(
     "/services/{service_id}/metrics/summary",
     response_model=ServiceMetricsSummaryResponse,
     tags=["monitoring"],
@@ -1241,6 +1333,7 @@ def get_service_metrics_summary(
 
     def _load_summary() -> ServiceMetricsSummaryResponse:
         now = datetime.now(tz=timezone.utc)
+        correlation_id = str(uuid4())
         durations = {
             "1h": timedelta(hours=1),
             "24h": timedelta(hours=24),
@@ -1257,7 +1350,11 @@ def get_service_metrics_summary(
         no_data: dict[str, bool] = {}
 
         for field_name, query in queries.items():
-            value = _query_prometheus_scalar(query, field_name)
+            value = _query_prometheus_scalar(
+                query,
+                field_name,
+                correlation_id=correlation_id,
+            )
             values[field_name] = value
             no_data[field_name] = value is None
 
@@ -1271,6 +1368,16 @@ def get_service_metrics_summary(
             windowEnd=now.isoformat(),
             generatedAt=now.isoformat(),
             noData=no_data,
+            providerStatus=MonitoringProviderStatusResponse(
+                **build_provider_status(
+                    provider="prometheus",
+                    base_url=get_prometheus_base_url(),
+                    status_value="healthy",
+                    reachable=True,
+                    checked_at=now.isoformat(),
+                    correlation_id=correlation_id,
+                )
+            ),
         )
 
     return metrics_summary_cache.get_or_set(
@@ -1328,6 +1435,7 @@ def get_service_health_timeline(
         end = now_utc()
         window = parse_range(safe_range)
         start = end - window
+        correlation_id = str(uuid4())
 
         namespace = "default"
         app_label = service_id
@@ -1343,6 +1451,7 @@ def get_service_health_timeline(
             start=start,
             end=end,
             step_seconds=step_seconds,
+            correlation_id=correlation_id,
         )
         error_points = _query_prometheus_range(
             queries["errorRatePct"],
@@ -1350,6 +1459,7 @@ def get_service_health_timeline(
             start=start,
             end=end,
             step_seconds=step_seconds,
+            correlation_id=correlation_id,
         )
         readiness_points = _query_prometheus_range(
             queries["readiness"],
@@ -1357,6 +1467,7 @@ def get_service_health_timeline(
             start=start,
             end=end,
             step_seconds=step_seconds,
+            correlation_id=correlation_id,
         )
 
         all_timestamps = sorted(
@@ -1407,7 +1518,7 @@ def get_service_health_timeline(
 
 @app.get(
     "/alerts/active",
-    response_model=list[ActiveAlertResponse],
+    response_model=ActiveAlertsResponse,
     tags=["monitoring"],
 )
 def get_active_alerts(
@@ -1419,20 +1530,37 @@ def get_active_alerts(
     config = load_observability_config()
     safe_limit = _effective_limit(limit, config.alerts_max_rows)
 
-    def _load_active_alerts() -> list:
-        return normalize_active_alerts(_query_alertmanager_active_alerts())
+    correlation_id = str(uuid4())
+    now = datetime.now(tz=timezone.utc).isoformat()
 
     try:
-        normalized = alerts_cache.get_or_set(
-            key=("alerts-active",),
-            ttl_seconds=config.alerts_cache_ttl_seconds,
-            loader=_load_active_alerts,
+        raw_alerts, provider_status = _query_alertmanager_active_alerts(
+            correlation_id=correlation_id,
         )
+        normalized = normalize_active_alerts(raw_alerts)
     except HTTPException as exc:
         # Graceful degradation for dashboard/banner UX: keep API usable with explicit metadata.
-        if exc.status_code == status.HTTP_502_BAD_GATEWAY and isinstance(exc.detail, str):
+        if exc.status_code == status.HTTP_502_BAD_GATEWAY and isinstance(exc.detail, dict):
             logger.warning("alerts_active_degraded detail=%s", exc.detail)
-            return []
+            detail = exc.detail
+            provider_detail = detail.get("providerStatus")
+            provider_status = (
+                provider_detail
+                if isinstance(provider_detail, dict)
+                else build_provider_status(
+                    provider="alertmanager",
+                    base_url=get_alertmanager_base_url(),
+                    status_value="error",
+                    reachable=False,
+                    checked_at=now,
+                    correlation_id=correlation_id,
+                    error="provider failure",
+                )
+            )
+            return ActiveAlertsResponse(
+                alerts=[],
+                providerStatus=MonitoringProviderStatusResponse(**provider_status),
+            )
         raise
 
     filtered = [
@@ -1442,19 +1570,22 @@ def get_active_alerts(
         and (not service_id or alert.service_id == service_id)
     ][:safe_limit]
 
-    return [
-        ActiveAlertResponse(
-            id=alert.id,
-            severity=alert.severity,
-            title=alert.title,
-            description=alert.description,
-            startsAt=alert.starts_at,
-            labels=alert.labels,
-            serviceId=alert.service_id,
-            env=alert.env,
-        )
-        for alert in filtered
-    ]
+    return ActiveAlertsResponse(
+        alerts=[
+            ActiveAlertResponse(
+                id=alert.id,
+                severity=alert.severity,
+                title=alert.title,
+                description=alert.description,
+                startsAt=alert.starts_at,
+                labels=alert.labels,
+                serviceId=alert.service_id,
+                env=alert.env,
+            )
+            for alert in filtered
+        ],
+        providerStatus=MonitoringProviderStatusResponse(**provider_status),
+    )
 
 
 @app.get(
@@ -1485,8 +1616,9 @@ def get_monitoring_incidents_compat(
                 source="alertmanager",
                 serviceId=item.service_id,
             )
-            for item in active_alerts
-        ]
+            for item in active_alerts.alerts
+        ],
+        providerStatus=active_alerts.provider_status,
     )
 
 
@@ -1624,6 +1756,7 @@ def get_service_logs_quickview(
         namespace=safe_namespace,
         preset=safe_preset,
     )
+    correlation_id = str(uuid4())
 
     fetch_limit = min(safe_limit + 1, max(2, config.logs_max_lines + 1))
     cache_key = (
@@ -1643,6 +1776,7 @@ def get_service_logs_quickview(
             start=window.start,
             end=window.end,
             limit=fetch_limit,
+            correlation_id=correlation_id,
         ),
     )
 
@@ -1667,4 +1801,14 @@ def get_service_logs_quickview(
             )
             for item in visible
         ],
+        providerStatus=MonitoringProviderStatusResponse(
+            **build_provider_status(
+                provider="loki",
+                base_url=get_loki_base_url(),
+                status_value="healthy",
+                reachable=True,
+                checked_at=now.isoformat(),
+                correlation_id=correlation_id,
+            )
+        ),
     )

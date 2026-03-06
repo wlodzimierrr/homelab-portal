@@ -12,6 +12,7 @@ import {
 } from '@/lib/adapters/platform-health'
 import { buildGrafanaDashboardUrl } from '@/lib/config'
 import { cn } from '@/lib/utils'
+import type { MonitoringProviderStatus } from '@/lib/api'
 
 interface SummaryCardProps {
   label: string
@@ -79,6 +80,23 @@ function IncidentStatusBadge({ status }: { status: IncidentStatus }) {
   return <span className={cn('inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize', tone)}>{status}</span>
 }
 
+function ProviderStatusBadge({ provider }: { provider: MonitoringProviderStatus }) {
+  const tone =
+    provider.status === 'healthy'
+      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+      : provider.status === 'unreachable'
+        ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+        : provider.status === 'auth_error'
+          ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+          : 'bg-muted text-muted-foreground'
+
+  return (
+    <span className={cn('inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize', tone)}>
+      {provider.provider}: {provider.status.replace(/_/g, ' ')}
+    </span>
+  )
+}
+
 export function PlatformHealthPage() {
   const [overview, setOverview] = useState<PlatformHealthOverview | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -135,6 +153,39 @@ export function PlatformHealthPage() {
                 tone="text-amber-700 dark:text-amber-300"
               />
             </div>
+
+            <section className="rounded-md border border-border bg-background p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Monitoring Providers</h2>
+              </div>
+              {overview.providers.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Provider diagnostics are unavailable.</p>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap gap-2">
+                    {overview.providers.map((provider) => (
+                      <ProviderStatusBadge key={provider.provider} provider={provider} />
+                    ))}
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-3">
+                    {overview.providers.map((provider) => (
+                      <article key={`${provider.provider}-card`} className="rounded-md border border-border/70 bg-muted/10 p-3">
+                        <p className="text-sm font-medium capitalize">{provider.provider}</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Reachable: {provider.reachable ? 'yes' : 'no'}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Checked: {formatDate(provider.checkedAt)}
+                        </p>
+                        {provider.error ? (
+                          <p className="mt-2 text-xs text-muted-foreground">{provider.error}</p>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
 
             {overview.warnings.length > 0 ? (
               <div className="rounded-md border border-amber-400/40 bg-amber-500/10 p-3">

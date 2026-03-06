@@ -15,8 +15,30 @@ interface RequestOptions extends Omit<RequestInit, 'headers'> {
 }
 
 interface ApiErrorPayload {
-  detail?: string
+  detail?:
+    | string
+    | {
+        message?: string
+        correlationId?: string
+        providerStatus?: {
+          provider?: string
+          status?: string
+        }
+      }
   message?: string
+}
+
+export interface MonitoringProviderStatus {
+  provider: string
+  baseUrl: string
+  status: string
+  reachable: boolean
+  checkedAt: string
+  correlationId?: string
+  latencyMs?: number
+  httpStatus?: number
+  error?: string
+  probePath?: string
 }
 
 export interface ApiAuthDiagnostic {
@@ -164,6 +186,43 @@ export interface CatalogJoinResponse {
   diagnostics: CatalogJoinDiagnostics
 }
 
+export interface RegistryFreshness {
+  rowCount: number
+  lastSyncedAt?: string
+  staleAfterMinutes: number
+  isEmpty: boolean
+  isStale: boolean
+  state: 'fresh' | 'stale' | 'empty' | string
+}
+
+export interface ProjectCatalogDiagnosticsResponse {
+  generatedAt: string
+  env?: string
+  freshness: RegistryFreshness
+  catalogJoin: CatalogJoinDiagnostics
+}
+
+export interface ServiceRegistryJoinMismatch {
+  ciUnmatchedCount: number
+  argoUnmatchedCount: number
+  ciUnmatchedKeys: string[]
+  argoUnmatchedKeys: string[]
+}
+
+export interface ServiceRegistryDiagnosticsResponse {
+  generatedAt: string
+  env?: string
+  freshness: RegistryFreshness
+  joinMismatch: ServiceRegistryJoinMismatch
+  catalogJoin: CatalogJoinDiagnostics
+}
+
+export interface MonitoringProvidersDiagnosticsResponse {
+  generatedAt: string
+  overallStatus: string
+  providers: MonitoringProviderStatus[]
+}
+
 async function getErrorMessage(response: Response) {
   const fallback = `Request failed (${response.status})`
   const contentType = response.headers.get('content-type') ?? ''
@@ -173,7 +232,22 @@ async function getErrorMessage(response: Response) {
   }
 
   const payload = (await response.json()) as ApiErrorPayload
-  return payload.detail ?? payload.message ?? fallback
+  if (typeof payload.detail === 'string') {
+    return payload.detail
+  }
+
+  if (payload.detail && typeof payload.detail === 'object') {
+    const message = payload.detail.message ?? payload.message ?? fallback
+    const provider = payload.detail.providerStatus?.provider
+    const providerState = payload.detail.providerStatus?.status
+    const correlationId = payload.detail.correlationId
+    const suffix = [provider, providerState, correlationId ? `correlationId=${correlationId}` : undefined]
+      .filter(Boolean)
+      .join(', ')
+    return suffix ? `${message} (${suffix})` : message
+  }
+
+  return payload.message ?? fallback
 }
 
 function joinBaseUrl(baseUrl: string, path: string) {
@@ -301,6 +375,10 @@ export function getProjects() {
   return request<ProjectsResponse>('/projects')
 }
 
+export function getProjectCatalogDiagnostics() {
+  return request<ProjectCatalogDiagnosticsResponse>('/projects/diagnostics')
+}
+
 export function login(payload: LoginPayload) {
   return request<LoginResponse>('/auth/login', {
     method: 'POST',
@@ -319,6 +397,14 @@ export function getServices() {
 
 export function getCatalogReconciliation() {
   return request<CatalogJoinResponse>('/catalog/reconciliation')
+}
+
+export function getServiceRegistryDiagnostics() {
+  return request<ServiceRegistryDiagnosticsResponse>('/service-registry/diagnostics')
+}
+
+export function getMonitoringProvidersDiagnostics() {
+  return request<MonitoringProvidersDiagnosticsResponse>('/monitoring/providers/diagnostics')
 }
 
 export function getServiceDeployments(serviceId: string) {

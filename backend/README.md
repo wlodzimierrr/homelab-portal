@@ -5,8 +5,10 @@ FastAPI backend scaffold for task `T1.2.1`.
 ## Endpoints
 
 - `GET /health`
+- `GET /health?includeProviders=true`
 - `POST /auth/login`
 - `GET /projects?env=dev`
+- `GET /projects/diagnostics?env=dev`
 - `GET /services?env=dev&namespace=homelab-api`
 - `GET /services/{serviceId}?env=dev`
 - `GET /catalog/reconciliation?env=dev`
@@ -15,6 +17,7 @@ FastAPI backend scaffold for task `T1.2.1`.
 - `GET /services/{serviceId}/metrics/summary?range=1h|24h|7d`
 - `GET /services/{serviceId}/health/timeline?range=24h|7d&step=5m..1h`
 - `GET /alerts/active?env=dev&serviceId=...`
+- `GET /monitoring/providers/diagnostics`
 - `GET /monitoring/incidents` (compatibility envelope for existing frontend adapter)
 - `GET /releases?env=dev&limit=50&serviceId=...`
 - `GET /services/{serviceId}/logs/quickview?preset=errors&range=1h`
@@ -56,6 +59,12 @@ Prometheus access:
 - `PROMETHEUS_BASE_URL` (default: `http://prometheus.monitoring.svc.cluster.local:9090`)
 - `PROMETHEUS_TIMEOUT_SECONDS` (default: `8`)
 
+Provider diagnostics:
+
+- `GET /health?includeProviders=true` exposes provider readiness without changing the default liveness shape.
+- `GET /monitoring/providers/diagnostics` reports reachability for `prometheus`, `loki`, and `alertmanager`.
+- Metrics, logs, and alerts responses now include `providerStatus`; monitoring provider failures return structured `detail.message`, `detail.correlationId`, and `detail.providerStatus`.
+
 Health timeline status thresholds:
 
 - `TIMELINE_DEGRADED_AVAILABILITY_MAX` (default: `0.995`)
@@ -92,6 +101,7 @@ Active alerts feed config:
 - `ALERT_SEVERITY_WARNING_VALUES` (CSV, default: `warning,warn,info`)
 
 Severity mapping for `/alerts/active` is normalized to `warning|critical` for consistency with frontend badge tones.
+`/alerts/active` returns `{ alerts, providerStatus }` so graceful degradation stays diagnosable.
 
 Service registry sync config:
 

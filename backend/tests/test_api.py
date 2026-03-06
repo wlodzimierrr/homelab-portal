@@ -25,6 +25,31 @@ def test_health_endpoint() -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_health_endpoint_supports_provider_checks(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main.probe_monitoring_provider",
+        lambda provider, correlation_id: {
+            "provider": provider,
+            "baseUrl": f"http://{provider}.local",
+            "status": "healthy",
+            "reachable": True,
+            "checkedAt": "2026-03-06T00:00:00+00:00",
+            "correlationId": correlation_id,
+        },
+    )
+
+    response = client.get("/health?includeProviders=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert [item["provider"] for item in body["providers"]] == [
+        "prometheus",
+        "loki",
+        "alertmanager",
+    ]
+
+
 def test_login_success() -> None:
     response = client.post(
         "/auth/login",
@@ -169,6 +194,76 @@ def test_projects_list_supports_env_filter(monkeypatch) -> None:
         "projects": [{"id": "homelab-api", "name": "homelab-api", "environment": "dev"}]
     }
     assert executed_args[0][1] == ("gitops_apps", "dev")
+
+
+def test_project_catalog_diagnostics_reports_freshness(monkeypatch) -> None:
+    from datetime import datetime, timezone
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchone(self):
+            return (2, datetime.now(tz=timezone.utc))
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+    monkeypatch.setattr(
+        "app.main._load_project_catalog_rows",
+        lambda env=None, project_id=None: [
+            {
+                "project_id": "homelab-api",
+                "project_name": "Homelab API",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_catalog_rows",
+        lambda env=None, service_id=None: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": None,
+            }
+        ],
+    )
+
+    response = client.get(
+        "/projects/diagnostics?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["env"] == "dev"
+    assert body["freshness"]["rowCount"] == 2
+    assert body["freshness"]["state"] == "fresh"
+    assert body["catalogJoin"]["projectOnlyCount"] == 0
+    assert body["catalogJoin"]["serviceOnlyCount"] == 0
 
 
 def test_create_project_rejected_for_gitops_owned_catalog() -> None:
@@ -602,6 +697,56 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
     assert body["catalogJoin"]["serviceOnlyCount"] == 1
 
 
+def test_monitoring_provider_diagnostics_reports_reachability(monkeypatch) -> None:
+    statuses = {
+        "prometheus": {
+            "provider": "prometheus",
+            "baseUrl": "http://prometheus.local",
+            "status": "healthy",
+            "reachable": True,
+            "checkedAt": "2026-03-06T00:00:00+00:00",
+            "correlationId": "cid-prom",
+        },
+        "loki": {
+            "provider": "loki",
+            "baseUrl": "http://loki.local",
+            "status": "unreachable",
+            "reachable": False,
+            "checkedAt": "2026-03-06T00:00:00+00:00",
+            "correlationId": "cid-loki",
+            "error": "connection refused",
+        },
+        "alertmanager": {
+            "provider": "alertmanager",
+            "baseUrl": "http://alertmanager.local",
+            "status": "auth_error",
+            "reachable": True,
+            "checkedAt": "2026-03-06T00:00:00+00:00",
+            "correlationId": "cid-alerts",
+            "httpStatus": 401,
+            "error": "unauthorized",
+        },
+    }
+    monkeypatch.setattr(
+        "app.main.probe_monitoring_provider",
+        lambda provider, correlation_id: statuses[provider] | {"correlationId": correlation_id},
+    )
+
+    response = client.get(
+        "/monitoring/providers/diagnostics",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["overallStatus"] == "degraded"
+    assert len(body["providers"]) == 3
+    assert body["providers"][1]["provider"] == "loki"
+    assert body["providers"][1]["status"] == "unreachable"
+    assert body["providers"][2]["provider"] == "alertmanager"
+    assert body["providers"][2]["status"] == "auth_error"
+
+
 class _MockPrometheusResponse:
     def __init__(self, payload: dict):
         self._payload = payload
@@ -629,7 +774,7 @@ def test_service_metrics_summary_success_with_supported_range(monkeypatch) -> No
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(next(payloads))
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/services/homelab-api/metrics/summary?range=24h",
@@ -652,6 +797,8 @@ def test_service_metrics_summary_success_with_supported_range(monkeypatch) -> No
         "errorRatePct": False,
         "restartCount": False,
     }
+    assert body["providerStatus"]["provider"] == "prometheus"
+    assert body["providerStatus"]["status"] == "healthy"
 
 
 def test_service_metrics_summary_rejects_invalid_range() -> None:
@@ -675,7 +822,7 @@ def test_service_metrics_summary_legacy_route_works(monkeypatch) -> None:
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(next(payloads))
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/services/homelab-api/metrics-summary?range=24h",
@@ -699,7 +846,7 @@ def test_service_metrics_summary_supports_per_metric_no_data(monkeypatch) -> Non
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(next(payloads))
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/services/homelab-web/metrics/summary?range=1h",
@@ -716,6 +863,7 @@ def test_service_metrics_summary_supports_per_metric_no_data(monkeypatch) -> Non
     assert body["noData"]["errorRatePct"] is True
     assert body["noData"]["p95LatencyMs"] is False
     assert body["noData"]["restartCount"] is False
+    assert body["providerStatus"]["provider"] == "prometheus"
 
 
 def test_service_metrics_summary_translates_prometheus_http_errors(monkeypatch) -> None:
@@ -728,7 +876,7 @@ def test_service_metrics_summary_translates_prometheus_http_errors(monkeypatch) 
             fp=BytesIO(b'{"status":"error","error":"provider down"}'),
         )
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/services/homelab-api/metrics/summary?range=7d",
@@ -737,8 +885,10 @@ def test_service_metrics_summary_translates_prometheus_http_errors(monkeypatch) 
 
     assert response.status_code == 502
     detail = response.json()["detail"]
-    assert "Monitoring provider query failed." in detail
-    assert "correlation_id=" in detail
+    assert detail["message"] == "Monitoring provider query failed."
+    assert detail["correlationId"]
+    assert detail["providerStatus"]["provider"] == "prometheus"
+    assert detail["providerStatus"]["httpStatus"] == 503
 
 
 def test_service_health_timeline_returns_segments(monkeypatch) -> None:
@@ -792,7 +942,7 @@ def test_service_health_timeline_returns_segments(monkeypatch) -> None:
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(next(payloads))
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/services/homelab-api/health/timeline?range=24h&step=5m",
@@ -929,7 +1079,7 @@ def test_logs_quickview_returns_bounded_results_with_more_available(monkeypatch)
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(payload)
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/services/homelab-api/logs/quickview?preset=errors&range=1h&limit=1",
@@ -942,6 +1092,8 @@ def test_logs_quickview_returns_bounded_results_with_more_available(monkeypatch)
     assert body["moreAvailable"] is True
     assert body["nextCursor"]
     assert len(body["lines"]) == 1
+    assert body["providerStatus"]["provider"] == "loki"
+    assert body["providerStatus"]["status"] == "healthy"
 
 
 def test_logs_quickview_enforces_rate_limit(monkeypatch) -> None:
@@ -951,7 +1103,7 @@ def test_logs_quickview_enforces_rate_limit(monkeypatch) -> None:
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(payload)
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     first = client.get(
         "/services/homelab-api/logs/quickview?preset=errors",
@@ -975,7 +1127,7 @@ def test_metrics_summary_uses_cache_for_repeated_service_and_range(monkeypatch) 
             {"status": "success", "data": {"result": [{"value": [0, "1"]}]}}
         )
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
     monkeypatch.setenv("OBS_METRICS_CACHE_TTL_SECONDS", "60")
 
     first = client.get(
@@ -1013,7 +1165,7 @@ def test_logs_quickview_caps_limit_by_config(monkeypatch) -> None:
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(payload)
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
     monkeypatch.setenv("OBS_LOGS_MAX_LINES", "2")
 
     response = client.get(
@@ -1045,7 +1197,7 @@ def test_alerts_active_caps_limit_by_config(monkeypatch) -> None:
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(payload)
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
     monkeypatch.setenv("OBS_ALERTS_MAX_ROWS", "1")
 
     response = client.get(
@@ -1053,7 +1205,9 @@ def test_alerts_active_caps_limit_by_config(monkeypatch) -> None:
         headers={"Authorization": "Bearer dev-static-token"},
     )
     assert response.status_code == 200
-    assert len(response.json()) == 1
+    body = response.json()
+    assert len(body["alerts"]) == 1
+    assert body["providerStatus"]["provider"] == "alertmanager"
 
 
 def test_alerts_active_returns_mapped_alerts(monkeypatch) -> None:
@@ -1077,7 +1231,7 @@ def test_alerts_active_returns_mapped_alerts(monkeypatch) -> None:
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(payload)
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/alerts/active",
@@ -1086,11 +1240,12 @@ def test_alerts_active_returns_mapped_alerts(monkeypatch) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert len(body) == 1
-    assert body[0]["severity"] == "critical"
-    assert body[0]["title"] == "High error rate"
-    assert body[0]["serviceId"] == "homelab-api"
-    assert body[0]["env"] == "dev"
+    assert len(body["alerts"]) == 1
+    assert body["alerts"][0]["severity"] == "critical"
+    assert body["alerts"][0]["title"] == "High error rate"
+    assert body["alerts"][0]["serviceId"] == "homelab-api"
+    assert body["alerts"][0]["env"] == "dev"
+    assert body["providerStatus"]["status"] == "healthy"
 
 
 def test_alerts_active_supports_filters(monkeypatch) -> None:
@@ -1112,7 +1267,7 @@ def test_alerts_active_supports_filters(monkeypatch) -> None:
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(payload)
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/alerts/active?serviceId=homelab-api&env=dev",
@@ -1121,9 +1276,9 @@ def test_alerts_active_supports_filters(monkeypatch) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert len(body) == 1
-    assert body[0]["serviceId"] == "homelab-api"
-    assert body[0]["env"] == "dev"
+    assert len(body["alerts"]) == 1
+    assert body["alerts"][0]["serviceId"] == "homelab-api"
+    assert body["alerts"][0]["env"] == "dev"
 
 
 def test_alerts_active_gracefully_degrades_on_upstream_failure(monkeypatch) -> None:
@@ -1136,7 +1291,7 @@ def test_alerts_active_gracefully_degrades_on_upstream_failure(monkeypatch) -> N
             fp=BytesIO(b'{"status":"error","error":"provider down"}'),
         )
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/alerts/active",
@@ -1144,7 +1299,11 @@ def test_alerts_active_gracefully_degrades_on_upstream_failure(monkeypatch) -> N
     )
 
     assert response.status_code == 200
-    assert response.json() == []
+    body = response.json()
+    assert body["alerts"] == []
+    assert body["providerStatus"]["provider"] == "alertmanager"
+    assert body["providerStatus"]["status"] == "http_error"
+    assert body["providerStatus"]["correlationId"]
 
 
 def test_monitoring_incidents_compat_route_available(monkeypatch) -> None:
@@ -1160,7 +1319,7 @@ def test_monitoring_incidents_compat_route_available(monkeypatch) -> None:
     def _mock_urlopen(*args, **kwargs):
         return _MockPrometheusResponse(payload)
 
-    monkeypatch.setattr("app.main.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
 
     response = client.get(
         "/monitoring/incidents",
@@ -1172,3 +1331,4 @@ def test_monitoring_incidents_compat_route_available(monkeypatch) -> None:
     assert "incidents" in body
     assert len(body["incidents"]) == 1
     assert body["incidents"][0]["severity"] == "warning"
+    assert body["providerStatus"]["provider"] == "alertmanager"

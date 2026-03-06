@@ -1,4 +1,4 @@
-import { request } from '@/lib/api'
+import { request, type MonitoringProviderStatus } from '@/lib/api'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export type ServiceMetricsRange = '1h' | '24h' | '7d'
@@ -22,6 +22,7 @@ export interface ServiceMetricsSummary {
   windowEnd?: string
   generatedAt?: string
   noData: ServiceMetricsNoData
+  providerStatus?: MonitoringProviderStatus
 }
 
 interface ServiceMetricsSummaryResponse {
@@ -34,6 +35,7 @@ interface ServiceMetricsSummaryResponse {
   windowEnd?: string
   generatedAt?: string
   noData?: Partial<ServiceMetricsNoData>
+  providerStatus?: MonitoringProviderStatus
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -92,6 +94,7 @@ function adaptSummary(
     windowEnd: typeof payload.windowEnd === 'string' ? payload.windowEnd : undefined,
     generatedAt: typeof payload.generatedAt === 'string' ? payload.generatedAt : undefined,
     noData: normalizeNoData(payload),
+    providerStatus: payload.providerStatus,
   }
 }
 

@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import {
   getProjects,
   getService,
+  type MonitoringProviderStatus,
   type Project,
   type ServiceDeployment,
   type ServiceEndpoint,
@@ -78,6 +79,13 @@ interface LogsPreset {
   description: string
   queryTemplate: string
 }
+
+type MonitoringPanelState =
+  | 'healthy'
+  | 'upstream_unknown'
+  | 'provider_unreachable'
+  | 'provider_error'
+  | 'no_data'
 
 function normalizeHealthStatus(value?: string): HealthStatus {
   if (!value) {
@@ -248,6 +256,80 @@ function QuickLinkCard({ label, description, href }: QuickLinkCardProps) {
       <p className="text-sm font-medium">{label}</p>
       <p className="text-xs text-muted-foreground">{description}</p>
     </a>
+  )
+}
+
+function normalizeProviderPanelState(
+  providerStatus?: MonitoringProviderStatus,
+  errorMessage?: string,
+  noData = false,
+): MonitoringPanelState {
+  const normalizedProviderState = providerStatus?.status?.toLowerCase()
+  const normalizedError = errorMessage?.toLowerCase() ?? ''
+
+  if (normalizedProviderState === 'unreachable' || normalizedError.includes('unreachable')) {
+    return 'provider_unreachable'
+  }
+  if (
+    normalizedProviderState === 'auth_error' ||
+    normalizedProviderState === 'http_error' ||
+    normalizedProviderState === 'bad_payload' ||
+    normalizedError.includes('auth_error') ||
+    normalizedError.includes('http_error') ||
+    normalizedError.includes('bad_payload')
+  ) {
+    return 'provider_error'
+  }
+  if (noData) {
+    return 'no_data'
+  }
+  if (!providerStatus) {
+    return 'upstream_unknown'
+  }
+  return 'healthy'
+}
+
+function MonitoringPanelNotice({
+  provider,
+  state,
+}: {
+  provider: string
+  state: MonitoringPanelState
+}) {
+  if (state === 'healthy') {
+    return null
+  }
+
+  const config =
+    state === 'provider_unreachable'
+      ? {
+          title: 'Provider unreachable',
+          body: `${provider} could not be reached. This is a backend/provider path issue, not a no-data result.`,
+          tone: 'border-rose-500/40 bg-rose-500/10 text-rose-900 dark:text-rose-200',
+        }
+      : state === 'provider_error'
+        ? {
+            title: 'Provider error',
+            body: `${provider} responded, but the backend could not use the response cleanly.`,
+            tone: 'border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-200',
+          }
+        : state === 'no_data'
+          ? {
+              title: 'No data',
+              body: `${provider} is reachable, but no matching data was returned for the current scope or time range.`,
+              tone: 'border-slate-500/40 bg-slate-500/10 text-slate-900 dark:text-slate-200',
+            }
+          : {
+              title: 'Upstream unknown',
+              body: `${provider} readiness metadata is unavailable, so this panel cannot classify the upstream state precisely.`,
+              tone: 'border-border bg-muted/30 text-muted-foreground',
+            }
+
+  return (
+    <div className={`rounded-md border p-3 ${config.tone}`}>
+      <p className="text-sm font-medium">{config.title}</p>
+      <p className="mt-1 text-xs">{config.body}</p>
+    </div>
   )
 }
 
@@ -496,6 +578,27 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     [activeLogsPreset, presetLinks],
   )
   const logsUrl = activePreset?.href ?? ''
+  const metricsAllNoData = useMemo(
+    () =>
+      metrics.noData.uptimePct &&
+      metrics.noData.p95LatencyMs &&
+      metrics.noData.errorRatePct &&
+      metrics.noData.restartCount,
+    [metrics],
+  )
+  const metricsPanelState = useMemo(
+    () => normalizeProviderPanelState(metrics.providerStatus, metricsError, metricsAllNoData),
+    [metrics.providerStatus, metricsAllNoData, metricsError],
+  )
+  const logsPanelState = useMemo(
+    () =>
+      normalizeProviderPanelState(
+        logsResult?.providerStatus,
+        logsError,
+        !logsLoading && !logsError && (logsResult?.lines.length ?? 0) === 0,
+      ),
+    [logsError, logsLoading, logsResult],
+  )
 
   const loadQuickViewLogs = useCallback(async () => {
     setLogsLoading(true)
@@ -607,6 +710,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                   </Button>
                 </div>
               ) : null}
+              {!metricsLoading ? <MonitoringPanelNotice provider="Prometheus" state={metricsPanelState} /> : null}
               <UptimeIndicator
                 uptime24h={metricsRange === '7d' ? undefined : metrics.uptimePct}
                 uptime7d={metricsRange === '7d' ? metrics.uptimePct : undefined}
@@ -790,6 +894,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 <p className="text-xs text-muted-foreground">
                   Live Loki quick-view lines from <code>/api/services/:serviceId/logs/quickview</code>.
                 </p>
+                {!logsLoading ? <MonitoringPanelNotice provider="Loki" state={logsPanelState} /> : null}
                 <div className="rounded-md border border-border bg-background p-3">
                   <div className="mb-3 flex flex-wrap gap-2">
                     {presetLinks.map((preset) => (

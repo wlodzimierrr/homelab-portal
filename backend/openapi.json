@@ -12,6 +12,18 @@
         ],
         "summary": "Health",
         "operationId": "health_health_get",
+        "parameters": [
+          {
+            "name": "includeProviders",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Includeproviders"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -19,6 +31,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -214,6 +236,92 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/diagnostics": {
+      "get": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Get Project Catalog Diagnostics",
+        "operationId": "get_project_catalog_diagnostics_projects_diagnostics_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "env",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Env"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectCatalogDiagnosticsResponse"
                 }
               }
             }
@@ -728,6 +836,76 @@
         }
       }
     },
+    "/monitoring/providers/diagnostics": {
+      "get": {
+        "tags": [
+          "monitoring"
+        ],
+        "summary": "Get Monitoring Provider Diagnostics",
+        "operationId": "get_monitoring_provider_diagnostics_monitoring_providers_diagnostics_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MonitoringProvidersDiagnosticsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/services/{service_id}/metrics/summary": {
       "get": {
         "tags": [
@@ -1109,11 +1287,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ActiveAlertResponse"
-                  },
-                  "title": "Response Get Active Alerts Alerts Active Get"
+                  "$ref": "#/components/schemas/ActiveAlertsResponse"
                 }
               }
             }
@@ -1692,6 +1866,26 @@
         ],
         "title": "ActiveAlertResponse"
       },
+      "ActiveAlertsResponse": {
+        "properties": {
+          "alerts": {
+            "items": {
+              "$ref": "#/components/schemas/ActiveAlertResponse"
+            },
+            "type": "array",
+            "title": "Alerts"
+          },
+          "providerStatus": {
+            "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "alerts",
+          "providerStatus"
+        ],
+        "title": "ActiveAlertsResponse"
+      },
       "CatalogJoinDiagnosticsResponse": {
         "properties": {
           "projectOnlyCount": {
@@ -1942,6 +2136,20 @@
             "type": "string",
             "title": "Status",
             "default": "ok"
+          },
+          "providers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providers"
           }
         },
         "type": "object",
@@ -2037,6 +2245,9 @@
             },
             "type": "array",
             "title": "Lines"
+          },
+          "providerStatus": {
+            "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
           }
         },
         "type": "object",
@@ -2048,7 +2259,8 @@
           "limit",
           "returned",
           "moreAvailable",
-          "lines"
+          "lines",
+          "providerStatus"
         ],
         "title": "LogsQuickViewResponse"
       },
@@ -2109,6 +2321,16 @@
             },
             "type": "array",
             "title": "Incidents"
+          },
+          "providerStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -2116,6 +2338,120 @@
           "incidents"
         ],
         "title": "MonitoringIncidentsCompatEnvelope"
+      },
+      "MonitoringProviderStatusResponse": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "baseUrl": {
+            "type": "string",
+            "title": "Baseurl"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "reachable": {
+            "type": "boolean",
+            "title": "Reachable"
+          },
+          "checkedAt": {
+            "type": "string",
+            "title": "Checkedat"
+          },
+          "correlationId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correlationid"
+          },
+          "latencyMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latencyms"
+          },
+          "httpStatus": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Httpstatus"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "probePath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probepath"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "baseUrl",
+          "status",
+          "reachable",
+          "checkedAt"
+        ],
+        "title": "MonitoringProviderStatusResponse"
+      },
+      "MonitoringProvidersDiagnosticsResponse": {
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "title": "Generatedat"
+          },
+          "overallStatus": {
+            "type": "string",
+            "title": "Overallstatus"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
+            },
+            "type": "array",
+            "title": "Providers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generatedAt",
+          "overallStatus",
+          "providers"
+        ],
+        "title": "MonitoringProvidersDiagnosticsResponse"
       },
       "Project": {
         "properties": {
@@ -2139,6 +2475,38 @@
           "environment"
         ],
         "title": "Project"
+      },
+      "ProjectCatalogDiagnosticsResponse": {
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "title": "Generatedat"
+          },
+          "env": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env"
+          },
+          "freshness": {
+            "$ref": "#/components/schemas/ServiceRegistryFreshnessResponse"
+          },
+          "catalogJoin": {
+            "$ref": "#/components/schemas/CatalogJoinDiagnosticsResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "generatedAt",
+          "freshness",
+          "catalogJoin"
+        ],
+        "title": "ProjectCatalogDiagnosticsResponse"
       },
       "ProjectsResponse": {
         "properties": {
@@ -2570,6 +2938,9 @@
             },
             "type": "object",
             "title": "Nodata"
+          },
+          "providerStatus": {
+            "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
           }
         },
         "type": "object",
@@ -2578,7 +2949,8 @@
           "windowStart",
           "windowEnd",
           "generatedAt",
-          "noData"
+          "noData",
+          "providerStatus"
         ],
         "title": "ServiceMetricsSummaryResponse"
       },

@@ -1,4 +1,4 @@
-import { request } from '@/lib/api'
+import { request, type MonitoringProviderStatus } from '@/lib/api'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export type LogsQuickViewPreset = 'errors' | 'restarts' | 'warnings'
@@ -20,6 +20,7 @@ export interface ServiceLogsQuickView {
   moreAvailable: boolean
   nextCursor?: string
   lines: LogsQuickViewLine[]
+  providerStatus?: MonitoringProviderStatus
 }
 
 interface LogsQuickViewResponse {
@@ -31,6 +32,7 @@ interface LogsQuickViewResponse {
   returned?: number
   moreAvailable?: boolean
   nextCursor?: string
+  providerStatus?: MonitoringProviderStatus
   lines?: Array<{
     timestamp?: string
     message?: string
@@ -119,5 +121,6 @@ export async function getServiceLogsQuickView(
     moreAvailable: Boolean(payload.moreAvailable),
     nextCursor: typeof payload.nextCursor === 'string' ? payload.nextCursor : undefined,
     lines: normalizeLines(payload.lines),
+    providerStatus: payload.providerStatus,
   }
 }
