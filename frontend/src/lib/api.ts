@@ -277,7 +277,10 @@ async function detectAuthDiagnostic(response: Response, requestPath: string) {
   const isHtmlResponse = contentType.includes('text/html') || contentType.includes('application/xhtml+xml')
   const url = response.url || ''
   const normalizedUrl = url.toLowerCase()
-  const looksLikeAuthUrl = normalizedUrl.includes('/oauth2/') || normalizedUrl.includes('/login')
+  const normalizedRequestPath = requestPath.toLowerCase()
+  const isLoginApiRequest = normalizedRequestPath === '/auth/login'
+  const looksLikeAuthUrl =
+    normalizedUrl.includes('/oauth2/') || (!isLoginApiRequest && normalizedUrl.includes('/login'))
 
   if (!isHtmlResponse && !looksLikeAuthUrl && !response.redirected) {
     return null
