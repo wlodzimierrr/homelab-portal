@@ -189,10 +189,12 @@ export interface CatalogJoinResponse {
 export interface RegistryFreshness {
   rowCount: number
   lastSyncedAt?: string
+  warningAfterMinutes: number
   staleAfterMinutes: number
   isEmpty: boolean
+  isWarning: boolean
   isStale: boolean
-  state: 'fresh' | 'stale' | 'empty' | string
+  state: 'fresh' | 'warning' | 'stale' | 'empty' | string
 }
 
 export interface ProjectCatalogDiagnosticsResponse {

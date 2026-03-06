@@ -3007,6 +3007,10 @@
             ],
             "title": "Lastsyncedat"
           },
+          "warningAfterMinutes": {
+            "type": "integer",
+            "title": "Warningafterminutes"
+          },
           "staleAfterMinutes": {
             "type": "integer",
             "title": "Staleafterminutes"
@@ -3014,6 +3018,10 @@
           "isEmpty": {
             "type": "boolean",
             "title": "Isempty"
+          },
+          "isWarning": {
+            "type": "boolean",
+            "title": "Iswarning"
           },
           "isStale": {
             "type": "boolean",
@@ -3028,8 +3036,10 @@
         "required": [
           "rowCount",
           "lastSyncedAt",
+          "warningAfterMinutes",
           "staleAfterMinutes",
           "isEmpty",
+          "isWarning",
           "isStale",
           "state"
         ],

@@ -32,6 +32,8 @@ pytest
 python scripts/generate_openapi.py
 python scripts/migrate_projects_to_service_registry.py  # dry-run legacy projects backfill
 python scripts/sync_project_registry.py  # sync GitOps-backed projects into project_registry
+python scripts/sync_catalog_registries.py  # run GitOps + cluster catalog sync together
+python scripts/live_catalog_validation.py --api-base-url http://api.dev.homelab.local --auth-token dev-static-token --env dev
 python scripts/project_source_cutover_smoke.py --api-base-url http://api.dev.homelab.local --auth-token dev-static-token --env dev
 ```
 
@@ -110,10 +112,12 @@ Service registry sync config:
 - `SERVICE_REGISTRY_SYNC_ARGO_NAMESPACE` (default: `argocd`)
 - `KUBERNETES_API_URL` (optional override when not using in-cluster `KUBERNETES_SERVICE_HOST`/`PORT`)
 - `KUBERNETES_BEARER_TOKEN` (optional override for service-account token)
+- `REGISTRY_WARN_AFTER_MINUTES` (default: 66% of stale threshold) used for pre-stale warnings in diagnostics/UI
 - `REGISTRY_STALE_AFTER_MINUTES` (default: `30`) used by `/service-registry/diagnostics`
 
 Cluster sync populates `service_registry` with `source=cluster_services`; `GET /services` reads only those live cluster-backed rows.
 `GET /catalog/reconciliation` provides the deterministic bridge between GitOps projects and live cluster services.
+The in-cluster scheduler lives in `workloads/apps/homelab-api/base/catalog-sync-cronjob.yaml` and runs `python scripts/sync_catalog_registries.py` every 10 minutes.
 
 GitOps project sync config:
 

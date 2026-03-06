@@ -262,6 +262,8 @@ def test_project_catalog_diagnostics_reports_freshness(monkeypatch) -> None:
     assert body["env"] == "dev"
     assert body["freshness"]["rowCount"] == 2
     assert body["freshness"]["state"] == "fresh"
+    assert body["freshness"]["isWarning"] is False
+    assert body["freshness"]["warningAfterMinutes"] >= 1
     assert body["catalogJoin"]["projectOnlyCount"] == 0
     assert body["catalogJoin"]["serviceOnlyCount"] == 0
 
@@ -601,6 +603,7 @@ def test_service_registry_diagnostics_reports_empty_registry(monkeypatch) -> Non
     body = response.json()
     assert body["freshness"]["rowCount"] == 0
     assert body["freshness"]["state"] == "empty"
+    assert body["freshness"]["isWarning"] is False
     assert body["freshness"]["isStale"] is False
     assert body["joinMismatch"]["ciUnmatchedCount"] == 0
     assert body["joinMismatch"]["argoUnmatchedCount"] == 0
@@ -688,6 +691,7 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
     assert body["env"] == "dev"
     assert body["freshness"]["rowCount"] == 3
     assert body["freshness"]["state"] == "stale"
+    assert body["freshness"]["isWarning"] is True
     assert body["freshness"]["isStale"] is True
     assert body["joinMismatch"]["ciUnmatchedCount"] == 1
     assert body["joinMismatch"]["ciUnmatchedKeys"] == [
@@ -695,6 +699,57 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
     ]
     assert body["catalogJoin"]["projectOnlyCount"] == 1
     assert body["catalogJoin"]["serviceOnlyCount"] == 1
+
+
+def test_service_registry_diagnostics_reports_warning_before_stale(monkeypatch) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    warning_ts = datetime.now(tz=timezone.utc) - timedelta(minutes=25)
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchone(self):
+            return (2, warning_ts)
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setenv("REGISTRY_WARN_AFTER_MINUTES", "20")
+    monkeypatch.setenv("REGISTRY_STALE_AFTER_MINUTES", "30")
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+    monkeypatch.setattr("app.main._load_project_rows", lambda: [])
+    monkeypatch.setattr("app.main._load_project_catalog_rows", lambda env=None, project_id=None: [])
+    monkeypatch.setattr("app.main._load_service_catalog_rows", lambda env=None, service_id=None: [])
+    monkeypatch.setattr("app.main.load_ci_metadata_rows", lambda: [])
+    monkeypatch.setattr("app.main.load_argo_metadata_rows", lambda: [])
+
+    response = client.get(
+        "/service-registry/diagnostics?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["freshness"]["state"] == "warning"
+    assert body["freshness"]["isWarning"] is True
+    assert body["freshness"]["isStale"] is False
+    assert body["freshness"]["warningAfterMinutes"] == 20
+    assert body["freshness"]["staleAfterMinutes"] == 30
 
 
 def test_monitoring_provider_diagnostics_reports_reachability(monkeypatch) -> None:

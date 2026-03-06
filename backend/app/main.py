@@ -195,8 +195,10 @@ class ServiceRegistrySyncResponse(BaseModel):
 class ServiceRegistryFreshnessResponse(BaseModel):
     row_count: int = Field(alias="rowCount")
     last_synced_at: str | None = Field(alias="lastSyncedAt")
+    warning_after_minutes: int = Field(alias="warningAfterMinutes")
     stale_after_minutes: int = Field(alias="staleAfterMinutes")
     is_empty: bool = Field(alias="isEmpty")
+    is_warning: bool = Field(alias="isWarning")
     is_stale: bool = Field(alias="isStale")
     state: str
 
@@ -606,6 +608,20 @@ def _registry_stale_after_minutes() -> int:
     except ValueError:
         return 30
     return value if value > 0 else 30
+
+
+def _registry_warning_after_minutes(stale_after_minutes: int) -> int:
+    raw = os.getenv("REGISTRY_WARN_AFTER_MINUTES")
+    if raw is not None:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if 0 < value < stale_after_minutes:
+            return value
+
+    default_warning = max(1, int(stale_after_minutes * 0.66))
+    return min(default_warning, max(1, stale_after_minutes - 1))
 
 
 def _query_prometheus_scalar(
@@ -1049,18 +1065,28 @@ def get_project_catalog_diagnostics(
     row_count = int(count_row[0] or 0)
     last_synced_at = count_row[1]
     stale_after_minutes = _registry_stale_after_minutes()
+    warning_after_minutes = _registry_warning_after_minutes(stale_after_minutes)
     now = datetime.now(tz=timezone.utc)
 
     is_empty = row_count == 0
     if is_empty:
+        is_warning = False
         is_stale = False
         state = "empty"
     else:
+        age = None if last_synced_at is None else now - last_synced_at
         if last_synced_at is None:
+            is_warning = True
             is_stale = True
         else:
-            is_stale = (now - last_synced_at) > timedelta(minutes=stale_after_minutes)
-        state = "stale" if is_stale else "fresh"
+            is_warning = age > timedelta(minutes=warning_after_minutes)
+            is_stale = age > timedelta(minutes=stale_after_minutes)
+        if is_stale:
+            state = "stale"
+        elif is_warning:
+            state = "warning"
+        else:
+            state = "fresh"
 
     catalog_join = build_catalog_join(
         project_rows=_load_project_catalog_rows(env=env),
@@ -1076,8 +1102,10 @@ def get_project_catalog_diagnostics(
         freshness=ServiceRegistryFreshnessResponse(
             rowCount=row_count,
             lastSyncedAt=last_synced_at.isoformat() if last_synced_at else None,
+            warningAfterMinutes=warning_after_minutes,
             staleAfterMinutes=stale_after_minutes,
             isEmpty=is_empty,
+            isWarning=is_warning,
             isStale=is_stale,
             state=state,
         ),
@@ -1239,18 +1267,28 @@ def get_service_registry_diagnostics(
     row_count = int(count_row[0] or 0)
     last_synced_at = count_row[1]
     stale_after_minutes = _registry_stale_after_minutes()
+    warning_after_minutes = _registry_warning_after_minutes(stale_after_minutes)
     now = datetime.now(tz=timezone.utc)
 
     is_empty = row_count == 0
     if is_empty:
+        is_warning = False
         is_stale = False
         state = "empty"
     else:
+        age = None if last_synced_at is None else now - last_synced_at
         if last_synced_at is None:
+            is_warning = True
             is_stale = True
         else:
-            is_stale = (now - last_synced_at) > timedelta(minutes=stale_after_minutes)
-        state = "stale" if is_stale else "fresh"
+            is_warning = age > timedelta(minutes=warning_after_minutes)
+            is_stale = age > timedelta(minutes=stale_after_minutes)
+        if is_stale:
+            state = "stale"
+        elif is_warning:
+            state = "warning"
+        else:
+            state = "fresh"
 
     project_rows = _load_project_rows()
     mismatches = build_release_join_diagnostics(
@@ -1274,8 +1312,10 @@ def get_service_registry_diagnostics(
         freshness=ServiceRegistryFreshnessResponse(
             rowCount=row_count,
             lastSyncedAt=last_synced_at.isoformat() if last_synced_at else None,
+            warningAfterMinutes=warning_after_minutes,
             staleAfterMinutes=stale_after_minutes,
             isEmpty=is_empty,
+            isWarning=is_warning,
             isStale=is_stale,
             state=state,
         ),

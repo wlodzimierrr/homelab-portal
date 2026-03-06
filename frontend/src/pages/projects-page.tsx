@@ -104,6 +104,9 @@ export function ProjectsPage() {
       }
       if (diagnosticsResult.status === 'fulfilled') {
         setDiagnostics(diagnosticsResult.value)
+        if (diagnosticsResult.value.freshness.state === 'warning') {
+          nextWarnings.push('Project catalog data is aging and will become stale soon if sync does not run.')
+        }
         if (diagnosticsResult.value.freshness.state === 'stale') {
           nextWarnings.push('Project catalog data is stale; sync GitOps apps to refresh the page state.')
         }
@@ -156,7 +159,17 @@ export function ProjectsPage() {
         <div className="mb-4 grid gap-3 md:grid-cols-3">
           <SummaryCard
             label="Catalog source"
-            value={diagnostics?.freshness.state === 'fresh' ? 'Live' : diagnostics?.freshness.state === 'stale' ? 'Stale' : diagnostics?.freshness.state === 'empty' ? 'Empty' : 'Unknown'}
+            value={
+              diagnostics?.freshness.state === 'fresh'
+                ? 'Live'
+                : diagnostics?.freshness.state === 'warning'
+                  ? 'Warning'
+                  : diagnostics?.freshness.state === 'stale'
+                    ? 'Stale'
+                    : diagnostics?.freshness.state === 'empty'
+                      ? 'Empty'
+                      : 'Unknown'
+            }
             meta={`Last sync: ${formatTimestamp(diagnostics?.freshness.lastSyncedAt)}`}
           />
           <SummaryCard
