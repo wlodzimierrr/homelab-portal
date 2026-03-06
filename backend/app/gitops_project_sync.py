@@ -16,7 +16,27 @@ import yaml
 logger = logging.getLogger("homelab.backend.gitops_project_sync")
 
 DEFAULT_SOURCE = "gitops_apps"
-DEFAULT_WORKLOADS_REPO_PATH = Path(__file__).resolve().parents[4] / "workloads"
+
+
+def _resolve_default_workloads_repo_path(current_file: Path | None = None) -> Path:
+    source_file = (current_file or Path(__file__)).resolve()
+    candidates: list[Path] = []
+
+    for parent in [source_file.parent, *source_file.parents]:
+        candidate = parent / "workloads"
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    # Do not crash API startup when the container filesystem doesn't mirror the
+    # monorepo layout; sync callers can still override this path via env var.
+    return source_file.parent / "workloads"
+
+
+DEFAULT_WORKLOADS_REPO_PATH = _resolve_default_workloads_repo_path()
 
 
 @dataclass(frozen=True)

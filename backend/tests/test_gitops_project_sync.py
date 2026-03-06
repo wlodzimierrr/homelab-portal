@@ -54,6 +54,14 @@ def test_discover_gitops_project_records_reads_app_env_directories(tmp_path: Pat
     assert row.source_ref.endswith(":apps/homelab-api/envs/dev")
 
 
+def test_resolve_default_workloads_repo_path_does_not_raise_for_shallow_container_layout() -> None:
+    resolved = gitops_project_sync._resolve_default_workloads_repo_path(
+        Path("/app/app/gitops_project_sync.py")
+    )
+
+    assert resolved == Path("/app/app/workloads")
+
+
 def test_sync_project_registry_from_gitops_collects_failures(monkeypatch) -> None:
     synced_at = datetime(2026, 3, 5, tzinfo=timezone.utc)
     monkeypatch.setattr(gitops_project_sync, "_utc_now", lambda: synced_at)
