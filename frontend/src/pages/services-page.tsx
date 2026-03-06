@@ -92,8 +92,10 @@ function SourceStateBadge({ state }: { state?: string }) {
   const tone =
     normalized === 'fresh'
       ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-      : normalized === 'stale'
+      : normalized === 'warning'
         ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+        : normalized === 'stale'
+          ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
         : normalized === 'empty'
           ? 'bg-slate-500/10 text-slate-700 dark:text-slate-300'
           : 'bg-muted text-muted-foreground'

@@ -7,6 +7,7 @@ import re
 
 
 TEMPLATE_TOKEN_REGEX = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+PROMQL_REGEX_META = re.compile(r'([\\.^$|?*+()[\]{}])')
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,10 @@ def render_query_template(template: str, values: dict[str, str], context: str) -
         missing_sorted = ",".join(sorted(missing))
         raise ValueError(f"Missing query template variables ({context}): {missing_sorted}")
     return rendered
+
+
+def escape_promql_regex_literal(value: str) -> str:
+    return PROMQL_REGEX_META.sub(r"\\\1", value)
 
 
 def load_observability_config() -> ObservabilityConfig:

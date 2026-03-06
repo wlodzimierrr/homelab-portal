@@ -6,6 +6,7 @@ import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
 import {
   getPlatformHealthOverview,
+  type PlatformCatalogStatus,
   type IncidentSeverity,
   type IncidentStatus,
   type PlatformHealthOverview,
@@ -97,6 +98,26 @@ function ProviderStatusBadge({ provider }: { provider: MonitoringProviderStatus 
   )
 }
 
+function CatalogStateBadge({ catalog }: { catalog: PlatformCatalogStatus }) {
+  const state = catalog.freshness.state
+  const tone =
+    state === 'fresh'
+      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+      : state === 'warning'
+        ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+        : state === 'stale'
+          ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+          : state === 'empty'
+            ? 'bg-slate-500/10 text-slate-700 dark:text-slate-300'
+            : 'bg-muted text-muted-foreground'
+
+  return (
+    <span className={cn('inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize', tone)}>
+      {catalog.label}: {state}
+    </span>
+  )
+}
+
 export function PlatformHealthPage() {
   const [overview, setOverview] = useState<PlatformHealthOverview | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -153,6 +174,39 @@ export function PlatformHealthPage() {
                 tone="text-amber-700 dark:text-amber-300"
               />
             </div>
+
+            <section className="rounded-md border border-border bg-background p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Catalog Sources</h2>
+              </div>
+              {overview.catalogs.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Catalog freshness diagnostics are unavailable.</p>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap gap-2">
+                    {overview.catalogs.map((catalog) => (
+                      <CatalogStateBadge key={catalog.key} catalog={catalog} />
+                    ))}
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    {overview.catalogs.map((catalog) => (
+                      <article key={`${catalog.key}-card`} className="rounded-md border border-border/70 bg-muted/10 p-3">
+                        <p className="text-sm font-medium">{catalog.label}</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          State: <span className="capitalize">{catalog.freshness.state}</span>
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Rows: {catalog.freshness.rowCount}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Checked: {formatDate(catalog.freshness.lastSyncedAt)}
+                        </p>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
 
             <section className="rounded-md border border-border bg-background p-4">
               <div className="mb-3 flex items-center justify-between gap-3">

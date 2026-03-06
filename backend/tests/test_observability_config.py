@@ -1,4 +1,8 @@
-from app.observability_config import load_observability_config, render_query_template
+from app.observability_config import (
+    escape_promql_regex_literal,
+    load_observability_config,
+    render_query_template,
+)
 
 
 def test_load_observability_config_defaults() -> None:
@@ -15,3 +19,8 @@ def test_render_query_template_replaces_variables() -> None:
         "test",
     )
     assert rendered == 'up{namespace="default", app="homelab-api"}'
+
+
+def test_escape_promql_regex_literal_keeps_hyphen_and_escapes_regex_metacharacters() -> None:
+    assert escape_promql_regex_literal("homelab-api") == "homelab-api"
+    assert escape_promql_regex_literal("service.api+(canary)") == r"service\.api\+\(canary\)"

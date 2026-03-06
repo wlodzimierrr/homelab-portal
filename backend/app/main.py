@@ -53,6 +53,7 @@ from app.release_traceability import (
 from app.service_registry_sync import sync_service_registry_from_cluster
 from app.observability_cache import TTLCache
 from app.observability_config import (
+    escape_promql_regex_literal,
     load_observability_config,
     render_query_template,
 )
@@ -884,7 +885,7 @@ def _build_service_metrics_queries(
     selected_range: str,
     config,
 ) -> dict[str, str]:
-    pod_pattern = re.escape(app_label)
+    pod_pattern = escape_promql_regex_literal(app_label)
     values = {
         "namespace": namespace,
         "app_label": app_label,

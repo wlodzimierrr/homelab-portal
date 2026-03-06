@@ -2,10 +2,13 @@ import { deriveServiceIdentity, getServicesRegistry, type ServiceRegistryItem } 
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import {
   ApiRequestError,
+  getProjectCatalogDiagnostics,
   getMonitoringProvidersDiagnostics,
+  getServiceRegistryDiagnostics,
   isApiRequestError,
   request,
   type MonitoringProviderStatus,
+  type RegistryFreshness,
 } from '@/lib/api'
 import { summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
 
@@ -40,11 +43,18 @@ export interface PlatformHealthSummary {
   activeIncidents: number
 }
 
+export interface PlatformCatalogStatus {
+  key: 'projects' | 'services'
+  label: string
+  freshness: RegistryFreshness
+}
+
 export interface PlatformHealthOverview {
   summary: PlatformHealthSummary
   unhealthyServices: PlatformServiceHealthItem[]
   incidents: PlatformIncident[]
   providers: MonitoringProviderStatus[]
+  catalogs: PlatformCatalogStatus[]
   warnings: string[]
 }
 
@@ -167,6 +177,16 @@ async function buildServiceHealthItems(services: ServiceRegistryItem[]): Promise
   )
 }
 
+function addCatalogWarning(warnings: string[], label: string, freshness: RegistryFreshness) {
+  if (freshness.state === 'warning') {
+    warnings.push(`${label} catalog is warning and will become stale soon without another sync.`)
+  } else if (freshness.state === 'stale') {
+    warnings.push(`${label} catalog is stale.`)
+  } else if (freshness.state === 'empty') {
+    warnings.push(`${label} catalog is reachable but empty.`)
+  }
+}
+
 export async function getPlatformHealthOverview(): Promise<PlatformHealthOverview> {
   const warnings: string[] = []
 
@@ -176,10 +196,13 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
     warnings.push('Service registry source unavailable.')
   }
 
-  const [healthItemsResult, incidentsApiResult, providersResult] = await Promise.allSettled([
+  const [healthItemsResult, incidentsApiResult, providersResult, projectDiagnosticsResult, serviceDiagnosticsResult] =
+    await Promise.allSettled([
     buildServiceHealthItems(services),
     getIncidentsFromApi(),
     getMonitoringProvidersDiagnostics(),
+    getProjectCatalogDiagnostics(),
+    getServiceRegistryDiagnostics(),
   ])
 
   let serviceHealthItems: PlatformServiceHealthItem[] = []
@@ -220,6 +243,29 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
     warnings.push('Monitoring provider diagnostics are unavailable.')
   }
 
+  const catalogs: PlatformCatalogStatus[] = []
+  if (projectDiagnosticsResult.status === 'fulfilled') {
+    catalogs.push({
+      key: 'projects',
+      label: 'Projects',
+      freshness: projectDiagnosticsResult.value.freshness,
+    })
+    addCatalogWarning(warnings, 'Projects', projectDiagnosticsResult.value.freshness)
+  } else {
+    warnings.push('Project catalog diagnostics are unavailable.')
+  }
+
+  if (serviceDiagnosticsResult.status === 'fulfilled') {
+    catalogs.push({
+      key: 'services',
+      label: 'Services',
+      freshness: serviceDiagnosticsResult.value.freshness,
+    })
+    addCatalogWarning(warnings, 'Services', serviceDiagnosticsResult.value.freshness)
+  } else {
+    warnings.push('Service catalog diagnostics are unavailable.')
+  }
+
   const unhealthyServices = serviceHealthItems
     .filter((item) => item.health === 'degraded' || item.sync === 'out_of_sync' || item.suspicious)
     .sort((a, b) => {
@@ -242,6 +288,7 @@ export async function getPlatformHealthOverview(): Promise<PlatformHealthOvervie
     unhealthyServices,
     incidents,
     providers,
+    catalogs,
     warnings: [...new Set(warnings)],
   }
 }

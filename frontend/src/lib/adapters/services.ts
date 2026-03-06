@@ -1,4 +1,4 @@
-import { getProjects, getServices, type Project, type ServiceRegistryApiRow } from '@/lib/api'
+import { getProjects, getServices, isApiRequestError, type Project, type ServiceRegistryApiRow } from '@/lib/api'
 import { createServiceIdentity, normalizeServiceId, parseNamespaceFromInternalUrl, type ServiceIdentity } from '@/lib/service-identity'
 
 export type ServiceHealth = 'healthy' | 'degraded' | 'unknown'
@@ -20,6 +20,8 @@ export interface ServiceRegistryItem {
   appLabel?: string
   argoAppName?: string
 }
+
+const serviceFallbackStatuses = new Set([404, 405, 501])
 
 function normalizeHealthStatus(value?: string): ServiceHealth {
   if (!value) {
@@ -146,12 +148,11 @@ function adaptApiServices(rows: ServiceRegistryApiRow[]): ServiceRegistryItem[] 
 export async function getServicesRegistry() {
   try {
     const servicesResponse = await getServices()
-    const liveRows = adaptApiServices(servicesResponse.services)
-    if (liveRows.length > 0) {
-      return liveRows
+    return adaptApiServices(servicesResponse.services)
+  } catch (error) {
+    if (!isApiRequestError(error) || !serviceFallbackStatuses.has(error.status)) {
+      throw error instanceof Error ? error : new Error('Failed to load services from live API.')
     }
-  } catch {
-    // Fall back to /projects projection until all environments expose the live services API.
   }
 
   try {
@@ -160,7 +161,7 @@ export async function getServicesRegistry() {
     if (fromApi.length > 0) {
       return fromApi
     }
-    throw new Error('Services registry API returned no services.')
+    throw new Error('Live services API is unavailable and projects fallback returned no services.')
   } catch (error) {
     throw error instanceof Error ? error : new Error('Failed to load services from API.')
   }
