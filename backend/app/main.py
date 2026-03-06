@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 import logging
 import math
 import os
-import re
 from uuid import uuid4
 from urllib import parse as urlparse
 
