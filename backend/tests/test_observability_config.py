@@ -10,6 +10,7 @@ def test_load_observability_config_defaults() -> None:
     assert "24h" in config.metrics_allowed_ranges
     assert config.logs_max_lines >= 1
     assert config.timeline_max_points >= 10
+    assert 'deployment="{deployment_name}"' in config.metrics_query_uptime_template
 
 
 def test_render_query_template_replaces_variables() -> None:

@@ -307,6 +307,23 @@ def _upsert_service_registry_records(
         for row in records:
             cur.execute(
                 """
+                DELETE FROM service_registry
+                WHERE env = %s
+                  AND service_name = %s
+                  AND namespace = %s
+                  AND service_id <> %s
+                  AND source <> %s
+                """,
+                (
+                    row.env,
+                    row.service_name,
+                    row.namespace,
+                    row.service_id,
+                    "cluster_services",
+                ),
+            )
+            cur.execute(
+                """
                 INSERT INTO service_registry (
                     service_id,
                     service_name,

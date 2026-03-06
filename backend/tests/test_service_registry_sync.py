@@ -9,6 +9,57 @@ class _DummyConn:
     pass
 
 
+def test_upsert_service_registry_records_prunes_conflicting_noncanonical_rows() -> None:
+    synced_at = datetime(2026, 3, 6, tzinfo=timezone.utc)
+    record = service_registry_sync.ServiceRegistryRecord(
+        service_id="homelab-api",
+        service_name="Allowed",
+        namespace="default",
+        env="dev",
+        app_label="homelab-api",
+        argo_app_name="homelab-api-dev",
+        source="cluster_services",
+        source_ref="kubernetes_api",
+        last_synced_at=synced_at,
+    )
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql: str, params: tuple[object, ...]) -> None:
+            self.calls.append((" ".join(sql.split()), params))
+
+        def fetchone(self):
+            return (True,)
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.cursor_instance = _Cursor()
+
+        def cursor(self):
+            return self.cursor_instance
+
+    conn = _Conn()
+
+    inserted, updated = service_registry_sync._upsert_service_registry_records(conn, [record])
+
+    assert inserted == 1
+    assert updated == 0
+    assert len(conn.cursor_instance.calls) == 2
+    delete_sql, delete_params = conn.cursor_instance.calls[0]
+    assert delete_sql.startswith("DELETE FROM service_registry")
+    assert delete_params == ("dev", "Allowed", "default", "homelab-api", "cluster_services")
+    insert_sql, _insert_params = conn.cursor_instance.calls[1]
+    assert insert_sql.startswith("INSERT INTO service_registry")
+
+
 def test_build_records_from_deployments_uses_labels_and_argo_mapping() -> None:
     deployments = [
         {

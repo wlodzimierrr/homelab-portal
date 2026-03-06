@@ -333,6 +333,23 @@ function MonitoringPanelNotice({
   )
 }
 
+function buildMetricsCoverageMessage(metrics: ServiceMetricsSummary) {
+  const missingLabels = [
+    metrics.noData.p95LatencyMs ? 'P95 latency' : null,
+    metrics.noData.errorRatePct ? 'error rate' : null,
+  ].filter((label): label is string => Boolean(label))
+
+  if (missingLabels.length === 0) {
+    return ''
+  }
+
+  if (!metrics.noData.uptimePct || !metrics.noData.restartCount) {
+    return `${missingLabels.join(' and ')} require service-level HTTP instrumentation. Showing infrastructure-level uptime and restart signals where available.`
+  }
+
+  return `${missingLabels.join(' and ')} require service-level HTTP instrumentation. Prometheus is healthy, but this service is not emitting matching request metrics yet.`
+}
+
 function IncidentServiceBadge({ alert }: { alert: ServiceIncidentBadge }) {
   const severity = alert.highestSeverity ?? 'info'
   const tone =
@@ -590,6 +607,10 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     () => normalizeProviderPanelState(metrics.providerStatus, metricsError, metricsAllNoData),
     [metrics.providerStatus, metricsAllNoData, metricsError],
   )
+  const metricsCoverageMessage = useMemo(
+    () => buildMetricsCoverageMessage(metrics),
+    [metrics],
+  )
   const logsPanelState = useMemo(
     () =>
       normalizeProviderPanelState(
@@ -711,6 +732,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 </div>
               ) : null}
               {!metricsLoading ? <MonitoringPanelNotice provider="Prometheus" state={metricsPanelState} /> : null}
+              {!metricsLoading && !metricsError && metricsCoverageMessage ? (
+                <div className="rounded-md border border-slate-500/40 bg-slate-500/10 p-3">
+                  <p className="text-xs text-slate-900 dark:text-slate-200">{metricsCoverageMessage}</p>
+                </div>
+              ) : null}
               <UptimeIndicator
                 uptime24h={metricsRange === '7d' ? undefined : metrics.uptimePct}
                 uptime7d={metricsRange === '7d' ? metrics.uptimePct : undefined}

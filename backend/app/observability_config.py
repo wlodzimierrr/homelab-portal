@@ -106,7 +106,7 @@ def load_observability_config() -> ObservabilityConfig:
         alerts_cache_ttl_seconds=_read_int("OBS_ALERTS_CACHE_TTL_SECONDS", 15, minimum=0, maximum=120),
         metrics_query_uptime_template=os.getenv(
             "OBS_QUERY_METRICS_UPTIME",
-            '100 * avg_over_time(up{namespace="{namespace}", app="{app_label}"}[{selected_range}])',
+            '100 * (avg_over_time(kube_deployment_status_replicas_available{namespace="{namespace}", deployment="{deployment_name}"}[{selected_range}]) / clamp_min(avg_over_time(kube_deployment_spec_replicas{namespace="{namespace}", deployment="{deployment_name}"}[{selected_range}]), 1))',
         ),
         metrics_query_p95_latency_template=os.getenv(
             "OBS_QUERY_METRICS_P95_LATENCY",

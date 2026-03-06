@@ -899,9 +899,11 @@ def _build_service_metrics_queries(
     config,
 ) -> dict[str, str]:
     pod_pattern = escape_promql_regex_literal(app_label)
+    deployment_name = app_label
     values = {
         "namespace": namespace,
         "app_label": app_label,
+        "deployment_name": deployment_name,
         "selected_range": selected_range,
         "pod_pattern": pod_pattern,
     }
