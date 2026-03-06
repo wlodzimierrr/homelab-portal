@@ -118,6 +118,13 @@ Service registry sync config:
 Cluster sync populates `service_registry` with `source=cluster_services`; `GET /services` reads only those live cluster-backed rows.
 `GET /catalog/reconciliation` provides the deterministic bridge between GitOps projects and live cluster services.
 The in-cluster scheduler lives in `workloads/apps/homelab-api/base/catalog-sync-cronjob.yaml` and runs `python scripts/sync_catalog_registries.py` every 10 minutes.
+CronJob logs now emit:
+
+- one compact `catalog_sync_source_result ...` line per source
+- one compact `catalog_sync_run_result ...` line per run
+- `catalog_sync_run_error ...` when the job fails before source summaries are produced
+
+Those lines are intended to be grep/scrape friendly for log-based alerting and CronJob triage.
 
 GitOps project sync config:
 
