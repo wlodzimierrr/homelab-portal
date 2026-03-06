@@ -53,6 +53,17 @@ def test_classify_timeline_status_unknown() -> None:
     assert "availability" in reason
 
 
+def test_classify_timeline_status_healthy_when_error_rate_missing() -> None:
+    status, reason = classify_timeline_status(
+        availability=0.999,
+        error_rate_pct=None,
+        readiness=1.0,
+        thresholds=TimelineThresholds(),
+    )
+    assert status == "healthy"
+    assert reason == "missing:error_rate"
+
+
 def test_compact_timeline_points_merges_adjacent_states() -> None:
     start = datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc)
     points = [

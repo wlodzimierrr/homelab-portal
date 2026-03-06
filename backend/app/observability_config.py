@@ -122,7 +122,7 @@ def load_observability_config() -> ObservabilityConfig:
         ),
         timeline_query_availability_template=os.getenv(
             "OBS_QUERY_TIMELINE_AVAILABILITY",
-            'avg_over_time(up{namespace="{namespace}", app="{app_label}"}[5m])',
+            'avg_over_time(kube_deployment_status_replicas_available{namespace="{namespace}", deployment="{deployment_name}"}[5m]) / clamp_min(avg_over_time(kube_deployment_spec_replicas{namespace="{namespace}", deployment="{deployment_name}"}[5m]), 1)',
         ),
         timeline_query_error_rate_template=os.getenv(
             "OBS_QUERY_TIMELINE_ERROR_RATE",

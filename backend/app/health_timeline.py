@@ -83,8 +83,6 @@ def classify_timeline_status(
     missing: list[str] = []
     if availability is None:
         missing.append("availability")
-    if error_rate_pct is None:
-        missing.append("error_rate")
     if readiness is None:
         missing.append("readiness")
 
@@ -93,25 +91,40 @@ def classify_timeline_status(
 
     if (
         availability <= thresholds.down_availability_max
-        or error_rate_pct >= thresholds.down_error_rate_min_pct
+        or (
+            error_rate_pct is not None
+            and error_rate_pct >= thresholds.down_error_rate_min_pct
+        )
         or readiness <= thresholds.down_readiness_max
     ):
         if availability <= thresholds.down_availability_max:
             return "down", "low_availability"
-        if error_rate_pct >= thresholds.down_error_rate_min_pct:
+        if (
+            error_rate_pct is not None
+            and error_rate_pct >= thresholds.down_error_rate_min_pct
+        ):
             return "down", "high_error_rate"
         return "down", "readiness_drop"
 
     if (
         availability <= thresholds.degraded_availability_max
-        or error_rate_pct >= thresholds.degraded_error_rate_min_pct
+        or (
+            error_rate_pct is not None
+            and error_rate_pct >= thresholds.degraded_error_rate_min_pct
+        )
         or readiness <= thresholds.degraded_readiness_max
     ):
         if availability <= thresholds.degraded_availability_max:
             return "degraded", "availability_regression"
-        if error_rate_pct >= thresholds.degraded_error_rate_min_pct:
+        if (
+            error_rate_pct is not None
+            and error_rate_pct >= thresholds.degraded_error_rate_min_pct
+        ):
             return "degraded", "error_rate_regression"
         return "degraded", "readiness_regression"
+
+    if error_rate_pct is None:
+        return "healthy", "missing:error_rate"
 
     return "healthy", None
 
