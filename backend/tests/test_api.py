@@ -53,7 +53,32 @@ def test_projects_unauthorized_without_token() -> None:
     assert response.status_code == 401
 
 
-def test_projects_authorized_with_forwarded_user() -> None:
+def test_projects_authorized_with_forwarded_user(monkeypatch) -> None:
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchall(self):
+            return []
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+
     response = client.get(
         "/projects",
         headers={"X-Auth-Request-User": "alice"},
@@ -101,39 +126,61 @@ def test_projects_list_does_not_seed_defaults_on_read(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"projects": []}
     assert any(
-        sql.startswith("SELECT SERVICE_ID, SERVICE_NAME, ENV FROM SERVICE_REGISTRY")
+        sql.startswith("SELECT PROJECT_ID, PROJECT_NAME, ENV FROM PROJECT_REGISTRY")
         for sql in executed_sql
     )
 
 
-def test_create_and_list_projects_with_valid_token() -> None:
-    headers = {"Authorization": "Bearer dev-static-token"}
+def test_projects_list_supports_env_filter(monkeypatch) -> None:
+    executed_args: list[tuple[str, tuple[object, ...] | None]] = []
 
-    create_response = client.post(
-        "/projects",
-        headers=headers,
-        json={"id": "proj-e2e", "name": "E2E Project", "environment": "dev"},
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql: str, args=None):
+            executed_args.append((" ".join(sql.split()).upper(), args))
+
+        def fetchall(self):
+            return [("homelab-api", "homelab-api", "dev")]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+
+    response = client.get(
+        "/projects?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
     )
-    assert create_response.status_code == 201
-    assert create_response.json()["id"] == "proj-e2e"
 
-    list_response = client.get("/projects", headers=headers)
-    assert list_response.status_code == 200
-
-    project_ids = {project["id"] for project in list_response.json()["projects"]}
-    assert "proj-e2e" in project_ids
+    assert response.status_code == 200
+    assert response.json() == {
+        "projects": [{"id": "homelab-api", "name": "homelab-api", "environment": "dev"}]
+    }
+    assert executed_args[0][1] == ("gitops_apps", "dev")
 
 
-def test_create_project_normalizes_to_canonical_service_id() -> None:
+def test_create_project_rejected_for_gitops_owned_catalog() -> None:
     headers = {"Authorization": "Bearer dev-static-token"}
 
     response = client.post(
         "/projects",
         headers=headers,
-        json={"id": "Portal Project", "name": "Portal Project", "environment": "dev"},
+        json={"id": "proj-e2e", "name": "E2E Project", "environment": "dev"},
     )
-    assert response.status_code == 201
-    assert response.json()["id"] == "portal-project"
+    assert response.status_code == 409
+    assert "GitOps app definitions" in response.json()["detail"]
 
 
 def test_create_project_forbidden_for_non_admin_forwarded_user() -> None:
@@ -145,7 +192,7 @@ def test_create_project_forbidden_for_non_admin_forwarded_user() -> None:
     assert response.status_code == 403
 
 
-def test_create_project_allowed_for_admin_group() -> None:
+def test_create_project_rejected_for_admin_group_when_catalog_is_gitops_owned() -> None:
     response = client.post(
         "/projects",
         headers={
@@ -154,7 +201,126 @@ def test_create_project_allowed_for_admin_group() -> None:
         },
         json={"id": "proj-admin", "name": "Allowed", "environment": "dev"},
     )
-    assert response.status_code == 201
+    assert response.status_code == 409
+    assert "GitOps app definitions" in response.json()["detail"]
+
+
+def test_services_list_returns_cluster_backed_rows(monkeypatch) -> None:
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchall(self):
+            return [
+                (
+                    "homelab-api",
+                    "homelab-api",
+                    "dev",
+                    "homelab-api",
+                    "homelab-api",
+                    "homelab-api-dev",
+                    "cluster_services",
+                    "kubernetes_api",
+                    None,
+                )
+            ]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+
+    response = client.get(
+        "/services?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "services": [
+            {
+                "serviceId": "homelab-api",
+                "serviceName": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "appLabel": "homelab-api",
+                "argoAppName": "homelab-api-dev",
+                "source": "cluster_services",
+                "sourceRef": "kubernetes_api",
+                "lastSyncedAt": None,
+            }
+        ]
+    }
+
+
+def test_service_detail_returns_cluster_backed_row(monkeypatch) -> None:
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchall(self):
+            return [
+                (
+                    "homelab-web",
+                    "homelab-web",
+                    "dev",
+                    "homelab-web",
+                    "homelab-web",
+                    "homelab-web-dev",
+                    "cluster_services",
+                    "kubernetes_api",
+                    None,
+                )
+            ]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+
+    response = client.get(
+        "/services/homelab-web",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": "homelab-web",
+        "name": "homelab-web",
+        "namespace": "homelab-web",
+        "env": "dev",
+        "appLabel": "homelab-web",
+        "argoAppName": "homelab-web-dev",
+        "source": "cluster_services",
+        "sourceRef": "kubernetes_api",
+        "lastSyncedAt": None,
+    }
 
 
 def test_service_registry_sync_requires_auth() -> None:
@@ -173,14 +339,16 @@ def test_service_registry_sync_returns_summary_for_admin(monkeypatch) -> None:
     monkeypatch.setattr("app.main._with_connection", lambda: _ConnContext())
     monkeypatch.setattr(
         "app.main.sync_service_registry_from_cluster",
-        lambda conn: {
+        lambda conn, env_name=None: {
             "correlationId": "cid-1",
-            "env": "dev",
+            "source": "cluster_services",
+            "env": env_name or "dev",
             "namespaces": ["homelab-api"],
             "discovered": 2,
             "upserted": 2,
             "inserted": 1,
             "updated": 1,
+            "deleted": 0,
             "sourceFailures": [],
             "generatedAt": "2026-03-05T00:00:00+00:00",
             "durationMs": 12,
@@ -195,8 +363,50 @@ def test_service_registry_sync_returns_summary_for_admin(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["correlationId"] == "cid-1"
+    assert body["source"] == "cluster_services"
     assert body["inserted"] == 1
     assert body["updated"] == 1
+    assert body["deleted"] == 0
+
+
+def test_service_registry_sync_dispatches_gitops_source(monkeypatch) -> None:
+    class _ConnContext:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _ConnContext())
+    monkeypatch.setattr(
+        "app.main.sync_project_registry_from_gitops",
+        lambda conn, env_name=None: {
+            "correlationId": "cid-gitops",
+            "source": "gitops_apps",
+            "env": env_name or "all",
+            "namespaces": ["homelab-api", "homelab-web"],
+            "discovered": 2,
+            "upserted": 2,
+            "inserted": 2,
+            "updated": 0,
+            "deleted": 1,
+            "sourceFailures": [],
+            "generatedAt": "2026-03-05T00:00:00+00:00",
+            "durationMs": 9,
+        },
+    )
+
+    response = client.post(
+        "/service-registry/sync?source=gitops_apps&env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["correlationId"] == "cid-gitops"
+    assert body["source"] == "gitops_apps"
+    assert body["env"] == "dev"
+    assert body["deleted"] == 1
 
 
 def test_service_registry_diagnostics_reports_empty_registry(monkeypatch) -> None:

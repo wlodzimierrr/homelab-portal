@@ -6,8 +6,10 @@ FastAPI backend scaffold for task `T1.2.1`.
 
 - `GET /health`
 - `POST /auth/login`
-- `GET /projects`
-- `POST /service-registry/sync`
+- `GET /projects?env=dev`
+- `GET /services?env=dev&namespace=homelab-api`
+- `GET /services/{serviceId}?env=dev`
+- `POST /service-registry/sync?source=cluster_services|gitops_apps&env=dev`
 - `GET /service-registry/diagnostics?env=dev`
 - `GET /services/{serviceId}/metrics/summary?range=1h|24h|7d`
 - `GET /services/{serviceId}/health/timeline?range=24h|7d&step=5m..1h`
@@ -25,6 +27,7 @@ pip install -e .[dev]
 pytest
 python scripts/generate_openapi.py
 python scripts/migrate_projects_to_service_registry.py  # dry-run legacy projects backfill
+python scripts/sync_project_registry.py  # sync GitOps-backed projects into project_registry
 python scripts/project_source_cutover_smoke.py --api-base-url http://api.dev.homelab.local --auth-token dev-static-token --env dev
 ```
 
@@ -97,6 +100,14 @@ Service registry sync config:
 - `KUBERNETES_API_URL` (optional override when not using in-cluster `KUBERNETES_SERVICE_HOST`/`PORT`)
 - `KUBERNETES_BEARER_TOKEN` (optional override for service-account token)
 - `REGISTRY_STALE_AFTER_MINUTES` (default: `30`) used by `/service-registry/diagnostics`
+
+Cluster sync populates `service_registry` with `source=cluster_services`; `GET /services` reads only those live cluster-backed rows.
+
+GitOps project sync config:
+
+- `GITOPS_WORKLOADS_REPO_PATH` (default: repo-local `workloads/`)
+- `GITOPS_WORKLOADS_REPO_URL` (optional override for provenance in `sourceRef`)
+- `GITOPS_WORKLOADS_REVISION` (optional override for provenance in `sourceRef`)
 
 Observability hardening config:
 

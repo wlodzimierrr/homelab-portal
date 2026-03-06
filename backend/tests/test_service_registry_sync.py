@@ -37,9 +37,69 @@ def test_build_records_from_deployments_uses_labels_and_argo_mapping() -> None:
     assert row.env == "dev"
     assert row.app_label == "homelab-api"
     assert row.argo_app_name == "homelab-api-dev"
+    assert row.source == "cluster_services"
+
+
+def test_build_records_from_services_and_deployments_prefers_service_rows() -> None:
+    services = [
+        {
+            "metadata": {
+                "name": "homelab-web",
+                "namespace": "homelab-web",
+                "labels": {"app.kubernetes.io/name": "homelab-web"},
+            },
+            "spec": {
+                "selector": {"app.kubernetes.io/name": "homelab-web"},
+            },
+        }
+    ]
+    deployments = [
+        {
+            "metadata": {
+                "name": "homelab-web-deployment",
+                "namespace": "homelab-web",
+                "labels": {"app.kubernetes.io/name": "homelab-web"},
+                "annotations": {},
+            }
+        }
+    ]
+    synced_at = datetime(2026, 3, 5, tzinfo=timezone.utc)
+
+    rows = service_registry_sync._build_records_from_services_and_deployments(
+        services=services,
+        deployments=deployments,
+        env_name="dev",
+        source_ref="kubernetes_api",
+        synced_at=synced_at,
+        argo_by_namespace={"homelab-web": "homelab-web-dev"},
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.service_id == "homelab-web"
+    assert row.service_name == "homelab-web"
+    assert row.namespace == "homelab-web"
+    assert row.argo_app_name == "homelab-web-dev"
 
 
 def test_sync_service_registry_collects_source_failures(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_registry_sync,
+        "_fetch_services_in_namespace",
+        lambda namespace: [
+            {
+                "metadata": {
+                    "name": "homelab-web",
+                    "namespace": namespace,
+                    "labels": {"app.kubernetes.io/name": "homelab-web"},
+                },
+                "spec": {"selector": {"app.kubernetes.io/name": "homelab-web"}},
+            }
+        ]
+        if namespace != "broken"
+        else (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
     def _fake_fetch_deployments(namespace: str) -> list[dict]:
         if namespace == "broken":
             raise RuntimeError("boom")
@@ -69,6 +129,11 @@ def test_sync_service_registry_collects_source_failures(monkeypatch) -> None:
         "_upsert_service_registry_records",
         lambda conn, records: (len(records), 0),
     )
+    monkeypatch.setattr(
+        service_registry_sync,
+        "_prune_service_registry_records",
+        lambda conn, env_name, namespaces, keep_keys: 0,
+    )
 
     summary = service_registry_sync.sync_service_registry_from_cluster(
         _DummyConn(),
@@ -78,15 +143,19 @@ def test_sync_service_registry_collects_source_failures(monkeypatch) -> None:
     )
 
     assert summary["env"] == "dev"
+    assert summary["source"] == "cluster_services"
     assert summary["discovered"] == 1
     assert summary["upserted"] == 1
     assert summary["inserted"] == 1
-    assert len(summary["sourceFailures"]) == 1
-    assert summary["sourceFailures"][0]["source"] == "kubernetes"
+    assert summary["deleted"] == 0
+    assert len(summary["sourceFailures"]) == 2
+    assert {item["source"] for item in summary["sourceFailures"]} == {
+        "kubernetes_services",
+        "kubernetes_deployments",
+    }
     assert summary["sourceFailures"][0]["scope"] == "broken"
 
 
 def test_normalize_service_id_removes_unsafe_chars() -> None:
     assert service_registry_sync._normalize_service_id("Portal Project") == "portal-project"
     assert service_registry_sync._normalize_service_id("  ") == "unknown-service"
-

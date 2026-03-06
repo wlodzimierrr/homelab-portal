@@ -36,6 +36,7 @@ from app.logs_quickview import (
     get_logs_default_namespace,
     validate_preset,
 )
+from app.gitops_project_sync import sync_project_registry_from_gitops
 from app.release_traceability import (
     build_release_join_diagnostics,
     build_release_traceability_rows,
@@ -97,6 +98,38 @@ class CreateProjectRequest(BaseModel):
     environment: str = Field(min_length=1)
 
 
+class ServiceRow(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    service_name: str = Field(alias="serviceName")
+    env: str
+    namespace: str
+    app_label: str = Field(alias="appLabel")
+    argo_app_name: str | None = Field(default=None, alias="argoAppName")
+    source: str
+    source_ref: str | None = Field(default=None, alias="sourceRef")
+    last_synced_at: str | None = Field(default=None, alias="lastSyncedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServicesResponse(BaseModel):
+    services: list[ServiceRow]
+
+
+class ServiceDetailResponse(BaseModel):
+    id: str
+    name: str
+    namespace: str
+    env: str
+    app_label: str = Field(alias="appLabel")
+    argo_app_name: str | None = Field(default=None, alias="argoAppName")
+    source: str
+    source_ref: str | None = Field(default=None, alias="sourceRef")
+    last_synced_at: str | None = Field(default=None, alias="lastSyncedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ServiceRegistrySyncFailure(BaseModel):
     source: str
     scope: str
@@ -105,12 +138,14 @@ class ServiceRegistrySyncFailure(BaseModel):
 
 class ServiceRegistrySyncResponse(BaseModel):
     correlation_id: str = Field(alias="correlationId")
+    source: str
     env: str
     namespaces: list[str]
     discovered: int
     upserted: int
     inserted: int
     updated: int
+    deleted: int = 0
     source_failures: list[ServiceRegistrySyncFailure] = Field(alias="sourceFailures")
     generated_at: str = Field(alias="generatedAt")
     duration_ms: int = Field(alias="durationMs")
@@ -287,13 +322,6 @@ def _parse_csv_header(value: str | None) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
-def _normalize_service_id(value: str) -> str:
-    normalized = value.strip().lower()
-    normalized = re.sub(r"[^a-z0-9._-]+", "-", normalized)
-    normalized = normalized.strip("-")
-    return normalized or "unknown-service"
-
-
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_auth),
     x_auth_user: str | None = Header(None, alias="X-Auth-Request-User"),
@@ -328,15 +356,71 @@ def _with_connection() -> psycopg.Connection:
     return psycopg.connect(get_psycopg_database_url())
 
 
-def _load_project_rows() -> list[dict[str, str]]:
+def _load_project_rows(env: str | None = None) -> list[dict[str, str]]:
+    with _with_connection() as conn:
+        with conn.cursor() as cur:
+            if env:
+                cur.execute(
+                    """
+                    SELECT project_id, project_name, env
+                    FROM project_registry
+                    WHERE source = %s
+                      AND env = %s
+                    ORDER BY project_id ASC, env ASC
+                    """,
+                    ("gitops_apps", env),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT project_id, project_name, env
+                    FROM project_registry
+                    WHERE source = %s
+                    ORDER BY project_id ASC, env ASC
+                    """,
+                    ("gitops_apps",),
+                )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "service_id": row[0],
+            "service_name": row[1],
+            "env": row[2],
+        }
+        for row in rows
+    ]
+
+
+def _load_service_rows(
+    *,
+    env: str | None = None,
+    namespace: str | None = None,
+    service_id: str | None = None,
+) -> list[dict[str, str | None]]:
+    conditions = ["source = %s"]
+    params: list[str] = ["cluster_services"]
+    if env:
+        conditions.append("env = %s")
+        params.append(env)
+    if namespace:
+        conditions.append("namespace = %s")
+        params.append(namespace)
+    if service_id:
+        conditions.append("service_id = %s")
+        params.append(service_id)
+
+    where_clause = " AND ".join(conditions)
     with _with_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT service_id, service_name, env
+                f"""
+                SELECT service_id, service_name, env, namespace, app_label, argo_app_name, source, source_ref, last_synced_at
                 FROM service_registry
+                WHERE {where_clause}
                 ORDER BY service_id ASC, env ASC
-                """
+                """,
+                tuple(params),
             )
             rows = cur.fetchall()
 
@@ -345,6 +429,12 @@ def _load_project_rows() -> list[dict[str, str]]:
             "service_id": row[0],
             "service_name": row[1],
             "env": row[2],
+            "namespace": row[3],
+            "app_label": row[4],
+            "argo_app_name": row[5],
+            "source": row[6],
+            "source_ref": row[7],
+            "last_synced_at": row[8].isoformat() if row[8] else None,
         }
         for row in rows
     ]
@@ -813,21 +903,18 @@ def login(payload: LoginRequest) -> LoginResponse:
 
 
 @app.get("/projects", response_model=ProjectsResponse, tags=["metadata"])
-def list_projects(_: tuple[str, set[str]] = Depends(get_current_user)) -> ProjectsResponse:
-    with _with_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT service_id, service_name, env
-                FROM service_registry
-                ORDER BY service_id ASC, env ASC
-                """
-            )
-            rows = cur.fetchall()
-
+def list_projects(
+    env: str | None = Query(default=None),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> ProjectsResponse:
+    rows = _load_project_rows(env=env)
     return ProjectsResponse(
         projects=[
-            Project(id=row[0], name=row[1], environment=row[2])
+            Project(
+                id=row["service_id"],
+                name=row["service_name"],
+                environment=row["env"],
+            )
             for row in rows
         ]
     )
@@ -841,103 +928,72 @@ def list_projects(_: tuple[str, set[str]] = Depends(get_current_user)) -> Projec
 )
 def create_project(
     payload: CreateProjectRequest,
-    _: str = Depends(require_admin),
+    admin_user: str = Depends(require_admin),
 ) -> Project:
-    service_id = _normalize_service_id(payload.id)
-    namespace = os.getenv("PROJECTS_DEFAULT_NAMESPACE", "default")
-    app_label = service_id
-    now = datetime.now(tz=timezone.utc)
+    del payload, admin_user
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "Projects are sourced from GitOps app definitions; "
+            "manual project creation is not allowed."
+        ),
+    )
 
-    with _with_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT service_id
-                FROM service_registry
-                WHERE service_name = %s
-                  AND namespace = %s
-                  AND env = %s
-                """,
-                (payload.name, namespace, payload.environment),
+
+@app.get("/services", response_model=ServicesResponse, tags=["metadata"])
+def list_services(
+    env: str | None = Query(default=None),
+    namespace: str | None = Query(default=None),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> ServicesResponse:
+    rows = _load_service_rows(env=env, namespace=namespace)
+    return ServicesResponse(
+        services=[
+            ServiceRow(
+                serviceId=str(row["service_id"]),
+                serviceName=str(row["service_name"]),
+                env=str(row["env"]),
+                namespace=str(row["namespace"]),
+                appLabel=str(row["app_label"]),
+                argoAppName=row["argo_app_name"] if isinstance(row["argo_app_name"], str) else None,
+                source=str(row["source"]),
+                sourceRef=row["source_ref"] if isinstance(row["source_ref"], str) else None,
+                lastSyncedAt=row["last_synced_at"] if isinstance(row["last_synced_at"], str) else None,
             )
-            existing_name_row = cur.fetchone()
+            for row in rows
+        ]
+    )
 
-            if (
-                existing_name_row
-                and isinstance(existing_name_row[0], str)
-                and existing_name_row[0] != service_id
-            ):
-                # Rekey existing name/env row instead of violating uq(service_name, namespace, env).
-                cur.execute(
-                    """
-                    UPDATE service_registry
-                    SET service_id = %s,
-                        service_name = %s,
-                        namespace = %s,
-                        app_label = %s,
-                        argo_app_name = %s,
-                        source = %s,
-                        source_ref = %s,
-                        last_synced_at = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE service_id = %s
-                      AND env = %s
-                    RETURNING service_id, service_name, env
-                    """,
-                    (
-                        service_id,
-                        payload.name,
-                        namespace,
-                        app_label,
-                        None,
-                        "manual",
-                        "projects_api",
-                        now,
-                        existing_name_row[0],
-                        payload.environment,
-                    ),
-                )
-                row = cur.fetchone()
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO service_registry (
-                        service_id,
-                        service_name,
-                        namespace,
-                        env,
-                        app_label,
-                        argo_app_name,
-                        source,
-                        source_ref,
-                        last_synced_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (service_id, env) DO UPDATE
-                    SET service_name = EXCLUDED.service_name,
-                        namespace = EXCLUDED.namespace,
-                        app_label = EXCLUDED.app_label,
-                        source = EXCLUDED.source,
-                        source_ref = EXCLUDED.source_ref,
-                        last_synced_at = EXCLUDED.last_synced_at,
-                        updated_at = CURRENT_TIMESTAMP
-                    RETURNING service_id, service_name, env
-                    """,
-                    (
-                        service_id,
-                        payload.name,
-                        namespace,
-                        payload.environment,
-                        app_label,
-                        None,
-                        "manual",
-                        "projects_api",
-                        now,
-                    ),
-                )
-                row = cur.fetchone()
 
-    return Project(id=row[0], name=row[1], environment=row[2])
+@app.get("/services/{service_id}", response_model=ServiceDetailResponse, tags=["metadata"])
+def get_service(
+    service_id: str,
+    env: str | None = Query(default=None),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> ServiceDetailResponse:
+    rows = _load_service_rows(service_id=service_id, env=env)
+    if not rows:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Service not found",
+        )
+
+    preferred_env = env or os.getenv("PORTAL_ENV", "dev")
+    selected = next(
+        (row for row in rows if row["env"] == preferred_env),
+        rows[0],
+    )
+    return ServiceDetailResponse(
+        id=str(selected["service_id"]),
+        name=str(selected["service_name"]),
+        namespace=str(selected["namespace"]),
+        env=str(selected["env"]),
+        appLabel=str(selected["app_label"]),
+        argoAppName=selected["argo_app_name"] if isinstance(selected["argo_app_name"], str) else None,
+        source=str(selected["source"]),
+        sourceRef=selected["source_ref"] if isinstance(selected["source_ref"], str) else None,
+        lastSyncedAt=selected["last_synced_at"] if isinstance(selected["last_synced_at"], str) else None,
+    )
 
 
 @app.post(
@@ -945,9 +1001,21 @@ def create_project(
     response_model=ServiceRegistrySyncResponse,
     tags=["metadata"],
 )
-def sync_service_registry(_: str = Depends(require_admin)) -> ServiceRegistrySyncResponse:
+def sync_service_registry(
+    source: str = Query(default="cluster_services"),
+    env: str | None = Query(default=None),
+    _: str = Depends(require_admin),
+) -> ServiceRegistrySyncResponse:
     with _with_connection() as conn:
-        summary = sync_service_registry_from_cluster(conn)
+        if source == "cluster_services":
+            summary = sync_service_registry_from_cluster(conn, env_name=env)
+        elif source == "gitops_apps":
+            summary = sync_project_registry_from_gitops(conn, env_name=env)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="source must be one of: cluster_services,gitops_apps",
+            )
     return ServiceRegistrySyncResponse(**summary)
 
 

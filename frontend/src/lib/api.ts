@@ -68,12 +68,6 @@ export interface ProjectsResponse {
   projects: Project[]
 }
 
-export interface CreateProjectPayload {
-  id: string
-  name: string
-  environment: string
-}
-
 export interface LoginPayload {
   username: string
   password: string
@@ -113,6 +107,22 @@ export interface ServiceDetails {
   internalUrls?: string[]
   endpoints?: ServiceEndpoint[]
   deployments?: ServiceDeployment[]
+}
+
+export interface ServiceRegistryApiRow {
+  serviceId: string
+  serviceName: string
+  env: string
+  namespace: string
+  appLabel: string
+  argoAppName?: string
+  source: string
+  sourceRef?: string
+  lastSyncedAt?: string
+}
+
+export interface ServicesResponse {
+  services: ServiceRegistryApiRow[]
 }
 
 async function getErrorMessage(response: Response) {
@@ -252,13 +262,6 @@ export function getProjects() {
   return request<ProjectsResponse>('/projects')
 }
 
-export function createProject(payload: CreateProjectPayload) {
-  return request<Project>('/projects', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
-}
-
 export function login(payload: LoginPayload) {
   return request<LoginResponse>('/auth/login', {
     method: 'POST',
@@ -269,6 +272,10 @@ export function login(payload: LoginPayload) {
 
 export function getService(serviceId: string) {
   return requestServiceEndpoint<ServiceDetails>(`/services/${encodeURIComponent(serviceId)}`)
+}
+
+export function getServices() {
+  return requestServiceEndpoint<ServicesResponse>('/services')
 }
 
 export function getServiceDeployments(serviceId: string) {

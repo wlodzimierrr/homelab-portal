@@ -112,6 +112,16 @@ def _fetch_deployments_in_namespace(namespace: str) -> list[dict]:
     return [item for item in items if isinstance(item, dict)]
 
 
+def _fetch_services_in_namespace(namespace: str) -> list[dict]:
+    payload = _kube_get_json(
+        f"/api/v1/namespaces/{namespace}/services",
+    )
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict)]
+
+
 def _fetch_argocd_applications(namespace: str) -> list[dict]:
     payload = _kube_get_json(
         f"/apis/argoproj.io/v1alpha1/namespaces/{namespace}/applications",
@@ -193,11 +203,94 @@ def _build_records_from_deployments(
                 env=env_name,
                 app_label=app_label,
                 argo_app_name=argo_app_name,
-                source="kubernetes",
+                source="cluster_services",
                 source_ref=source_ref,
                 last_synced_at=synced_at,
             )
         )
+    return records
+
+
+def _build_records_from_services_and_deployments(
+    *,
+    services: list[dict],
+    deployments: list[dict],
+    env_name: str,
+    source_ref: str,
+    synced_at: datetime,
+    argo_by_namespace: dict[str, str],
+) -> list[ServiceRegistryRecord]:
+    deployment_rows = _build_records_from_deployments(
+        deployments=deployments,
+        env_name=env_name,
+        source_ref=source_ref,
+        synced_at=synced_at,
+        argo_by_namespace=argo_by_namespace,
+    )
+    deployment_index = {
+        (row.namespace, row.service_id): row
+        for row in deployment_rows
+    }
+    records: list[ServiceRegistryRecord] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    for service in services:
+        metadata = service.get("metadata", {})
+        spec = service.get("spec", {})
+        if not isinstance(metadata, dict) or not isinstance(spec, dict):
+            continue
+
+        name = metadata.get("name")
+        namespace = metadata.get("namespace")
+        labels = metadata.get("labels", {})
+        selector = spec.get("selector", {})
+
+        if (
+            not isinstance(name, str)
+            or not isinstance(namespace, str)
+            or not name
+            or not namespace
+        ):
+            continue
+        if not isinstance(labels, dict):
+            labels = {}
+        if not isinstance(selector, dict):
+            selector = {}
+
+        app_label_raw = (
+            labels.get("app.kubernetes.io/name")
+            or selector.get("app.kubernetes.io/name")
+            or labels.get("app")
+            or selector.get("app")
+            or name
+        )
+        app_label = str(app_label_raw)
+        service_id = _normalize_service_id(app_label)
+        deployment_match = deployment_index.get((namespace, service_id))
+        argo_app_name = (
+            deployment_match.argo_app_name if deployment_match else argo_by_namespace.get(namespace)
+        )
+
+        records.append(
+            ServiceRegistryRecord(
+                service_id=service_id,
+                service_name=name,
+                namespace=namespace,
+                env=env_name,
+                app_label=app_label,
+                argo_app_name=argo_app_name,
+                source="cluster_services",
+                source_ref=source_ref,
+                last_synced_at=synced_at,
+            )
+        )
+        seen_keys.add((namespace, service_id))
+
+    for row in deployment_rows:
+        key = (row.namespace, row.service_id)
+        if key not in seen_keys:
+            records.append(row)
+
     return records
 
 
@@ -257,6 +350,50 @@ def _upsert_service_registry_records(
     return inserted, updated
 
 
+def _prune_service_registry_records(
+    conn: psycopg.Connection,
+    *,
+    env_name: str,
+    namespaces: set[str],
+    keep_keys: set[tuple[str, str]],
+) -> int:
+    if not namespaces:
+        return 0
+
+    stale_keys: list[tuple[str, str]] = []
+    with conn.cursor() as cur:
+        for namespace in sorted(namespaces):
+            cur.execute(
+                """
+                SELECT service_id, namespace
+                FROM service_registry
+                WHERE source = %s
+                  AND env = %s
+                  AND namespace = %s
+                """,
+                ("cluster_services", env_name, namespace),
+            )
+            for service_id, row_namespace in cur.fetchall():
+                key = (str(service_id), str(row_namespace))
+                if key not in keep_keys:
+                    stale_keys.append(key)
+
+        deleted = 0
+        for service_id, namespace in stale_keys:
+            cur.execute(
+                """
+                DELETE FROM service_registry
+                WHERE source = %s
+                  AND env = %s
+                  AND service_id = %s
+                  AND namespace = %s
+                """,
+                ("cluster_services", env_name, service_id, namespace),
+            )
+            deleted += cur.rowcount
+    return deleted
+
+
 def sync_service_registry_from_cluster(
     conn: psycopg.Connection,
     *,
@@ -279,24 +416,47 @@ def sync_service_registry_from_cluster(
     )
 
     source_failures: list[dict[str, str]] = []
-    deployments: list[dict] = []
+    services_by_namespace: dict[str, list[dict]] = {}
+    deployments_by_namespace: dict[str, list[dict]] = {}
+    successful_namespaces: set[str] = set()
     for namespace in safe_namespaces:
+        namespace_failed = False
         try:
-            deployments.extend(_fetch_deployments_in_namespace(namespace))
+            services_by_namespace[namespace] = _fetch_services_in_namespace(namespace)
         except Exception as exc:
             logger.error(
-                "service_registry_sync_source_error correlation_id=%s source=kubernetes namespace=%s error=%s",
+                "service_registry_sync_source_error correlation_id=%s source=kubernetes_services namespace=%s error=%s",
                 correlation_id,
                 namespace,
                 str(exc),
             )
             source_failures.append(
                 {
-                    "source": "kubernetes",
+                    "source": "kubernetes_services",
                     "scope": namespace,
                     "error": str(exc),
                 }
             )
+            namespace_failed = True
+        try:
+            deployments_by_namespace[namespace] = _fetch_deployments_in_namespace(namespace)
+        except Exception as exc:
+            logger.error(
+                "service_registry_sync_source_error correlation_id=%s source=kubernetes_deployments namespace=%s error=%s",
+                correlation_id,
+                namespace,
+                str(exc),
+            )
+            source_failures.append(
+                {
+                    "source": "kubernetes_deployments",
+                    "scope": namespace,
+                    "error": str(exc),
+                }
+            )
+            namespace_failed = True
+        if not namespace_failed:
+            successful_namespaces.add(namespace)
 
     argo_mapping: dict[str, str] = {}
     try:
@@ -317,13 +477,18 @@ def sync_service_registry_from_cluster(
             }
         )
 
-    records = _build_records_from_deployments(
-        deployments=deployments,
-        env_name=safe_env,
-        source_ref="kubernetes_api",
-        synced_at=synced_at,
-        argo_by_namespace=argo_mapping,
-    )
+    records: list[ServiceRegistryRecord] = []
+    for namespace in sorted(successful_namespaces):
+        records.extend(
+            _build_records_from_services_and_deployments(
+                services=services_by_namespace.get(namespace, []),
+                deployments=deployments_by_namespace.get(namespace, []),
+                env_name=safe_env,
+                source_ref="kubernetes_api",
+                synced_at=synced_at,
+                argo_by_namespace=argo_mapping,
+            )
+        )
 
     # Keep a deterministic winner when multiple deployments map to the same service/env key.
     deduped: dict[tuple[str, str], ServiceRegistryRecord] = {}
@@ -332,28 +497,37 @@ def sync_service_registry_from_cluster(
     unique_records = list(deduped.values())
 
     inserted, updated = _upsert_service_registry_records(conn, unique_records)
+    deleted = _prune_service_registry_records(
+        conn,
+        env_name=safe_env,
+        namespaces=successful_namespaces,
+        keep_keys={(row.service_id, row.namespace) for row in unique_records},
+    )
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     summary = {
         "correlationId": correlation_id,
+        "source": "cluster_services",
         "env": safe_env,
         "namespaces": list(safe_namespaces),
         "discovered": len(records),
         "upserted": len(unique_records),
         "inserted": inserted,
         "updated": updated,
+        "deleted": deleted,
         "sourceFailures": source_failures,
         "generatedAt": synced_at.isoformat(),
         "durationMs": duration_ms,
     }
     logger.info(
-        "service_registry_sync_summary correlation_id=%s env=%s discovered=%s upserted=%s inserted=%s updated=%s failures=%s duration_ms=%s",
+        "service_registry_sync_summary correlation_id=%s env=%s discovered=%s upserted=%s inserted=%s updated=%s deleted=%s failures=%s duration_ms=%s",
         correlation_id,
         safe_env,
         len(records),
         len(unique_records),
         inserted,
         updated,
+        deleted,
         len(source_failures),
         duration_ms,
     )

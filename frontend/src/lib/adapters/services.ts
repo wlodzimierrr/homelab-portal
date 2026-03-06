@@ -1,4 +1,4 @@
-import { getProjects, type Project } from '@/lib/api'
+import { getProjects, getServices, type Project, type ServiceRegistryApiRow } from '@/lib/api'
 import { createServiceIdentity, normalizeServiceId, parseNamespaceFromInternalUrl, type ServiceIdentity } from '@/lib/service-identity'
 
 export type ServiceHealth = 'healthy' | 'degraded' | 'unknown'
@@ -115,7 +115,45 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
   return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
+function adaptApiServices(rows: ServiceRegistryApiRow[]): ServiceRegistryItem[] {
+  const grouped = new Map<string, ServiceRegistryItem>()
+
+  for (const row of rows) {
+    const current = grouped.get(row.serviceId)
+    if (!current) {
+      grouped.set(row.serviceId, {
+        id: row.serviceId,
+        name: row.serviceName,
+        environments: [row.env],
+        health: 'unknown',
+        sync: 'unknown',
+        namespace: row.namespace,
+        appLabel: row.appLabel,
+        argoAppName: row.argoAppName,
+      })
+      continue
+    }
+
+    if (!current.environments.includes(row.env)) {
+      current.environments.push(row.env)
+      current.environments.sort((a, b) => a.localeCompare(b))
+    }
+  }
+
+  return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
 export async function getServicesRegistry() {
+  try {
+    const servicesResponse = await getServices()
+    const liveRows = adaptApiServices(servicesResponse.services)
+    if (liveRows.length > 0) {
+      return liveRows
+    }
+  } catch {
+    // Fall back to /projects projection until all environments expose the live services API.
+  }
+
   try {
     const response = await getProjects()
     const fromApi = adaptProjectsToServices(response.projects)
