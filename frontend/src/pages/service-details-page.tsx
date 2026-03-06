@@ -838,7 +838,6 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                     onChange={(event) => setTimelineWindow(event.target.value as TimelineWindow)}
                     className="rounded-md border border-border bg-background px-2 py-1 text-xs"
                   >
-                    <option value="6h">6h</option>
                     <option value="24h">24h</option>
                     <option value="7d">7d</option>
                   </select>

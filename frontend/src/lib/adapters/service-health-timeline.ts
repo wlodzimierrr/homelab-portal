@@ -2,7 +2,7 @@ import { request } from '@/lib/api'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export type TimelineStatus = 'healthy' | 'degraded' | 'down' | 'unknown'
-export type TimelineWindow = '6h' | '24h' | '7d'
+export type TimelineWindow = '24h' | '7d'
 
 export interface ServiceHealthTimelineSegment {
   id: string
@@ -41,7 +41,7 @@ function normalizeStatus(value?: string): TimelineStatus {
 }
 
 function asWindow(value?: string): TimelineWindow {
-  if (value === '6h' || value === '7d') {
+  if (value === '7d') {
     return value
   }
   return '24h'

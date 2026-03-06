@@ -897,8 +897,9 @@ def _build_service_metrics_queries(
     app_label: str,
     selected_range: str,
     config,
-) -> dict[str, str]:
+) -> dict[str, tuple[str, ...]]:
     pod_pattern = escape_promql_regex_literal(app_label)
+    ingress_service_pattern = f".*{escape_promql_regex_literal(app_label)}.*"
     deployment_name = app_label
     values = {
         "namespace": namespace,
@@ -906,27 +907,46 @@ def _build_service_metrics_queries(
         "deployment_name": deployment_name,
         "selected_range": selected_range,
         "pod_pattern": pod_pattern,
+        "ingress_service_pattern": ingress_service_pattern,
     }
     return {
-        "uptimePct": render_query_template(
-            config.metrics_query_uptime_template,
-            values,
-            "metrics.uptime",
+        "uptimePct": (
+            render_query_template(
+                config.metrics_query_uptime_template,
+                values,
+                "metrics.uptime",
+            ),
         ),
-        "p95LatencyMs": render_query_template(
-            config.metrics_query_p95_latency_template,
-            values,
-            "metrics.p95_latency",
+        "p95LatencyMs": (
+            render_query_template(
+                config.metrics_query_p95_latency_template,
+                values,
+                "metrics.p95_latency",
+            ),
+            render_query_template(
+                config.metrics_query_p95_latency_fallback_template,
+                values,
+                "metrics.p95_latency_fallback",
+            ),
         ),
-        "errorRatePct": render_query_template(
-            config.metrics_query_error_rate_template,
-            values,
-            "metrics.error_rate",
+        "errorRatePct": (
+            render_query_template(
+                config.metrics_query_error_rate_template,
+                values,
+                "metrics.error_rate",
+            ),
+            render_query_template(
+                config.metrics_query_error_rate_fallback_template,
+                values,
+                "metrics.error_rate_fallback",
+            ),
         ),
-        "restartCount": render_query_template(
-            config.metrics_query_restart_count_template,
-            values,
-            "metrics.restart_count",
+        "restartCount": (
+            render_query_template(
+                config.metrics_query_restart_count_template,
+                values,
+                "metrics.restart_count",
+            ),
         ),
     }
 
@@ -1404,12 +1424,16 @@ def get_service_metrics_summary(
         values: dict[str, float | None] = {}
         no_data: dict[str, bool] = {}
 
-        for field_name, query in queries.items():
-            value = _query_prometheus_scalar(
-                query,
-                field_name,
-                correlation_id=correlation_id,
-            )
+        for field_name, query_candidates in queries.items():
+            value = None
+            for query in query_candidates:
+                value = _query_prometheus_scalar(
+                    query,
+                    field_name,
+                    correlation_id=correlation_id,
+                )
+                if value is not None:
+                    break
             values[field_name] = value
             no_data[field_name] = value is None
 

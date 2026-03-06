@@ -880,6 +880,8 @@ def test_service_metrics_summary_uses_service_registry_metadata_for_queries(monk
             {"status": "success", "data": {"result": []}},
             {"status": "success", "data": {"result": []}},
             {"status": "success", "data": {"result": []}},
+            {"status": "success", "data": {"result": []}},
+            {"status": "success", "data": {"result": []}},
         ]
     )
 
@@ -953,6 +955,7 @@ def test_service_metrics_summary_supports_per_metric_no_data(monkeypatch) -> Non
         [
             {"status": "success", "data": {"result": []}},
             {"status": "success", "data": {"result": [{"value": [0, "250"]}]}},
+            {"status": "success", "data": {"result": []}},
             {"status": "success", "data": {"result": []}},
             {"status": "success", "data": {"result": [{"value": [0, "1"]}]}},
         ]

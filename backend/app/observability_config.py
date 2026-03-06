@@ -26,7 +26,9 @@ class ObservabilityConfig:
     alerts_cache_ttl_seconds: int
     metrics_query_uptime_template: str
     metrics_query_p95_latency_template: str
+    metrics_query_p95_latency_fallback_template: str
     metrics_query_error_rate_template: str
+    metrics_query_error_rate_fallback_template: str
     metrics_query_restart_count_template: str
     timeline_query_availability_template: str
     timeline_query_error_rate_template: str
@@ -112,9 +114,17 @@ def load_observability_config() -> ObservabilityConfig:
             "OBS_QUERY_METRICS_P95_LATENCY",
             '1000 * histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="{namespace}", app="{app_label}"}[5m])))',
         ),
+        metrics_query_p95_latency_fallback_template=os.getenv(
+            "OBS_QUERY_METRICS_P95_LATENCY_FALLBACK",
+            '1000 * histogram_quantile(0.95, sum by (le) (rate(traefik_service_request_duration_seconds_bucket{service=~"{ingress_service_pattern}"}[5m])))',
+        ),
         metrics_query_error_rate_template=os.getenv(
             "OBS_QUERY_METRICS_ERROR_RATE",
             '100 * (sum(rate(http_requests_total{namespace="{namespace}", app="{app_label}", status=~"5.."}[5m])) / sum(rate(http_requests_total{namespace="{namespace}", app="{app_label}"}[5m])))',
+        ),
+        metrics_query_error_rate_fallback_template=os.getenv(
+            "OBS_QUERY_METRICS_ERROR_RATE_FALLBACK",
+            '100 * (sum(rate(traefik_service_requests_total{service=~"{ingress_service_pattern}", code=~"5.."}[5m])) / clamp_min(sum(rate(traefik_service_requests_total{service=~"{ingress_service_pattern}"}[5m])), 0.000001))',
         ),
         metrics_query_restart_count_template=os.getenv(
             "OBS_QUERY_METRICS_RESTART_COUNT",
