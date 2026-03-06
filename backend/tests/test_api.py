@@ -830,6 +830,22 @@ def test_service_metrics_summary_success_with_supported_range(monkeypatch) -> No
         return _MockPrometheusResponse(next(payloads))
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "team-space",
+                "app_label": "portal-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-06T00:00:00+00:00",
+            }
+        ],
+    )
 
     response = client.get(
         "/services/homelab-api/metrics/summary?range=24h",
@@ -854,6 +870,50 @@ def test_service_metrics_summary_success_with_supported_range(monkeypatch) -> No
     }
     assert body["providerStatus"]["provider"] == "prometheus"
     assert body["providerStatus"]["status"] == "healthy"
+
+
+def test_service_metrics_summary_uses_service_registry_metadata_for_queries(monkeypatch) -> None:
+    requested_urls: list[str] = []
+    payloads = iter(
+        [
+            {"status": "success", "data": {"result": []}},
+            {"status": "success", "data": {"result": []}},
+            {"status": "success", "data": {"result": []}},
+            {"status": "success", "data": {"result": []}},
+        ]
+    )
+
+    def _mock_urlopen(request, **kwargs):
+        requested_urls.append(request.full_url)
+        return _MockPrometheusResponse(next(payloads))
+
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api-postgres",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-06T00:00:00+00:00",
+            }
+        ],
+    )
+
+    response = client.get(
+        "/services/homelab-api/metrics/summary?range=24h",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    assert any('namespace%3D%22homelab-api%22' in url for url in requested_urls)
+    assert any('app%3D%22homelab-api%22' in url for url in requested_urls)
+    assert not any('namespace%3D%22default%22' in url for url in requested_urls)
 
 
 def test_service_metrics_summary_rejects_invalid_range() -> None:
@@ -998,6 +1058,22 @@ def test_service_health_timeline_returns_segments(monkeypatch) -> None:
         return _MockPrometheusResponse(next(payloads))
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "team-space",
+                "app_label": "portal-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-06T00:00:00+00:00",
+            }
+        ],
+    )
 
     response = client.get(
         "/services/homelab-api/health/timeline?range=24h&step=5m",
@@ -1009,6 +1085,49 @@ def test_service_health_timeline_returns_segments(monkeypatch) -> None:
     assert isinstance(body, list)
     assert len(body) >= 1
     assert set(body[0].keys()).issuperset({"start", "end", "status"})
+
+
+def test_service_health_timeline_uses_service_registry_metadata_for_queries(monkeypatch) -> None:
+    requested_urls: list[str] = []
+    payloads = iter(
+        [
+            {"status": "success", "data": {"result": []}},
+            {"status": "success", "data": {"result": []}},
+            {"status": "success", "data": {"result": []}},
+        ]
+    )
+
+    def _mock_urlopen(request, **kwargs):
+        requested_urls.append(request.full_url)
+        return _MockPrometheusResponse(next(payloads))
+
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "portal-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-06T00:00:00+00:00",
+            }
+        ],
+    )
+
+    response = client.get(
+        "/services/homelab-api/health/timeline?range=24h&step=5m",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    assert any('namespace%3D%22homelab-api%22' in url for url in requested_urls)
+    assert any('app%3D%22portal-api%22' in url for url in requested_urls)
+    assert not any('namespace%3D%22default%22' in url for url in requested_urls)
 
 
 def test_service_health_timeline_rejects_invalid_step() -> None:

@@ -601,6 +601,20 @@ def _load_service_catalog_rows(
     return _load_service_rows(env=env, service_id=service_id)
 
 
+def _resolve_service_monitoring_metadata(service_id: str) -> tuple[str, str]:
+    preferred_env = os.getenv("PORTAL_ENV", "dev")
+    rows = _load_service_rows(service_id=service_id, env=preferred_env)
+    if not rows:
+        rows = _load_service_rows(service_id=service_id)
+    if not rows:
+        return "default", service_id
+
+    selected = rows[0]
+    namespace = str(selected.get("namespace") or "").strip() or "default"
+    app_label = str(selected.get("app_label") or "").strip() or service_id
+    return namespace, app_label
+
+
 def _registry_stale_after_minutes() -> int:
     raw = os.getenv("REGISTRY_STALE_AFTER_MINUTES", "30")
     try:
@@ -1368,8 +1382,7 @@ def get_service_metrics_summary(
         allowed_ranges=config.metrics_allowed_ranges,
         field_name="range",
     )
-    namespace = "default"
-    app_label = service_id
+    namespace, app_label = _resolve_service_monitoring_metadata(service_id)
 
     def _load_summary() -> ServiceMetricsSummaryResponse:
         now = datetime.now(tz=timezone.utc)
@@ -1477,8 +1490,7 @@ def get_service_health_timeline(
         start = end - window
         correlation_id = str(uuid4())
 
-        namespace = "default"
-        app_label = service_id
+        namespace, app_label = _resolve_service_monitoring_metadata(service_id)
         queries = _build_health_timeline_queries(
             namespace=namespace,
             app_label=app_label,
