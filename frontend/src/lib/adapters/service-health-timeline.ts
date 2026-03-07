@@ -80,13 +80,11 @@ function resolveIdentity(input: ServiceIdentity | string) {
   return createServiceIdentity(input)
 }
 
-function emptyTimeline(identity: ServiceIdentity, window: TimelineWindow): ServiceHealthTimeline {
-  return {
-    serviceId: identity.serviceId,
-    identity,
-    window,
-    segments: [],
+function getTimelineStep(window: TimelineWindow) {
+  if (window === '7d') {
+    return '1h'
   }
+  return '5m'
 }
 
 function adaptApi(identity: ServiceIdentity, window: TimelineWindow, payload: ApiSegment[]): ServiceHealthTimeline {
@@ -100,18 +98,14 @@ function adaptApi(identity: ServiceIdentity, window: TimelineWindow, payload: Ap
 }
 
 async function getFromApi(serviceId: string, window: TimelineWindow) {
+  const step = getTimelineStep(window)
   const payload = await request<ApiSegment[]>(
-    `/services/${encodeURIComponent(serviceId)}/health/timeline?range=${encodeURIComponent(window)}`,
+    `/services/${encodeURIComponent(serviceId)}/health/timeline?range=${encodeURIComponent(window)}&step=${encodeURIComponent(step)}`,
   )
   return payload
 }
 
 export async function getServiceHealthTimeline(service: ServiceIdentity | string, window: TimelineWindow = '24h') {
   const identity = resolveIdentity(service)
-
-  try {
-    return adaptApi(identity, window, await getFromApi(identity.serviceId, window))
-  } catch {
-    return emptyTimeline(identity, window)
-  }
+  return adaptApi(identity, window, await getFromApi(identity.serviceId, window))
 }

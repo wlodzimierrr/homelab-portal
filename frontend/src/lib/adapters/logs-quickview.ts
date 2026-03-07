@@ -54,6 +54,14 @@ function resolveIdentity(input: ServiceIdentity | string) {
   return createServiceIdentity(input)
 }
 
+function hasResolvedMonitoringScope(identity: ServiceIdentity) {
+  return (
+    identity.namespace !== 'default' ||
+    identity.appLabel !== identity.serviceId ||
+    identity.serviceName !== identity.serviceId
+  )
+}
+
 function normalizePreset(value: unknown, fallback: LogsQuickViewPreset): LogsQuickViewPreset {
   return value === 'errors' || value === 'restarts' || value === 'warnings' ? value : fallback
 }
@@ -103,10 +111,10 @@ export async function getServiceLogsQuickView(
   if (options.cursor) {
     params.set('cursor', options.cursor)
   }
-  if (identity.namespace) {
+  if (hasResolvedMonitoringScope(identity) && identity.namespace) {
     params.set('namespace', identity.namespace)
   }
-  if (identity.appLabel) {
+  if (hasResolvedMonitoringScope(identity) && identity.appLabel) {
     params.set('appLabel', identity.appLabel)
   }
 

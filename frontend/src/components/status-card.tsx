@@ -48,7 +48,7 @@ export function StatusCard({ health = 'unknown', sync = 'unknown', className }: 
       </div>
       {isUnavailable ? (
         <p className="mt-2 text-xs text-muted-foreground">
-          Status unavailable - backend integration pending
+          Live health and sync metadata are not available for this service yet.
         </p>
       ) : null}
     </article>

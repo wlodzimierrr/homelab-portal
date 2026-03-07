@@ -14,6 +14,7 @@ import {
   getService,
   type MonitoringProviderStatus,
   type Project,
+  type ServiceDetails,
   type ServiceDeployment,
   type ServiceEndpoint,
 } from '@/lib/api'
@@ -243,6 +244,21 @@ function buildEndpointList(
   )
 }
 
+function buildIdentityFromServiceDetails(
+  serviceId: string,
+  details: ServiceDetails,
+  fallback: ServiceIdentity,
+): ServiceIdentity {
+  return createServiceIdentity({
+    serviceId: details.id || fallback.serviceId || serviceId,
+    serviceName: details.name || fallback.serviceName,
+    namespace: details.namespace || details.identity?.namespace || fallback.namespace,
+    env: details.env || details.identity?.env || fallback.env,
+    appLabel: details.appLabel || details.identity?.appLabel || fallback.appLabel,
+    argoAppName: details.argoAppName || details.identity?.argoAppName || fallback.argoAppName,
+  })
+}
+
 function QuickLinkCard({ label, description, href }: QuickLinkCardProps) {
   if (!href || href.trim() === '') {
     return (
@@ -457,6 +473,10 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
         projectsResult.status === 'fulfilled'
           ? buildFromProjects(decodedServiceId, projectsResult.value.projects)
           : buildFromProjects(decodedServiceId, [])
+
+      if (serviceResult.status === 'fulfilled') {
+        setServiceIdentity(buildIdentityFromServiceDetails(decodedServiceId, serviceResult.value, identity))
+      }
 
       const finalOverview: ServiceOverviewData =
         serviceResult.status === 'fulfilled'
