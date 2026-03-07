@@ -415,6 +415,9 @@ def test_service_detail_returns_cluster_backed_row(monkeypatch) -> None:
         "env": "dev",
         "appLabel": "homelab-web",
         "argoAppName": "homelab-web-dev",
+        "version": None,
+        "health": "unknown",
+        "sync": "unknown",
         "source": "cluster_services",
         "sourceRef": "kubernetes_api",
         "lastSyncedAt": None,
@@ -941,6 +944,10 @@ def test_service_metrics_summary_legacy_route_works(monkeypatch) -> None:
         return _MockPrometheusResponse(next(payloads))
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._resolve_service_monitoring_metadata",
+        lambda _service_id: ("homelab-api", "homelab-api"),
+    )
 
     response = client.get(
         "/services/homelab-api/metrics-summary?range=24h",
@@ -966,6 +973,10 @@ def test_service_metrics_summary_supports_per_metric_no_data(monkeypatch) -> Non
         return _MockPrometheusResponse(next(payloads))
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._resolve_service_monitoring_metadata",
+        lambda _service_id: ("homelab-web", "homelab-web"),
+    )
 
     response = client.get(
         "/services/homelab-web/metrics/summary?range=1h",
@@ -996,6 +1007,10 @@ def test_service_metrics_summary_translates_prometheus_http_errors(monkeypatch) 
         )
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._resolve_service_monitoring_metadata",
+        lambda _service_id: ("homelab-api", "homelab-api"),
+    )
 
     response = client.get(
         "/services/homelab-api/metrics/summary?range=7d",
@@ -1160,8 +1175,8 @@ def test_service_details_include_release_metadata(monkeypatch) -> None:
         ],
     )
     monkeypatch.setattr(
-        "app.main.build_release_traceability_rows",
-        lambda **_kwargs: [
+        "app.main._load_release_rows_for_service",
+        lambda *_args, **_kwargs: [
             {
                 "serviceId": "homelab-api",
                 "env": "dev",
@@ -1198,8 +1213,8 @@ def test_service_details_include_release_metadata(monkeypatch) -> None:
 
 def test_service_deployments_endpoint_returns_release_rows(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.main.build_release_traceability_rows",
-        lambda **_kwargs: [
+        "app.main._load_release_rows_for_service",
+        lambda *_args, **_kwargs: [
             {
                 "serviceId": "homelab-api",
                 "env": "dev",
@@ -1351,6 +1366,10 @@ def test_logs_quickview_returns_bounded_results_with_more_available(monkeypatch)
         return _MockPrometheusResponse(payload)
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._resolve_service_monitoring_metadata",
+        lambda _service_id: ("default", "homelab-api"),
+    )
 
     response = client.get(
         "/services/homelab-api/logs/quickview?preset=errors&range=1h&limit=1",
@@ -1375,6 +1394,10 @@ def test_logs_quickview_enforces_rate_limit(monkeypatch) -> None:
         return _MockPrometheusResponse(payload)
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._resolve_service_monitoring_metadata",
+        lambda _service_id: ("default", "homelab-api"),
+    )
 
     first = client.get(
         "/services/homelab-api/logs/quickview?preset=errors",
@@ -1400,6 +1423,10 @@ def test_metrics_summary_uses_cache_for_repeated_service_and_range(monkeypatch) 
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
     monkeypatch.setenv("OBS_METRICS_CACHE_TTL_SECONDS", "60")
+    monkeypatch.setattr(
+        "app.main._resolve_service_monitoring_metadata",
+        lambda _service_id: ("homelab-api", "homelab-api"),
+    )
 
     first = client.get(
         "/services/homelab-api/metrics/summary?range=24h",
@@ -1438,6 +1465,10 @@ def test_logs_quickview_caps_limit_by_config(monkeypatch) -> None:
 
     monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
     monkeypatch.setenv("OBS_LOGS_MAX_LINES", "2")
+    monkeypatch.setattr(
+        "app.main._resolve_service_monitoring_metadata",
+        lambda _service_id: ("default", "homelab-api"),
+    )
 
     response = client.get(
         "/services/homelab-api/logs/quickview?preset=errors&range=1h&limit=200",
@@ -1482,7 +1513,7 @@ def test_logs_quickview_uses_service_registry_metadata_for_query(monkeypatch) ->
 
     assert response.status_code == 200
     assert requested_urls
-    decoded = urlparse.unquote(requested_urls[0])
+    decoded = urlparse.unquote_plus(requested_urls[0])
     assert '{namespace="homelab-api", app="portal-api"}' in decoded
 
 
