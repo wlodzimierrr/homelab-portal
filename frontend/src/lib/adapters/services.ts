@@ -145,10 +145,67 @@ function adaptApiServices(rows: ServiceRegistryApiRow[]): ServiceRegistryItem[] 
   return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
+function mergeProjectMetadata(services: ServiceRegistryItem[], projects: Project[]): ServiceRegistryItem[] {
+  const byId = new Map<string, ServiceRegistryItem>()
+  for (const service of services) {
+    byId.set(service.id, {
+      ...service,
+      environments: [...service.environments],
+      internalUrls: service.internalUrls ? [...service.internalUrls] : undefined,
+    })
+  }
+
+  for (const project of projects) {
+    const canonicalId =
+      normalizeServiceId(project.name) ||
+      normalizeServiceId(project.id) ||
+      project.id.trim().toLowerCase()
+    const service = byId.get(canonicalId)
+    if (!service) {
+      continue
+    }
+
+    const nextHealth = normalizeHealthStatus(project.health)
+    const nextSync = normalizeSyncStatus(project.sync)
+
+    if (service.health === 'unknown' && nextHealth !== 'unknown') {
+      service.health = nextHealth
+    }
+
+    if (service.sync === 'unknown' && nextSync !== 'unknown') {
+      service.sync = nextSync
+    }
+
+    if (!service.publicUrl && project.publicUrl) {
+      service.publicUrl = project.publicUrl
+    }
+
+    if (project.internalUrl) {
+      const urls = service.internalUrls ?? []
+      if (!urls.includes(project.internalUrl)) {
+        urls.push(project.internalUrl)
+      }
+      service.internalUrls = urls
+    }
+
+    if (!service.lastDeployAt && project.lastDeployAt) {
+      service.lastDeployAt = project.lastDeployAt
+    }
+  }
+
+  return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
 export async function getServicesRegistry() {
   try {
     const servicesResponse = await getServices()
-    return adaptApiServices(servicesResponse.services)
+    const liveServices = adaptApiServices(servicesResponse.services)
+    try {
+      const projectsResponse = await getProjects()
+      return mergeProjectMetadata(liveServices, projectsResponse.projects)
+    } catch {
+      return liveServices
+    }
   } catch (error) {
     if (!isApiRequestError(error) || !serviceFallbackStatuses.has(error.status)) {
       throw error instanceof Error ? error : new Error('Failed to load services from live API.')

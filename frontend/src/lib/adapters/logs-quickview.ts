@@ -106,6 +106,9 @@ export async function getServiceLogsQuickView(
   if (identity.namespace) {
     params.set('namespace', identity.namespace)
   }
+  if (identity.appLabel) {
+    params.set('appLabel', identity.appLabel)
+  }
 
   const payload = await request<LogsQuickViewResponse>(
     `/services/${encodeURIComponent(identity.serviceId)}/logs/quickview?${params.toString()}`,

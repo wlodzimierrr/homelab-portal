@@ -290,6 +290,19 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
     (diagnostics?.catalogJoin.serviceOnlyCount ?? 0) +
     (diagnostics?.catalogJoin.oneToManyCount ?? 0) +
     (diagnostics?.catalogJoin.ambiguousJoinCount ?? 0)
+  const serviceOnlyPairs = new Set(
+    (diagnostics?.catalogJoin.serviceOnlyKeys ?? []).map((key) => {
+      const [serviceId, , env] = key.split('|')
+      return `${serviceId}:${env}`
+    }),
+  )
+  const serviceOnlyLabels = Array.from(
+    new Set(
+      (diagnostics?.catalogJoin.serviceOnlyKeys ?? [])
+        .map((key) => key.split('|')[0]?.trim())
+        .filter((value): value is string => Boolean(value)),
+    ),
+  )
 
   return (
     <PageShell
@@ -338,6 +351,16 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
           <SourceStateBadge state={diagnostics.freshness.state} />
           <span className="ml-2 text-muted-foreground">Reconciliation</span>
           <ReconciliationBadge diagnostics={diagnostics.catalogJoin} />
+        </div>
+      ) : null}
+
+      {!isLoading && (diagnostics?.catalogJoin.serviceOnlyCount ?? 0) > 0 ? (
+        <div className="mb-4 rounded-md border border-sky-500/40 bg-sky-500/10 p-3">
+          <p className="text-sm font-medium text-sky-900 dark:text-sky-200">Live service-only rows are shown here</p>
+          <p className="mt-1 text-xs text-sky-900 dark:text-sky-200">
+            Cluster-discovered services such as {serviceOnlyLabels.join(', ')} may not have a
+            linked GitOps project or routed public URL, but they remain visible in the live services catalog.
+          </p>
         </div>
       ) : null}
 
@@ -442,7 +465,15 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                         .map((env) => projectByServiceKey.get(`${service.id}:${env}`))
                         .find((row) => row)
                       if (!matchingRow) {
-                        return 'Unmatched'
+                        const serviceOnly = service.environments.some((env) => serviceOnlyPairs.has(`${service.id}:${env}`))
+                        return (
+                          <div className="space-y-1">
+                            <p>{serviceOnly ? 'No linked project' : 'Unmatched'}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {serviceOnly ? 'Live cluster service only.' : 'Catalog reconciliation needs review.'}
+                            </p>
+                          </div>
+                        )
                       }
                       return (
                         <AppLink
@@ -465,7 +496,7 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                         {service.publicUrl}
                       </a>
                     ) : (
-                      <span className="text-muted-foreground">N/A</span>
+                      <span className="text-muted-foreground">No routed public URL</span>
                     )}
                   </td>
                   <td className="px-3 py-3 text-muted-foreground">{formatLastDeploy(service.lastDeployAt)}</td>

@@ -201,11 +201,27 @@ class ServiceDetailResponse(BaseModel):
     env: str
     app_label: str = Field(alias="appLabel")
     argo_app_name: str | None = Field(default=None, alias="argoAppName")
+    version: str | None = None
+    health: str | None = None
+    sync: str | None = None
     source: str
     source_ref: str | None = Field(default=None, alias="sourceRef")
     last_synced_at: str | None = Field(default=None, alias="lastSyncedAt")
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceDeploymentResponse(BaseModel):
+    id: str
+    version: str | None = None
+    status: str | None = None
+    deployed_at: str | None = Field(default=None, alias="deployedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceDeploymentsResponse(BaseModel):
+    deployments: list[ServiceDeploymentResponse]
 
 
 class ServiceRegistrySyncFailure(BaseModel):
@@ -652,6 +668,51 @@ def _resolve_service_monitoring_metadata(service_id: str) -> tuple[str, str]:
     namespace = str(selected.get("namespace") or "").strip() or "default"
     app_label = str(selected.get("app_label") or "").strip() or service_id
     return namespace, app_label
+
+
+def _extract_version_from_image_ref(image_ref: str | None) -> str | None:
+    if not image_ref:
+        return None
+    trimmed = image_ref.strip()
+    if not trimmed:
+        return None
+
+    last_slash = trimmed.rfind("/")
+    last_colon = trimmed.rfind(":")
+    if last_colon > last_slash:
+        return trimmed[last_colon + 1 :] or trimmed
+    return trimmed
+
+
+def _load_release_rows_for_service(service_id: str, env: str | None = None) -> list[dict]:
+    preferred_env = env or os.getenv("PORTAL_ENV", "dev")
+    rows = build_release_traceability_rows(
+        project_rows=_load_project_rows(),
+        ci_rows=load_ci_metadata_rows(),
+        argo_rows=load_argo_metadata_rows(),
+        env_filter=preferred_env,
+        service_id_filter=service_id,
+        limit=20,
+    )
+    if rows or env:
+        return rows
+
+    return build_release_traceability_rows(
+        project_rows=_load_project_rows(),
+        ci_rows=load_ci_metadata_rows(),
+        argo_rows=load_argo_metadata_rows(),
+        env_filter=None,
+        service_id_filter=service_id,
+        limit=20,
+    )
+
+
+def _sort_release_rows_by_deployed_at(rows: list[dict]) -> list[dict]:
+    return sorted(
+        rows,
+        key=lambda row: str(row.get("deployedAt") or ""),
+        reverse=True,
+    )
 
 
 def _registry_stale_after_minutes() -> int:
@@ -1256,6 +1317,10 @@ def get_service(
         (row for row in rows if row["env"] == preferred_env),
         rows[0],
     )
+    release_rows = _sort_release_rows_by_deployed_at(_load_release_rows_for_service(service_id, env))
+    release = release_rows[0] if release_rows else {}
+    argo = release.get("argo") if isinstance(release.get("argo"), dict) else {}
+
     return ServiceDetailResponse(
         id=str(selected["service_id"]),
         name=str(selected["service_name"]),
@@ -1263,10 +1328,50 @@ def get_service(
         env=str(selected["env"]),
         appLabel=str(selected["app_label"]),
         argoAppName=selected["argo_app_name"] if isinstance(selected["argo_app_name"], str) else None,
+        version=_extract_version_from_image_ref(
+            release.get("imageRef") if isinstance(release.get("imageRef"), str) else None
+        ),
+        health=argo.get("healthStatus") if isinstance(argo.get("healthStatus"), str) else None,
+        sync=argo.get("syncStatus") if isinstance(argo.get("syncStatus"), str) else None,
         source=str(selected["source"]),
         sourceRef=selected["source_ref"] if isinstance(selected["source_ref"], str) else None,
         lastSyncedAt=selected["last_synced_at"] if isinstance(selected["last_synced_at"], str) else None,
     )
+
+
+@app.get(
+    "/services/{service_id}/deployments",
+    response_model=ServiceDeploymentsResponse,
+    tags=["metadata"],
+)
+def get_service_deployments(
+    service_id: str,
+    env: str | None = Query(default=None),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> ServiceDeploymentsResponse:
+    rows = _sort_release_rows_by_deployed_at(_load_release_rows_for_service(service_id, env))
+
+    deployments = [
+        ServiceDeploymentResponse(
+            id=str(row.get("commitSha") or row.get("deployedAt") or f"{service_id}:{index}"),
+            version=_extract_version_from_image_ref(
+                row.get("imageRef") if isinstance(row.get("imageRef"), str) else None
+            ),
+            status=(
+                row["argo"].get("healthStatus")
+                if isinstance(row.get("argo"), dict)
+                and isinstance(row["argo"].get("healthStatus"), str)
+                else row["argo"].get("syncStatus")
+                if isinstance(row.get("argo"), dict)
+                and isinstance(row["argo"].get("syncStatus"), str)
+                else None
+            ),
+            deployedAt=row.get("deployedAt") if isinstance(row.get("deployedAt"), str) else None,
+        )
+        for index, row in enumerate(rows)
+    ]
+
+    return ServiceDeploymentsResponse(deployments=deployments)
 
 
 @app.get("/catalog/reconciliation", response_model=CatalogJoinResponse, tags=["metadata"])
@@ -1839,6 +1944,7 @@ def get_service_logs_quickview(
     limit: int = Query(default=100, ge=1, le=200),
     cursor: str | None = Query(default=None),
     namespace: str | None = Query(default=None),
+    app_label: str | None = Query(default=None, alias="appLabel"),
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> LogsQuickViewResponse:
     config = load_observability_config()
@@ -1872,9 +1978,13 @@ def get_service_logs_quickview(
             detail=str(exc),
         ) from exc
 
-    safe_namespace = namespace.strip() if namespace and namespace.strip() else get_logs_default_namespace()
+    resolved_namespace, resolved_app_label = _resolve_service_monitoring_metadata(service_id)
+    safe_namespace = namespace.strip() if namespace and namespace.strip() else resolved_namespace
+    safe_namespace = safe_namespace or get_logs_default_namespace()
+    safe_app_label = app_label.strip() if app_label and app_label.strip() else resolved_app_label
+    safe_app_label = safe_app_label or service_id
     query = build_preset_query(
-        service_id=service_id,
+        app_label=safe_app_label,
         namespace=safe_namespace,
         preset=safe_preset,
     )
@@ -1885,6 +1995,7 @@ def get_service_logs_quickview(
         "logs-quickview",
         service_id,
         safe_namespace,
+        safe_app_label,
         safe_preset,
         safe_range,
         cursor or "",

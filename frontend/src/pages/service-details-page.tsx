@@ -38,7 +38,7 @@ import {
 } from '@/lib/adapters/service-health-timeline'
 import { summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
 import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
-import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
+import { createServiceIdentity, normalizeServiceId, type ServiceIdentity } from '@/lib/service-identity'
 import {
   buildArgoAppUrl,
   buildGrafanaDashboardUrl,
@@ -64,6 +64,7 @@ interface ServiceOverviewData {
   health: HealthStatus
   sync: SyncStatus
   endpoints: ServiceEndpoint[]
+  endpointState: 'available' | 'no_routed_endpoint' | 'metadata_missing'
   deployments: ServiceDeployment[]
 }
 
@@ -165,7 +166,12 @@ function getMetricSeverity(
 }
 
 function buildFromProjects(serviceId: string, projects: Project[]): ServiceOverviewData {
-  const matches = projects.filter((project) => project.name.trim().toLowerCase() === serviceId.toLowerCase())
+  const canonicalServiceId = normalizeServiceId(serviceId)
+  const matches = projects.filter((project) => {
+    const projectId = normalizeServiceId(project.id)
+    const projectName = normalizeServiceId(project.name)
+    return projectId === canonicalServiceId || projectName === canonicalServiceId
+  })
   const primary = matches[0]
 
   const endpointMap = new Map<string, ServiceEndpoint>()
@@ -193,6 +199,8 @@ function buildFromProjects(serviceId: string, projects: Project[]): ServiceOverv
     health: normalizeHealthStatus(primary?.health),
     sync: normalizeSyncStatus(primary?.sync),
     endpoints: [...endpointMap.values()],
+    endpointState:
+      endpointMap.size > 0 ? 'available' : matches.length > 0 ? 'no_routed_endpoint' : 'metadata_missing',
     deployments: [],
   }
 }
@@ -395,6 +403,11 @@ const logsRangeOptions: Array<{ value: LogsQuickViewRange; label: string }> = [
   { value: '24h', label: '24h' },
 ]
 
+const timelineWindowOptions: Array<{ value: TimelineWindow; label: string }> = [
+  { value: '24h', label: '24h' },
+  { value: '7d', label: '7d' },
+]
+
 export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: ServiceDetailsPageProps) {
   const decodedServiceId = useMemo(() => safeDecodeServiceId(serviceId), [serviceId])
   const [serviceIdentity, setServiceIdentity] = useState<ServiceIdentity>(() =>
@@ -458,12 +471,18 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 serviceResult.value.publicUrl,
                 serviceResult.value.internalUrls,
               ),
+              endpointState: 'no_routed_endpoint',
               deployments: [],
             }
           : fallback
 
-      if (finalOverview.endpoints.length === 0) {
+      if (finalOverview.endpoints.length === 0 && fallback.endpoints.length > 0) {
         finalOverview.endpoints = fallback.endpoints
+        finalOverview.endpointState = 'available'
+      } else if (finalOverview.endpoints.length > 0) {
+        finalOverview.endpointState = 'available'
+      } else if (serviceResult.status !== 'fulfilled') {
+        finalOverview.endpointState = fallback.endpointState
       }
 
       if (deploymentsResult.status === 'fulfilled') {
@@ -569,7 +588,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     () => incidentServiceAlerts[decodedServiceId] ?? incidentServiceAlerts[serviceId],
     [decodedServiceId, incidentServiceAlerts, serviceId],
   )
-  const logsConfigured = isLogsConfigured()
+  const fullLogsConfigured = isLogsConfigured()
   const logsNamespace = serviceIdentity.namespace || 'default'
   const logsAppLabel = serviceIdentity.appLabel || decodedServiceId
   const presetLinks = useMemo(() => {
@@ -641,11 +660,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   }, [activeLogsPreset, logsRange, serviceIdentity])
 
   useEffect(() => {
-    if (!logsDrawerOpen || !logsConfigured) {
+    if (!logsDrawerOpen) {
       return
     }
     void loadQuickViewLogs()
-  }, [loadQuickViewLogs, logsConfigured, logsDrawerOpen])
+  }, [loadQuickViewLogs, logsDrawerOpen])
 
   return (
     <PageShell
@@ -677,7 +696,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               <article className="rounded-md border border-border bg-background p-4">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">Deployed Version</p>
                 <p className="mt-2 text-xl font-semibold">{overview.version}</p>
-                <p className="mt-1 text-xs text-muted-foreground">Placeholder until deployment metadata API lands</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {overview.version && overview.version !== 'N/A'
+                    ? 'Resolved from live release metadata.'
+                    : 'Deployment metadata is not available for this service yet.'}
+                </p>
               </article>
               <StatusCard health={effectiveHealth} sync={overview.sync} />
             </div>
@@ -838,8 +861,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                     onChange={(event) => setTimelineWindow(event.target.value as TimelineWindow)}
                     className="rounded-md border border-border bg-background px-2 py-1 text-xs"
                   >
-                    <option value="24h">24h</option>
-                    <option value="7d">7d</option>
+                    {timelineWindowOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
                 </label>
               </div>
@@ -876,28 +902,31 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                     Opens Grafana/Loki filtered by namespace, app label, and time range.
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    {logsConfigured ? (
-                      <Button type="button" size="sm" variant="outline" onClick={() => setLogsDrawerOpen((open) => !open)}>
-                        {logsDrawerOpen ? 'Hide logs panel' : 'View logs'}
-                      </Button>
-                    ) : (
-                      <Button type="button" size="sm" disabled>
-                        Logs unavailable
-                      </Button>
-                    )}
-                    {logsConfigured ? (
+                    <Button type="button" size="sm" variant="outline" onClick={() => setLogsDrawerOpen((open) => !open)}>
+                      {logsDrawerOpen ? 'Hide logs panel' : 'View logs'}
+                    </Button>
+                    {fullLogsConfigured ? (
                       <Button asChild size="sm">
                         <a href={logsUrl} target="_blank" rel="noreferrer">
                           Open full logs
                         </a>
                       </Button>
-                    ) : null}
+                    ) : (
+                      <Button type="button" size="sm" disabled>
+                        Full logs unavailable
+                      </Button>
+                    )}
                   </div>
+                  {!fullLogsConfigured ? (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Quick view is available from Loki, but the Grafana logs URL is not configured for direct deep links.
+                    </p>
+                  ) : null}
                 </div>
               </div>
             </section>
 
-            {logsDrawerOpen && logsConfigured ? (
+            {logsDrawerOpen ? (
               <section className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h2 className="text-sm font-semibold">Logs Quick View</h2>
@@ -991,9 +1020,18 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
             <section className="space-y-3">
               <h2 className="text-sm font-semibold">Endpoints</h2>
               {overview.endpoints.length === 0 ? (
-                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
-                  No public/internal endpoints available.
-                </p>
+                <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                  <p className="font-medium">
+                    {overview.endpointState === 'metadata_missing'
+                      ? 'Endpoint metadata is unavailable right now.'
+                      : 'No routed public or internal endpoints are configured for this service.'}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {overview.endpointState === 'metadata_missing'
+                      ? 'The live metadata sources did not return endpoint information for this service.'
+                      : 'This can be expected for internal or service-only components such as oauth2-proxy.'}
+                  </p>
+                </div>
               ) : (
                 <div className="space-y-2">
                   {overview.endpoints.map((endpoint) => (

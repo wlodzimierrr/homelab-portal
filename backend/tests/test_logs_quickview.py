@@ -31,12 +31,12 @@ def test_cursor_encode_decode_roundtrip() -> None:
 
 def test_build_preset_query_is_scoped_to_service_and_namespace() -> None:
     query = build_preset_query(
-        service_id="homelab-api",
+        app_label="portal-api",
         namespace="default",
         preset="errors",
     )
     assert 'namespace="default"' in query
-    assert 'app="homelab-api"' in query
+    assert 'app="portal-api"' in query
     assert "error" in query
 
 

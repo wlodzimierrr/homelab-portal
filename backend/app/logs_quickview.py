@@ -59,9 +59,9 @@ def parse_time_range(range_value: str) -> timedelta:
     return RANGE_TO_DELTA[range_value]
 
 
-def build_preset_query(*, service_id: str, namespace: str, preset: str) -> str:
+def build_preset_query(*, app_label: str, namespace: str, preset: str) -> str:
     suffix = APPROVED_LOG_PRESETS[preset]
-    return f'{{namespace="{namespace}", app="{service_id}"}}{suffix}'
+    return f'{{namespace="{namespace}", app="{app_label}"}}{suffix}'
 
 
 def encode_cursor_ns(ts_ns: int) -> str:

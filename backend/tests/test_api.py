@@ -1,5 +1,6 @@
 import json
 from io import BytesIO
+from urllib import parse as urlparse
 from urllib.error import HTTPError
 
 import pytest
@@ -1141,6 +1142,99 @@ def test_service_health_timeline_rejects_invalid_step() -> None:
     assert response.status_code == 422
 
 
+def test_service_details_include_release_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-06T00:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main.build_release_traceability_rows",
+        lambda **_kwargs: [
+            {
+                "serviceId": "homelab-api",
+                "env": "dev",
+                "commitSha": "abc123",
+                "imageRef": "ghcr.io/example/homelab-api:v1.2.3",
+                "deployedAt": "2026-03-06T12:00:00Z",
+                "argo": {
+                    "appName": "homelab-api-dev",
+                    "syncStatus": "synced",
+                    "healthStatus": "healthy",
+                    "revision": "abc123",
+                },
+                "drift": {
+                    "isDrifted": False,
+                    "expectedRevision": "abc123",
+                    "liveRevision": "abc123",
+                },
+            }
+        ],
+    )
+
+    response = client.get(
+        "/services/homelab-api?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "homelab-api"
+    assert body["version"] == "v1.2.3"
+    assert body["health"] == "healthy"
+    assert body["sync"] == "synced"
+
+
+def test_service_deployments_endpoint_returns_release_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main.build_release_traceability_rows",
+        lambda **_kwargs: [
+            {
+                "serviceId": "homelab-api",
+                "env": "dev",
+                "commitSha": "abc123",
+                "imageRef": "ghcr.io/example/homelab-api:v1.2.3",
+                "deployedAt": "2026-03-06T12:00:00Z",
+                "argo": {
+                    "appName": "homelab-api-dev",
+                    "syncStatus": "synced",
+                    "healthStatus": "healthy",
+                    "revision": "abc123",
+                },
+                "drift": {
+                    "isDrifted": False,
+                    "expectedRevision": "abc123",
+                    "liveRevision": "abc123",
+                },
+            }
+        ],
+    )
+
+    response = client.get(
+        "/services/homelab-api/deployments?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["deployments"]) == 1
+    assert body["deployments"][0]["id"] == "abc123"
+    assert body["deployments"][0]["version"] == "v1.2.3"
+    assert body["deployments"][0]["status"] == "healthy"
+    assert body["deployments"][0]["deployedAt"] == "2026-03-06T12:00:00Z"
+
+
 def test_releases_endpoint_returns_traceability_rows(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.main._load_project_rows",
@@ -1353,6 +1447,43 @@ def test_logs_quickview_caps_limit_by_config(monkeypatch) -> None:
     body = response.json()
     assert body["limit"] == 2
     assert body["returned"] == 2
+
+
+def test_logs_quickview_uses_service_registry_metadata_for_query(monkeypatch) -> None:
+    requested_urls: list[str] = []
+    payload = {"status": "success", "data": {"result": []}}
+
+    def _mock_urlopen(request, **kwargs):
+        requested_urls.append(getattr(request, "full_url", request))
+        return _MockPrometheusResponse(payload)
+
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "portal-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-06T00:00:00+00:00",
+            }
+        ],
+    )
+
+    response = client.get(
+        "/services/homelab-api/logs/quickview?preset=errors&range=1h",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    assert requested_urls
+    decoded = urlparse.unquote(requested_urls[0])
+    assert '{namespace="homelab-api", app="portal-api"}' in decoded
 
 
 def test_alerts_active_caps_limit_by_config(monkeypatch) -> None:
