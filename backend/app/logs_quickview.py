@@ -8,9 +8,9 @@ from threading import Lock
 
 
 APPROVED_LOG_PRESETS: dict[str, str] = {
-    "errors": ' |= "error"',
-    "restarts": ' |= "restart" or |= "CrashLoopBackOff"',
-    "warnings": ' |= "warn" or |= "timeout"',
+    "errors": ' |~ "(?i)(error| 5[0-9][0-9])"',
+    "restarts": ' |~ "(?i)(restart|CrashLoopBackOff)"',
+    "warnings": ' |~ "(?i)(warn|timeout)"',
 }
 
 

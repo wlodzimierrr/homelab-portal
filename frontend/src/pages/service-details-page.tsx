@@ -396,19 +396,19 @@ const logsPresets: LogsPreset[] = [
     id: 'errors',
     label: 'Errors',
     description: 'HTTP 5xx or error-level logs',
-    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"} |= "error" or |= " 5" ',
+    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"} |~ "(?i)(error| 5[0-9][0-9])"',
   },
   {
     id: 'restarts',
     label: 'Restarts',
     description: 'Container restart signals and crash loops',
-    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"} |= "restart" or |= "CrashLoopBackOff"',
+    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"} |~ "(?i)(restart|CrashLoopBackOff)"',
   },
   {
     id: 'warnings',
     label: 'Warnings',
     description: 'Recent warning/timeout style signals',
-    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"} |= "warn" or |= "timeout"',
+    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"} |~ "(?i)(warn|timeout)"',
   },
 ]
 

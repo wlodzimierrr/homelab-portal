@@ -37,7 +37,28 @@ def test_build_preset_query_is_scoped_to_service_and_namespace() -> None:
     )
     assert 'namespace="default"' in query
     assert 'app="portal-api"' in query
+    assert '|~ "' in query
     assert "error" in query
+
+
+def test_build_preset_query_uses_valid_regex_filters_for_compound_presets() -> None:
+    warnings_query = build_preset_query(
+        app_label="portal-api",
+        namespace="default",
+        preset="warnings",
+    )
+    restarts_query = build_preset_query(
+        app_label="portal-api",
+        namespace="default",
+        preset="restarts",
+    )
+
+    assert '|~ "' in warnings_query
+    assert "warn" in warnings_query
+    assert "timeout" in warnings_query
+    assert '|~ "' in restarts_query
+    assert "restart" in restarts_query
+    assert "CrashLoopBackOff" in restarts_query
 
 
 def test_build_time_window_uses_range_and_cursor() -> None:
