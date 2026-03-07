@@ -365,42 +365,24 @@ def test_services_list_returns_cluster_backed_rows(monkeypatch) -> None:
 
 
 def test_service_detail_returns_cluster_backed_row(monkeypatch) -> None:
-    class _Cursor:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def execute(self, *_args, **_kwargs):
-            return None
-
-        def fetchall(self):
-            return [
-                (
-                    "homelab-web",
-                    "homelab-web",
-                    "dev",
-                    "homelab-web",
-                    "homelab-web",
-                    "homelab-web-dev",
-                    "cluster_services",
-                    "kubernetes_api",
-                    None,
-                )
-            ]
-
-    class _Conn:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def cursor(self):
-            return _Cursor()
-
-    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-web",
+                "service_name": "homelab-web",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "homelab-web",
+                "argo_app_name": "homelab-web-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": None,
+            }
+        ],
+    )
+    monkeypatch.setattr("app.main._load_release_rows_for_service", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
 
     response = client.get(
         "/services/homelab-web",
@@ -416,8 +398,8 @@ def test_service_detail_returns_cluster_backed_row(monkeypatch) -> None:
         "appLabel": "homelab-web",
         "argoAppName": "homelab-web-dev",
         "version": None,
-        "health": "unknown",
-        "sync": "unknown",
+        "health": None,
+        "sync": None,
         "source": "cluster_services",
         "sourceRef": "kubernetes_api",
         "lastSyncedAt": None,
@@ -1211,7 +1193,99 @@ def test_service_details_include_release_metadata(monkeypatch) -> None:
     assert body["sync"] == "synced"
 
 
+def test_service_details_fall_back_to_live_runtime_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-07T00:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_release_rows_for_service",
+        lambda *_args, **_kwargs: [
+            {
+                "serviceId": "homelab-api",
+                "env": "dev",
+                "commitSha": None,
+                "imageRef": None,
+                "deployedAt": None,
+                "argo": {
+                    "appName": "homelab-api-dev",
+                    "syncStatus": "unknown",
+                    "healthStatus": "unknown",
+                    "revision": None,
+                },
+                "drift": {
+                    "isDrifted": False,
+                    "expectedRevision": None,
+                    "liveRevision": None,
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_live_service_runtime_rows",
+        lambda _row: [
+            {
+                "serviceId": "homelab-api",
+                "env": "dev",
+                "commitSha": None,
+                "imageRef": "ghcr.io/example/homelab-api:v2.0.0",
+                "deployedAt": "2026-03-07T10:00:00Z",
+                "argo": {
+                    "appName": "homelab-api-dev",
+                    "syncStatus": "synced",
+                    "healthStatus": "healthy",
+                    "revision": "def456",
+                },
+                "drift": {
+                    "isDrifted": False,
+                    "expectedRevision": None,
+                    "liveRevision": "def456",
+                },
+            }
+        ],
+    )
+
+    response = client.get(
+        "/services/homelab-api?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["version"] == "v2.0.0"
+    assert body["health"] == "healthy"
+    assert body["sync"] == "synced"
+
+
 def test_service_deployments_endpoint_returns_release_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-07T00:00:00+00:00",
+            }
+        ],
+    )
     monkeypatch.setattr(
         "app.main._load_release_rows_for_service",
         lambda *_args, **_kwargs: [
@@ -1235,6 +1309,7 @@ def test_service_deployments_endpoint_returns_release_rows(monkeypatch) -> None:
             }
         ],
     )
+    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
 
     response = client.get(
         "/services/homelab-api/deployments?env=dev",
@@ -1248,6 +1323,83 @@ def test_service_deployments_endpoint_returns_release_rows(monkeypatch) -> None:
     assert body["deployments"][0]["version"] == "v1.2.3"
     assert body["deployments"][0]["status"] == "healthy"
     assert body["deployments"][0]["deployedAt"] == "2026-03-06T12:00:00Z"
+
+
+def test_service_deployments_endpoint_falls_back_to_live_runtime_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-07T00:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_release_rows_for_service",
+        lambda *_args, **_kwargs: [
+            {
+                "serviceId": "homelab-api",
+                "env": "dev",
+                "commitSha": None,
+                "imageRef": None,
+                "deployedAt": None,
+                "argo": {
+                    "appName": "homelab-api-dev",
+                    "syncStatus": "unknown",
+                    "healthStatus": "unknown",
+                    "revision": None,
+                },
+                "drift": {
+                    "isDrifted": False,
+                    "expectedRevision": None,
+                    "liveRevision": None,
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_live_service_runtime_rows",
+        lambda _row: [
+            {
+                "serviceId": "homelab-api",
+                "env": "dev",
+                "commitSha": None,
+                "imageRef": "ghcr.io/example/homelab-api:v2.0.0",
+                "deployedAt": "2026-03-07T10:00:00Z",
+                "argo": {
+                    "appName": "homelab-api-dev",
+                    "syncStatus": "synced",
+                    "healthStatus": "healthy",
+                    "revision": "def456",
+                },
+                "drift": {
+                    "isDrifted": False,
+                    "expectedRevision": None,
+                    "liveRevision": "def456",
+                },
+            }
+        ],
+    )
+
+    response = client.get(
+        "/services/homelab-api/deployments?env=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["deployments"]) == 1
+    assert body["deployments"][0]["version"] == "v2.0.0"
+    assert body["deployments"][0]["status"] == "healthy"
+    assert body["deployments"][0]["deployedAt"] == "2026-03-07T10:00:00Z"
 
 
 def test_releases_endpoint_returns_traceability_rows(monkeypatch) -> None:

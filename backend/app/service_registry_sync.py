@@ -257,6 +257,24 @@ def _build_records_from_services_and_deployments(
         if not isinstance(selector, dict):
             selector = {}
 
+        component = str(
+            labels.get("app.kubernetes.io/component")
+            or selector.get("app.kubernetes.io/component")
+            or ""
+        ).strip().lower()
+        ports = spec.get("ports", [])
+        if not isinstance(ports, list):
+            ports = []
+
+        # Canonical live service rows exclude backing Postgres services so app ids
+        # do not collapse onto database service names such as homelab-api-postgres.
+        if component == "postgres" or any(
+            isinstance(port, dict)
+            and str(port.get("name") or "").strip().lower() == "postgres"
+            for port in ports
+        ):
+            continue
+
         app_label_raw = (
             labels.get("app.kubernetes.io/name")
             or selector.get("app.kubernetes.io/name")

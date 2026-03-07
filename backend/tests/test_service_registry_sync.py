@@ -133,6 +133,74 @@ def test_build_records_from_services_and_deployments_prefers_service_rows() -> N
     assert row.argo_app_name == "homelab-web-dev"
 
 
+def test_build_records_from_services_and_deployments_skips_backing_postgres_services() -> None:
+    services = [
+        {
+            "metadata": {
+                "name": "homelab-api",
+                "namespace": "homelab-api",
+                "labels": {
+                    "app.kubernetes.io/name": "homelab-api",
+                    "app.kubernetes.io/component": "api",
+                },
+            },
+            "spec": {
+                "selector": {
+                    "app.kubernetes.io/name": "homelab-api",
+                    "app.kubernetes.io/component": "api",
+                },
+                "ports": [{"name": "http"}],
+            },
+        },
+        {
+            "metadata": {
+                "name": "homelab-api-postgres",
+                "namespace": "homelab-api",
+                "labels": {
+                    "app.kubernetes.io/name": "homelab-api",
+                    "app.kubernetes.io/component": "postgres",
+                },
+            },
+            "spec": {
+                "selector": {
+                    "app.kubernetes.io/name": "homelab-api",
+                    "app.kubernetes.io/component": "postgres",
+                },
+                "ports": [{"name": "postgres"}],
+            },
+        },
+    ]
+    deployments = [
+        {
+            "metadata": {
+                "name": "homelab-api",
+                "namespace": "homelab-api",
+                "labels": {
+                    "app.kubernetes.io/name": "homelab-api",
+                    "app.kubernetes.io/component": "api",
+                },
+                "annotations": {},
+            }
+        }
+    ]
+    synced_at = datetime(2026, 3, 7, tzinfo=timezone.utc)
+
+    rows = service_registry_sync._build_records_from_services_and_deployments(
+        services=services,
+        deployments=deployments,
+        env_name="dev",
+        source_ref="kubernetes_api",
+        synced_at=synced_at,
+        argo_by_namespace={"homelab-api": "homelab-api-dev"},
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.service_id == "homelab-api"
+    assert row.service_name == "homelab-api"
+    assert row.namespace == "homelab-api"
+
+
 def test_sync_service_registry_collects_source_failures(monkeypatch) -> None:
     monkeypatch.setattr(
         service_registry_sync,

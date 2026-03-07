@@ -51,7 +51,7 @@ from app.release_traceability import (
     load_argo_metadata_rows,
     load_ci_metadata_rows,
 )
-from app.service_registry_sync import sync_service_registry_from_cluster
+from app.service_registry_sync import _kube_get_json, sync_service_registry_from_cluster
 from app.observability_cache import TTLCache
 from app.observability_config import (
     escape_promql_regex_literal,
@@ -664,7 +664,7 @@ def _resolve_service_monitoring_metadata(service_id: str) -> tuple[str, str]:
     if not rows:
         return "default", service_id
 
-    selected = rows[0]
+    selected = _select_preferred_service_row(service_id, rows, preferred_env) or rows[0]
     namespace = str(selected.get("namespace") or "").strip() or "default"
     app_label = str(selected.get("app_label") or "").strip() or service_id
     return namespace, app_label
@@ -682,6 +682,324 @@ def _extract_version_from_image_ref(image_ref: str | None) -> str | None:
     if last_colon > last_slash:
         return trimmed[last_colon + 1 :] or trimmed
     return trimmed
+
+
+def _select_preferred_service_row(
+    service_id: str,
+    rows: list[dict[str, str | None]],
+    preferred_env: str | None,
+) -> dict[str, str | None] | None:
+    if not rows:
+        return None
+
+    effective_env = preferred_env or os.getenv("PORTAL_ENV", "dev")
+
+    def _rank(row: dict[str, str | None]) -> tuple[int, int, int, str]:
+        row_env = str(row.get("env") or "").strip()
+        service_name = str(row.get("service_name") or "").strip()
+        app_label = str(row.get("app_label") or "").strip()
+        return (
+            0 if row_env == effective_env else 1,
+            0 if service_name == service_id or app_label == service_id else 1,
+            1 if "postgres" in service_name.lower() else 0,
+            service_name,
+        )
+
+    return sorted(rows, key=_rank)[0]
+
+
+def _normalize_live_sync_status(value: object) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.strip().lower().replace("-", "_")
+    if normalized == "outofsync":
+        normalized = "out_of_sync"
+    if normalized in {"synced", "out_of_sync"}:
+        return normalized
+    return "unknown"
+
+
+def _normalize_live_health_status(value: object) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.strip().lower()
+    if normalized == "healthy":
+        return "healthy"
+    if normalized in {"degraded", "progressing"}:
+        return "degraded"
+    return "unknown"
+
+
+def _release_row_has_meaningful_metadata(row: dict) -> bool:
+    for key in ("commitSha", "imageRef", "deployedAt"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+
+    argo = row.get("argo")
+    if not isinstance(argo, dict):
+        return False
+
+    for key in ("syncStatus", "healthStatus", "revision", "liveRevision", "imageRef"):
+        value = argo.get(key)
+        if isinstance(value, str) and value.strip() and value.strip().lower() != "unknown":
+            return True
+
+    return False
+
+
+def _coalesce_service_status(primary: object, fallback: object) -> str | None:
+    primary_value = primary.strip() if isinstance(primary, str) else None
+    fallback_value = fallback.strip() if isinstance(fallback, str) else None
+    if primary_value and primary_value.lower() != "unknown":
+        return primary_value
+    if fallback_value:
+        return fallback_value
+    return primary_value or fallback_value
+
+
+def _list_live_deployments_for_service(
+    service_row: dict[str, str | None],
+) -> list[dict[str, object]]:
+    namespace = str(service_row.get("namespace") or "").strip()
+    app_label = str(service_row.get("app_label") or "").strip()
+    service_id = str(service_row.get("service_id") or "").strip()
+    if not namespace or not app_label:
+        return []
+
+    try:
+        payload = _kube_get_json(f"/apis/apps/v1/namespaces/{namespace}/deployments")
+    except Exception as exc:  # pragma: no cover - live fallback only
+        logger.warning(
+            "service_runtime_deployments_unavailable namespace=%s service_id=%s error=%s",
+            namespace,
+            service_id,
+            exc,
+        )
+        return []
+
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return []
+
+    matched: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata", {})
+        if not isinstance(metadata, dict):
+            continue
+        labels = metadata.get("labels", {})
+        if not isinstance(labels, dict):
+            labels = {}
+        deployment_name = str(metadata.get("name") or "").strip()
+        deployment_app = str(
+            labels.get("app.kubernetes.io/name")
+            or labels.get("app")
+            or ""
+        ).strip()
+        component = str(labels.get("app.kubernetes.io/component") or "").strip().lower()
+        if component == "postgres":
+            continue
+        if deployment_name in {service_id, app_label} or deployment_app in {service_id, app_label}:
+            matched.append(item)
+
+    return sorted(
+        matched,
+        key=lambda item: str(item.get("metadata", {}).get("creationTimestamp") or ""),
+        reverse=True,
+    )
+
+
+def _load_live_argo_status_for_service(
+    service_row: dict[str, str | None],
+) -> dict[str, str | None]:
+    app_name = str(service_row.get("argo_app_name") or "").strip()
+    if not app_name:
+        return {}
+
+    argo_namespace = os.getenv("ARGOCD_NAMESPACE", "argocd")
+    try:
+        payload = _kube_get_json(
+            f"/apis/argoproj.io/v1alpha1/namespaces/{argo_namespace}/applications/{app_name}"
+        )
+    except Exception as exc:  # pragma: no cover - live fallback only
+        logger.warning(
+            "service_runtime_argo_unavailable app=%s namespace=%s error=%s",
+            app_name,
+            argo_namespace,
+            exc,
+        )
+        return {}
+
+    status_payload = payload.get("status", {})
+    if not isinstance(status_payload, dict):
+        status_payload = {}
+    sync_payload = status_payload.get("sync", {})
+    if not isinstance(sync_payload, dict):
+        sync_payload = {}
+    health_payload = status_payload.get("health", {})
+    if not isinstance(health_payload, dict):
+        health_payload = {}
+    operation_state = status_payload.get("operationState", {})
+    if not isinstance(operation_state, dict):
+        operation_state = {}
+
+    return {
+        "appName": app_name,
+        "syncStatus": _normalize_live_sync_status(sync_payload.get("status")),
+        "healthStatus": _normalize_live_health_status(health_payload.get("status")),
+        "revision": sync_payload.get("revision")
+        if isinstance(sync_payload.get("revision"), str)
+        else None,
+        "deployedAt": operation_state.get("finishedAt")
+        if isinstance(operation_state.get("finishedAt"), str)
+        else status_payload.get("reconciledAt")
+        if isinstance(status_payload.get("reconciledAt"), str)
+        else None,
+    }
+
+
+def _extract_live_deployment_image_ref(deployment: dict[str, object]) -> str | None:
+    spec = deployment.get("spec", {})
+    if not isinstance(spec, dict):
+        return None
+    template = spec.get("template", {})
+    if not isinstance(template, dict):
+        return None
+    template_spec = template.get("spec", {})
+    if not isinstance(template_spec, dict):
+        return None
+    containers = template_spec.get("containers", [])
+    if not isinstance(containers, list):
+        return None
+
+    preferred: str | None = None
+    fallback: str | None = None
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        image = container.get("image")
+        if not isinstance(image, str) or not image.strip():
+            continue
+        if fallback is None:
+            fallback = image.strip()
+        name = str(container.get("name") or "").strip()
+        if name == "api":
+            preferred = image.strip()
+            break
+    return preferred or fallback
+
+
+def _extract_live_deployment_health(deployment: dict[str, object]) -> str:
+    spec = deployment.get("spec", {})
+    if not isinstance(spec, dict):
+        spec = {}
+    status_payload = deployment.get("status", {})
+    if not isinstance(status_payload, dict):
+        status_payload = {}
+
+    desired = int(spec.get("replicas") or 0)
+    ready = int(status_payload.get("readyReplicas") or 0)
+    available = int(status_payload.get("availableReplicas") or 0)
+
+    if desired > 0 and ready >= desired and available >= desired:
+        return "healthy"
+    if ready > 0 or available > 0:
+        return "degraded"
+    return "unknown"
+
+
+def _extract_live_deployment_timestamp(deployment: dict[str, object]) -> str | None:
+    status_payload = deployment.get("status", {})
+    if not isinstance(status_payload, dict):
+        status_payload = {}
+    conditions = status_payload.get("conditions", [])
+    if isinstance(conditions, list):
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                continue
+            updated = condition.get("lastUpdateTime")
+            if isinstance(updated, str) and updated.strip():
+                return updated
+            transitioned = condition.get("lastTransitionTime")
+            if isinstance(transitioned, str) and transitioned.strip():
+                return transitioned
+
+    metadata = deployment.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    created_at = metadata.get("creationTimestamp")
+    if isinstance(created_at, str) and created_at.strip():
+        return created_at
+    return None
+
+
+def _load_live_service_runtime_rows(
+    service_row: dict[str, str | None],
+) -> list[dict[str, object]]:
+    deployments = _list_live_deployments_for_service(service_row)
+    argo = _load_live_argo_status_for_service(service_row)
+    service_id = str(service_row.get("service_id") or "").strip()
+    env = str(service_row.get("env") or "").strip()
+
+    rows: list[dict[str, object]] = []
+    for deployment in deployments:
+        deployment_health = _extract_live_deployment_health(deployment)
+        rows.append(
+            {
+                "serviceId": service_id,
+                "env": env,
+                "commitSha": None,
+                "imageRef": _extract_live_deployment_image_ref(deployment),
+                "deployedAt": _extract_live_deployment_timestamp(deployment) or argo.get("deployedAt"),
+                "argo": {
+                    "appName": argo.get("appName"),
+                    "syncStatus": argo.get("syncStatus"),
+                    "healthStatus": _coalesce_service_status(
+                        argo.get("healthStatus"),
+                        deployment_health,
+                    ),
+                    "revision": argo.get("revision"),
+                },
+                "drift": {
+                    "isDrifted": False,
+                    "expectedRevision": None,
+                    "liveRevision": argo.get("revision"),
+                    "expectedImageRef": None,
+                    "liveImageRef": _extract_live_deployment_image_ref(deployment),
+                },
+            }
+        )
+
+    if rows:
+        return rows
+
+    if argo:
+        return [
+            {
+                "serviceId": service_id,
+                "env": env,
+                "commitSha": None,
+                "imageRef": None,
+                "deployedAt": argo.get("deployedAt"),
+                "argo": {
+                    "appName": argo.get("appName"),
+                    "syncStatus": argo.get("syncStatus"),
+                    "healthStatus": argo.get("healthStatus"),
+                    "revision": argo.get("revision"),
+                },
+                "drift": {
+                    "isDrifted": False,
+                    "expectedRevision": None,
+                    "liveRevision": argo.get("revision"),
+                    "expectedImageRef": None,
+                    "liveImageRef": None,
+                },
+            }
+        ]
+
+    return []
 
 
 def _load_release_rows_for_service(service_id: str, env: str | None = None) -> list[dict]:
@@ -1313,13 +1631,20 @@ def get_service(
         )
 
     preferred_env = env or os.getenv("PORTAL_ENV", "dev")
-    selected = next(
-        (row for row in rows if row["env"] == preferred_env),
-        rows[0],
-    )
+    selected = _select_preferred_service_row(service_id, rows, preferred_env) or rows[0]
     release_rows = _sort_release_rows_by_deployed_at(_load_release_rows_for_service(service_id, env))
-    release = release_rows[0] if release_rows else {}
+    release = next((row for row in release_rows if _release_row_has_meaningful_metadata(row)), {})
+    live_rows = _sort_release_rows_by_deployed_at(_load_live_service_runtime_rows(selected))
+    live_release = next((row for row in live_rows if _release_row_has_meaningful_metadata(row)), {})
     argo = release.get("argo") if isinstance(release.get("argo"), dict) else {}
+    live_argo = live_release.get("argo") if isinstance(live_release.get("argo"), dict) else {}
+    image_ref = (
+        release.get("imageRef")
+        if isinstance(release.get("imageRef"), str) and release.get("imageRef")
+        else live_release.get("imageRef")
+        if isinstance(live_release.get("imageRef"), str)
+        else None
+    )
 
     return ServiceDetailResponse(
         id=str(selected["service_id"]),
@@ -1328,11 +1653,9 @@ def get_service(
         env=str(selected["env"]),
         appLabel=str(selected["app_label"]),
         argoAppName=selected["argo_app_name"] if isinstance(selected["argo_app_name"], str) else None,
-        version=_extract_version_from_image_ref(
-            release.get("imageRef") if isinstance(release.get("imageRef"), str) else None
-        ),
-        health=argo.get("healthStatus") if isinstance(argo.get("healthStatus"), str) else None,
-        sync=argo.get("syncStatus") if isinstance(argo.get("syncStatus"), str) else None,
+        version=_extract_version_from_image_ref(image_ref if isinstance(image_ref, str) else None),
+        health=_coalesce_service_status(argo.get("healthStatus"), live_argo.get("healthStatus")),
+        sync=_coalesce_service_status(argo.get("syncStatus"), live_argo.get("syncStatus")),
         source=str(selected["source"]),
         sourceRef=selected["source_ref"] if isinstance(selected["source_ref"], str) else None,
         lastSyncedAt=selected["last_synced_at"] if isinstance(selected["last_synced_at"], str) else None,
@@ -1349,7 +1672,15 @@ def get_service_deployments(
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceDeploymentsResponse:
+    service_rows = _load_service_rows(service_id=service_id, env=env)
+    selected = _select_preferred_service_row(
+        service_id,
+        service_rows,
+        env or os.getenv("PORTAL_ENV", "dev"),
+    )
     rows = _sort_release_rows_by_deployed_at(_load_release_rows_for_service(service_id, env))
+    if selected and not any(_release_row_has_meaningful_metadata(row) for row in rows):
+        rows = _sort_release_rows_by_deployed_at(_load_live_service_runtime_rows(selected))
 
     deployments = [
         ServiceDeploymentResponse(
