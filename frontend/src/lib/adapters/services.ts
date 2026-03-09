@@ -1,4 +1,13 @@
-import { getProjects, getServices, isApiRequestError, type Project, type ServiceRegistryApiRow } from '@/lib/api'
+import {
+  getProjects,
+  getService,
+  getServiceDeployments,
+  getServices,
+  isApiRequestError,
+  type Project,
+  type ServiceRegistryApiRow,
+} from '@/lib/api'
+import { getServiceMetricsSummary } from '@/lib/adapters/service-metrics'
 import { createServiceIdentity, normalizeServiceId, parseNamespaceFromInternalUrl, type ServiceIdentity } from '@/lib/service-identity'
 
 export type ServiceHealth = 'healthy' | 'degraded' | 'unknown'
@@ -196,15 +205,79 @@ function mergeProjectMetadata(services: ServiceRegistryItem[], projects: Project
   return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
+function cloneService(service: ServiceRegistryItem): ServiceRegistryItem {
+  return {
+    ...service,
+    environments: [...service.environments],
+    internalUrls: service.internalUrls ? [...service.internalUrls] : undefined,
+  }
+}
+
+async function enrichServicesWithLiveMetadata(services: ServiceRegistryItem[]) {
+  const enriched = await Promise.all(
+    services.map(async (service) => {
+      const next = cloneService(service)
+      const [detailResult, deploymentsResult, metrics24Result, metrics7Result] = await Promise.allSettled([
+        getService(service.id),
+        getServiceDeployments(service.id),
+        getServiceMetricsSummary(service.id, '24h'),
+        getServiceMetricsSummary(service.id, '7d'),
+      ])
+
+      if (detailResult.status === 'fulfilled') {
+        const details = detailResult.value
+        const nextHealth = normalizeHealthStatus(details.health)
+        const nextSync = normalizeSyncStatus(details.sync)
+        if (nextHealth !== 'unknown') {
+          next.health = nextHealth
+        }
+        if (nextSync !== 'unknown') {
+          next.sync = nextSync
+        }
+        if (!next.namespace && details.namespace) {
+          next.namespace = details.namespace
+        }
+        if (!next.appLabel && details.appLabel) {
+          next.appLabel = details.appLabel
+        }
+        if (!next.argoAppName && details.argoAppName) {
+          next.argoAppName = details.argoAppName
+        }
+      }
+
+      if (deploymentsResult.status === 'fulfilled') {
+        const latest = deploymentsResult.value.deployments.find((deployment) => deployment.deployedAt || deployment.version || deployment.status)
+        if (latest?.deployedAt) {
+          next.lastDeployAt = latest.deployedAt
+        }
+      }
+
+      if (metrics24Result.status === 'fulfilled') {
+        next.uptime24hPct = metrics24Result.value.uptimePct
+        next.metricsLastRefreshedAt = metrics24Result.value.generatedAt ?? next.metricsLastRefreshedAt
+      }
+
+      if (metrics7Result.status === 'fulfilled') {
+        next.uptime7dPct = metrics7Result.value.uptimePct
+        next.metricsLastRefreshedAt = next.metricsLastRefreshedAt ?? metrics7Result.value.generatedAt
+      }
+
+      return next
+    }),
+  )
+
+  return enriched.sort((a, b) => a.name.localeCompare(b.name))
+}
+
 export async function getServicesRegistry() {
   try {
     const servicesResponse = await getServices()
     const liveServices = adaptApiServices(servicesResponse.services)
     try {
       const projectsResponse = await getProjects()
-      return mergeProjectMetadata(liveServices, projectsResponse.projects)
+      return enrichServicesWithLiveMetadata(mergeProjectMetadata(liveServices, projectsResponse.projects))
     } catch {
-      return liveServices
+      return enrichServicesWithLiveMetadata(liveServices)
     }
   } catch (error) {
     if (!isApiRequestError(error) || !serviceFallbackStatuses.has(error.status)) {
@@ -216,7 +289,7 @@ export async function getServicesRegistry() {
     const response = await getProjects()
     const fromApi = adaptProjectsToServices(response.projects)
     if (fromApi.length > 0) {
-      return fromApi
+      return enrichServicesWithLiveMetadata(fromApi)
     }
     throw new Error('Live services API is unavailable and projects fallback returned no services.')
   } catch (error) {
