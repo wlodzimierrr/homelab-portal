@@ -68,6 +68,7 @@ metrics_summary_cache = TTLCache()
 timeline_cache = TTLCache()
 logs_quickview_cache = TTLCache()
 alerts_cache = TTLCache()
+deployment_history_cache = TTLCache()
 metrics_namespace_label = os.getenv("OBS_METRICS_NAMESPACE", os.getenv("POD_NAMESPACE", "default"))
 metrics_app_label = os.getenv("OBS_METRICS_APP_LABEL", "homelab-api")
 http_requests_total = Counter(
@@ -87,6 +88,7 @@ def clear_observability_caches_for_tests() -> None:
     timeline_cache.clear()
     logs_quickview_cache.clear()
     alerts_cache.clear()
+    deployment_history_cache.clear()
 
 
 @app.middleware("http")
@@ -217,6 +219,9 @@ class ServiceDeploymentResponse(BaseModel):
     version: str | None = None
     status: str | None = None
     deployed_at: str | None = Field(default=None, alias="deployedAt")
+    error_rate_pct: dict[str, float] | None = Field(default=None, alias="errorRatePct")
+    p95_latency_ms: dict[str, float] | None = Field(default=None, alias="p95LatencyMs")
+    availability_pct: dict[str, float] | None = Field(default=None, alias="availabilityPct")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -1188,6 +1193,176 @@ def _registry_warning_after_minutes(stale_after_minutes: int) -> int:
     return min(default_warning, max(1, stale_after_minutes - 1))
 
 
+def _deployment_history_cache_ttl_seconds() -> int:
+    raw = os.getenv("OBS_DEPLOYMENT_HISTORY_CACHE_TTL_SECONDS", "60")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 60
+    if value < 0:
+        return 60
+    return min(value, 300)
+
+
+def _deployment_comparison_window_token() -> str:
+    raw = str(os.getenv("OBS_DEPLOYMENT_COMPARISON_WINDOW", "1h") or "").strip()
+    if not raw:
+        return "1h"
+    try:
+        parse_range(raw)
+    except ValueError:
+        return "1h"
+    return raw
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    try:
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _build_metric_snapshot(before: float | None, after: float | None) -> dict[str, float] | None:
+    snapshot: dict[str, float] = {}
+    if before is not None:
+        snapshot["before"] = round(before, 3)
+    if after is not None:
+        snapshot["after"] = round(after, 3)
+    if before is not None and after is not None:
+        snapshot["delta"] = round(after - before, 3)
+    return snapshot or None
+
+
+def _query_prometheus_comparison_snapshot(
+    *,
+    queries: tuple[str, ...],
+    metric_name: str,
+    start: datetime,
+    end: datetime,
+    step_seconds: int,
+    correlation_id: str,
+) -> dict[str, float] | None:
+    for index, query in enumerate(queries):
+        try:
+            points = _query_prometheus_range(
+                query,
+                f"{metric_name}_{index}",
+                start=start,
+                end=end,
+                step_seconds=step_seconds,
+                correlation_id=correlation_id,
+            )
+        except Exception as exc:  # pragma: no cover - optional comparison only
+            logger.warning(
+                "deployment_history_metric_unavailable metric=%s correlation_id=%s query_index=%s error=%s",
+                metric_name,
+                correlation_id,
+                index,
+                exc,
+            )
+            continue
+        if not points:
+            continue
+
+        ordered_values = [value for _timestamp, value in sorted(points.items())]
+        if not ordered_values:
+            continue
+        before = ordered_values[0]
+        after = ordered_values[-1] if len(ordered_values) > 1 else None
+        snapshot = _build_metric_snapshot(before, after)
+        if snapshot is not None:
+            return snapshot
+    return None
+
+
+def _load_deployment_metric_snapshots(
+    service_row: dict[str, str | None] | None,
+    release_row: dict[str, object],
+) -> dict[str, dict[str, float]]:
+    if not service_row:
+        return {}
+
+    namespace = str(service_row.get("namespace") or "").strip()
+    app_label = str(service_row.get("app_label") or "").strip()
+    service_id = str(service_row.get("service_id") or "").strip()
+    env = str(service_row.get("env") or "").strip()
+    deployed_at = _parse_iso_datetime(release_row.get("deployedAt"))
+    if not namespace or not app_label or not service_id or deployed_at is None:
+        return {}
+
+    comparison_window_token = _deployment_comparison_window_token()
+    comparison_window = parse_range(comparison_window_token)
+    comparison_end = deployed_at + comparison_window
+    if comparison_end > now_utc():
+        return {}
+
+    cache_key = (
+        "service_deployment_metrics",
+        service_id,
+        env,
+        namespace,
+        app_label,
+        deployed_at.isoformat(),
+        comparison_window_token,
+    )
+
+    def _load() -> dict[str, dict[str, float]]:
+        config = load_observability_config()
+        queries = _build_service_metrics_queries(
+            namespace=namespace,
+            app_label=app_label,
+            selected_range=comparison_window_token,
+            config=config,
+        )
+        correlation_id = str(uuid4())
+        step_seconds = int(comparison_window.total_seconds())
+        snapshots = {
+            "errorRatePct": _query_prometheus_comparison_snapshot(
+                queries=queries["errorRatePct"],
+                metric_name="deployment_error_rate_pct",
+                start=deployed_at,
+                end=comparison_end,
+                step_seconds=step_seconds,
+                correlation_id=correlation_id,
+            ),
+            "p95LatencyMs": _query_prometheus_comparison_snapshot(
+                queries=queries["p95LatencyMs"],
+                metric_name="deployment_p95_latency_ms",
+                start=deployed_at,
+                end=comparison_end,
+                step_seconds=step_seconds,
+                correlation_id=correlation_id,
+            ),
+            "availabilityPct": _query_prometheus_comparison_snapshot(
+                queries=queries["uptimePct"],
+                metric_name="deployment_availability_pct",
+                start=deployed_at,
+                end=comparison_end,
+                step_seconds=step_seconds,
+                correlation_id=correlation_id,
+            ),
+        }
+        return {
+            key: value
+            for key, value in snapshots.items()
+            if value is not None
+        }
+
+    return deployment_history_cache.get_or_set(
+        key=cache_key,
+        ttl_seconds=_deployment_history_cache_ttl_seconds(),
+        loader=_load,
+    )
+
+
 def _query_prometheus_scalar(
     query: str,
     metric_name: str,
@@ -1814,25 +1989,30 @@ def get_service_deployments(
     if selected and not any(_release_row_has_meaningful_metadata(row) for row in rows):
         rows = _sort_release_rows_by_deployed_at(_load_live_service_runtime_rows(selected))
 
-    deployments = [
-        ServiceDeploymentResponse(
-            id=str(row.get("commitSha") or row.get("deployedAt") or f"{service_id}:{index}"),
-            version=_extract_version_from_image_ref(
-                row.get("imageRef") if isinstance(row.get("imageRef"), str) else None
-            ),
-            status=(
-                row["argo"].get("healthStatus")
-                if isinstance(row.get("argo"), dict)
-                and isinstance(row["argo"].get("healthStatus"), str)
-                else row["argo"].get("syncStatus")
-                if isinstance(row.get("argo"), dict)
-                and isinstance(row["argo"].get("syncStatus"), str)
-                else None
-            ),
-            deployedAt=row.get("deployedAt") if isinstance(row.get("deployedAt"), str) else None,
+    deployments: list[ServiceDeploymentResponse] = []
+    for index, row in enumerate(rows):
+        metric_snapshots = _load_deployment_metric_snapshots(selected, row)
+        deployments.append(
+            ServiceDeploymentResponse(
+                id=str(row.get("commitSha") or row.get("deployedAt") or f"{service_id}:{index}"),
+                version=_extract_version_from_image_ref(
+                    row.get("imageRef") if isinstance(row.get("imageRef"), str) else None
+                ),
+                status=(
+                    row["argo"].get("healthStatus")
+                    if isinstance(row.get("argo"), dict)
+                    and isinstance(row["argo"].get("healthStatus"), str)
+                    else row["argo"].get("syncStatus")
+                    if isinstance(row.get("argo"), dict)
+                    and isinstance(row["argo"].get("syncStatus"), str)
+                    else None
+                ),
+                deployedAt=row.get("deployedAt") if isinstance(row.get("deployedAt"), str) else None,
+                errorRatePct=metric_snapshots.get("errorRatePct"),
+                p95LatencyMs=metric_snapshots.get("p95LatencyMs"),
+                availabilityPct=metric_snapshots.get("availabilityPct"),
+            )
         )
-        for index, row in enumerate(rows)
-    ]
 
     return ServiceDeploymentsResponse(deployments=deployments)
 

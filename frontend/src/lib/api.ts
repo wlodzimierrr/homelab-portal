@@ -107,11 +107,20 @@ export interface ServiceEndpoint {
   url: string
 }
 
+export interface DeploymentMetricSnapshot {
+  before?: number
+  after?: number
+  delta?: number
+}
+
 export interface ServiceDeployment {
   id: string
   version?: string
   status?: string
   deployedAt?: string
+  errorRatePct?: DeploymentMetricSnapshot
+  p95LatencyMs?: DeploymentMetricSnapshot
+  availabilityPct?: DeploymentMetricSnapshot
 }
 
 export interface ReleaseTraceabilityArgoState {
