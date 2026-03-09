@@ -57,6 +57,7 @@ from app.observability_cache import TTLCache
 from app.observability_config import (
     escape_promql_regex_literal,
     load_observability_config,
+    parse_duration_token,
     render_query_template,
 )
 
@@ -1209,7 +1210,7 @@ def _deployment_comparison_window_token() -> str:
     if not raw:
         return "1h"
     try:
-        parse_range(raw)
+        parse_duration_token(raw)
     except ValueError:
         return "1h"
     return raw
@@ -1299,7 +1300,7 @@ def _load_deployment_metric_snapshots(
         return {}
 
     comparison_window_token = _deployment_comparison_window_token()
-    comparison_window = parse_range(comparison_window_token)
+    comparison_window = parse_duration_token(comparison_window_token)
     comparison_end = deployed_at + comparison_window
     if comparison_end > now_utc():
         return {}
