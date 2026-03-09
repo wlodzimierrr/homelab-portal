@@ -48,6 +48,7 @@ from app.gitops_project_sync import sync_project_registry_from_gitops
 from app.release_traceability import (
     build_release_join_diagnostics,
     build_release_traceability_rows,
+    compute_is_drifted,
     load_argo_metadata_rows,
     load_ci_metadata_rows,
 )
@@ -1031,6 +1032,137 @@ def _sort_release_rows_by_deployed_at(rows: list[dict]) -> list[dict]:
         key=lambda row: str(row.get("deployedAt") or ""),
         reverse=True,
     )
+
+
+def _coalesce_release_string(
+    primary: object,
+    fallback: object,
+    *,
+    ignore_unknown: bool = False,
+) -> str | None:
+    for value in (primary, fallback):
+        if not isinstance(value, str):
+            continue
+        candidate = value.strip()
+        if not candidate:
+            continue
+        if ignore_unknown and candidate.lower() == "unknown":
+            continue
+        return candidate
+    return None
+
+
+def _enrich_release_row_with_live_runtime(
+    row: dict[str, object],
+    service_row: dict[str, str | None] | None,
+) -> dict[str, object]:
+    base_argo = row.get("argo") if isinstance(row.get("argo"), dict) else {}
+    base_drift = row.get("drift") if isinstance(row.get("drift"), dict) else {}
+
+    live_release: dict[str, object] = {}
+    if service_row:
+        live_rows = _sort_release_rows_by_deployed_at(_load_live_service_runtime_rows(service_row))
+        live_release = next((item for item in live_rows if _release_row_has_meaningful_metadata(item)), {})
+
+    live_argo = live_release.get("argo") if isinstance(live_release.get("argo"), dict) else {}
+    live_drift = live_release.get("drift") if isinstance(live_release.get("drift"), dict) else {}
+
+    revision = _coalesce_release_string(
+        base_argo.get("revision"),
+        _coalesce_release_string(
+            live_argo.get("revision"),
+            live_drift.get("liveRevision"),
+            ignore_unknown=True,
+        ),
+        ignore_unknown=True,
+    )
+    commit_sha = _coalesce_release_string(row.get("commitSha"), revision, ignore_unknown=True)
+    image_ref = _coalesce_release_string(
+        row.get("imageRef"),
+        live_release.get("imageRef"),
+        ignore_unknown=True,
+    )
+    deployed_at = _coalesce_release_string(
+        row.get("deployedAt"),
+        live_release.get("deployedAt"),
+        ignore_unknown=True,
+    )
+    app_name = _coalesce_release_string(
+        base_argo.get("appName"),
+        live_argo.get("appName"),
+        ignore_unknown=True,
+    ) or "unknown"
+    sync_status = _coalesce_service_status(base_argo.get("syncStatus"), live_argo.get("syncStatus")) or "unknown"
+    health_status = _coalesce_service_status(base_argo.get("healthStatus"), live_argo.get("healthStatus")) or "unknown"
+    expected_revision = _coalesce_release_string(
+        base_drift.get("expectedRevision"),
+        live_drift.get("expectedRevision"),
+        ignore_unknown=True,
+    )
+    live_revision = _coalesce_release_string(
+        base_drift.get("liveRevision"),
+        revision,
+        ignore_unknown=True,
+    )
+
+    return {
+        **row,
+        "commitSha": commit_sha,
+        "imageRef": image_ref,
+        "deployedAt": deployed_at,
+        "argo": {
+            "appName": app_name,
+            "syncStatus": sync_status,
+            "healthStatus": health_status,
+            "revision": revision,
+        },
+        "drift": {
+            **base_drift,
+            "isDrifted": bool(base_drift.get("isDrifted"))
+            or compute_is_drifted(
+                sync_status=sync_status,
+                expected_revision=expected_revision,
+                live_revision=live_revision,
+                expected_image_ref=None,
+                live_image_ref=image_ref,
+            ),
+            "expectedRevision": expected_revision,
+            "liveRevision": live_revision,
+        },
+    }
+
+
+def _enrich_release_rows_with_live_runtime(
+    rows: list[dict[str, object]],
+    *,
+    env: str | None,
+) -> list[dict[str, object]]:
+    if not rows:
+        return rows
+
+    service_rows = _load_service_rows(env=env)
+    rows_by_key: dict[tuple[str, str], list[dict[str, str | None]]] = {}
+    rows_by_id: dict[str, list[dict[str, str | None]]] = {}
+    for service_row in service_rows:
+        service_id = str(service_row.get("service_id") or "").strip()
+        service_env = str(service_row.get("env") or "").strip()
+        if not service_id:
+            continue
+        rows_by_id.setdefault(service_id, []).append(service_row)
+        if service_env:
+            rows_by_key.setdefault((service_id, service_env), []).append(service_row)
+
+    enriched: list[dict[str, object]] = []
+    for row in rows:
+        service_id = str(row.get("serviceId") or "").strip()
+        row_env = str(row.get("env") or "").strip()
+        candidates = rows_by_key.get((service_id, row_env), [])
+        if not candidates:
+            candidates = rows_by_id.get(service_id, [])
+        selected = _select_preferred_service_row(service_id, candidates, row_env)
+        enriched.append(_enrich_release_row_with_live_runtime(row, selected))
+
+    return enriched
 
 
 def _registry_stale_after_minutes() -> int:
@@ -2199,6 +2331,7 @@ def get_release_traceability(
         service_id_filter=service_id,
         limit=limit,
     )
+    rows = _enrich_release_rows_with_live_runtime(rows, env=env)
     return [
         ReleaseTraceabilityResponse(
             serviceId=row["serviceId"],

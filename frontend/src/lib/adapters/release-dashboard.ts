@@ -131,11 +131,16 @@ function adaptLiveReleaseRows(rows: ReleaseTraceabilityApiRow[]): ReleaseDashboa
       }
 
       const imageRef = typeof row.imageRef === 'string' ? row.imageRef : undefined
-      const commitSha = typeof row.commitSha === 'string' ? row.commitSha : undefined
+      const argoRevision = typeof row.argo?.revision === 'string' ? row.argo.revision : undefined
+      const commitSha =
+        typeof row.commitSha === 'string' && row.commitSha.trim()
+          ? row.commitSha
+          : argoRevision
       const expectedRevision =
         typeof row.drift?.expectedRevision === 'string' ? row.drift.expectedRevision : undefined
       const liveRevision = typeof row.drift?.liveRevision === 'string' ? row.drift.liveRevision : undefined
       const drift = row.drift?.isDrifted === true
+      const argoApp = typeof row.argo?.appName === 'string' ? row.argo.appName : undefined
 
       return {
         id: `${serviceId}:${environment}`,
@@ -147,8 +152,8 @@ function adaptLiveReleaseRows(rows: ReleaseTraceabilityApiRow[]): ReleaseDashboa
         image: imageRef,
         imageTag: imageRef?.split(':').slice(1).join(':') || imageRef,
         desiredImage: undefined,
-        argoApp: typeof row.argo?.appName === 'string' ? row.argo.appName : undefined,
-        argoAppUrl: buildArgoAppUrl(serviceId),
+        argoApp,
+        argoAppUrl: buildArgoAppUrl(argoApp || serviceId),
         sync: normalizeSyncStatus(typeof row.argo?.syncStatus === 'string' ? row.argo.syncStatus : undefined),
         health: normalizeHealthStatus(typeof row.argo?.healthStatus === 'string' ? row.argo.healthStatus : undefined),
         drift: drift || Boolean(expectedRevision && liveRevision && expectedRevision !== liveRevision),

@@ -1407,6 +1407,8 @@ def test_releases_endpoint_returns_traceability_rows(monkeypatch) -> None:
         "app.main._load_project_rows",
         lambda: [{"service_id": "homelab-api", "env": "dev"}],
     )
+    monkeypatch.setattr("app.main._load_service_rows", lambda **_kwargs: [])
+    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
     monkeypatch.setattr(
         "app.main.load_ci_metadata_rows",
         lambda: [
@@ -1458,6 +1460,8 @@ def test_releases_endpoint_supports_service_filter(monkeypatch) -> None:
             {"service_id": "homelab-web", "env": "dev"},
         ],
     )
+    monkeypatch.setattr("app.main._load_service_rows", lambda **_kwargs: [])
+    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
     monkeypatch.setattr("app.main.load_ci_metadata_rows", lambda: [])
     monkeypatch.setattr("app.main.load_argo_metadata_rows", lambda: [])
 
@@ -1471,11 +1475,78 @@ def test_releases_endpoint_supports_service_filter(monkeypatch) -> None:
     assert body[0]["serviceId"] == "homelab-web"
 
 
+def test_releases_endpoint_falls_back_to_live_runtime_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_project_rows",
+        lambda: [{"service_id": "homelab-api", "service_name": "homelab-api", "env": "dev"}],
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": None,
+            }
+        ],
+    )
+    monkeypatch.setattr("app.main.load_ci_metadata_rows", lambda: [])
+    monkeypatch.setattr("app.main.load_argo_metadata_rows", lambda: [])
+    monkeypatch.setattr(
+        "app.main._load_live_service_runtime_rows",
+        lambda _row: [
+            {
+                "serviceId": "homelab-api",
+                "env": "dev",
+                "commitSha": None,
+                "imageRef": "ghcr.io/wlodzimierrr/homelab-api:sha-live123",
+                "deployedAt": "2026-03-09T10:00:00Z",
+                "argo": {
+                    "appName": "homelab-api-dev",
+                    "syncStatus": "synced",
+                    "healthStatus": "healthy",
+                    "revision": "abcdef1234567890",
+                },
+                "drift": {
+                    "isDrifted": False,
+                    "expectedRevision": None,
+                    "liveRevision": "abcdef1234567890",
+                },
+            }
+        ],
+    )
+
+    response = client.get(
+        "/releases?env=dev&limit=50",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    row = body[0]
+    assert row["commitSha"] == "abcdef1234567890"
+    assert row["imageRef"] == "ghcr.io/wlodzimierrr/homelab-api:sha-live123"
+    assert row["deployedAt"] == "2026-03-09T10:00:00Z"
+    assert row["argo"]["appName"] == "homelab-api-dev"
+    assert row["argo"]["syncStatus"] == "synced"
+    assert row["argo"]["healthStatus"] == "healthy"
+    assert row["argo"]["revision"] == "abcdef1234567890"
+
+
 def test_release_dashboard_compat_endpoint_available(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.main._load_project_rows",
         lambda: [{"service_id": "homelab-api", "env": "dev"}],
     )
+    monkeypatch.setattr("app.main._load_service_rows", lambda **_kwargs: [])
+    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
     monkeypatch.setattr("app.main.load_ci_metadata_rows", lambda: [])
     monkeypatch.setattr("app.main.load_argo_metadata_rows", lambda: [])
 
