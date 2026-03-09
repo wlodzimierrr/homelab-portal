@@ -11,9 +11,11 @@ import { UptimeIndicator } from '@/components/uptime-indicator'
 import { Button } from '@/components/ui/button'
 import {
   getProjects,
+  getReleaseTraceability,
   getService,
   type MonitoringProviderStatus,
   type Project,
+  type ReleaseTraceabilityRow,
   type ServiceDetails,
   type ServiceDeployment,
   type ServiceEndpoint,
@@ -73,6 +75,7 @@ interface QuickLinkCardProps {
   label: string
   description: string
   href?: string
+  unavailableMessage?: string
 }
 
 interface LogsPreset {
@@ -259,13 +262,71 @@ function buildIdentityFromServiceDetails(
   })
 }
 
-function QuickLinkCard({ label, description, href }: QuickLinkCardProps) {
+function deriveVersionFromImageRef(imageRef?: string | null) {
+  if (!imageRef) {
+    return undefined
+  }
+  const trimmed = imageRef.trim()
+  if (!trimmed) {
+    return undefined
+  }
+  const parts = trimmed.split(':')
+  return parts.length > 1 ? parts.slice(1).join(':') : trimmed
+}
+
+function buildOverviewFromReleaseRows(
+  serviceId: string,
+  rows: ReleaseTraceabilityRow[],
+): Partial<ServiceOverviewData> {
+  const canonicalId = normalizeServiceId(serviceId)
+  const matchingRows = rows
+    .filter((row) => normalizeServiceId(typeof row.serviceId === 'string' ? row.serviceId : '') === canonicalId)
+    .sort((left, right) => {
+      const leftTime = left.deployedAt ? new Date(left.deployedAt).getTime() : 0
+      const rightTime = right.deployedAt ? new Date(right.deployedAt).getTime() : 0
+      return rightTime - leftTime
+    })
+
+  if (matchingRows.length === 0) {
+    return {}
+  }
+
+  const latest = matchingRows[0]
+
+  return {
+    version: deriveVersionFromImageRef(latest.imageRef) ?? 'N/A',
+    health: normalizeHealthStatus(
+      typeof latest.argo?.healthStatus === 'string' ? latest.argo.healthStatus : undefined,
+    ),
+    sync: normalizeSyncStatus(
+      typeof latest.argo?.syncStatus === 'string' ? latest.argo.syncStatus : undefined,
+    ),
+    deployments: matchingRows.map((row, index) => ({
+      id:
+        (typeof row.commitSha === 'string' && row.commitSha) ||
+        (typeof row.deployedAt === 'string' && row.deployedAt) ||
+        `${serviceId}:${index}`,
+      version: deriveVersionFromImageRef(row.imageRef),
+      status:
+        typeof row.argo?.healthStatus === 'string'
+          ? row.argo.healthStatus
+          : typeof row.argo?.syncStatus === 'string'
+            ? row.argo.syncStatus
+            : undefined,
+      deployedAt: typeof row.deployedAt === 'string' ? row.deployedAt : undefined,
+    })),
+  }
+}
+
+function QuickLinkCard({ label, description, href, unavailableMessage }: QuickLinkCardProps) {
   if (!href || href.trim() === '') {
     return (
       <div className="rounded-md border border-border bg-background p-3">
         <p className="text-sm font-medium">{label}</p>
         <p className="text-xs text-muted-foreground">{description}</p>
-        <p className="mt-2 text-xs text-muted-foreground">Unavailable due to missing monitoring URL configuration.</p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          {unavailableMessage ?? 'Unavailable due to missing URL configuration.'}
+        </p>
       </div>
     )
   }
@@ -463,10 +524,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       )
       setServiceIdentity(identity)
 
-      const [serviceResult, projectsResult, deploymentsResult] = await Promise.allSettled([
+      const [serviceResult, projectsResult, deploymentsResult, releasesResult] = await Promise.allSettled([
         getService(decodedServiceId),
         getProjects(),
         getDeploymentHistory(identity, { limit: 20 }),
+        getReleaseTraceability({ serviceId: decodedServiceId, limit: 20 }),
       ])
 
       const fallback =
@@ -478,23 +540,42 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
         setServiceIdentity(buildIdentityFromServiceDetails(decodedServiceId, serviceResult.value, identity))
       }
 
+      const releaseFallback = releasesResult.status === 'fulfilled'
+        ? buildOverviewFromReleaseRows(decodedServiceId, releasesResult.value)
+        : {}
+
       const finalOverview: ServiceOverviewData =
         serviceResult.status === 'fulfilled'
           ? {
               id: serviceResult.value.id || decodedServiceId,
               name: serviceResult.value.name || decodedServiceId,
-              version: serviceResult.value.version ?? 'N/A',
-              health: normalizeHealthStatus(serviceResult.value.health),
-              sync: normalizeSyncStatus(serviceResult.value.sync),
+              version: serviceResult.value.version ?? releaseFallback.version ?? 'N/A',
+              health:
+                normalizeHealthStatus(serviceResult.value.health) === 'unknown'
+                  ? (releaseFallback.health ?? 'unknown')
+                  : normalizeHealthStatus(serviceResult.value.health),
+              sync:
+                normalizeSyncStatus(serviceResult.value.sync) === 'unknown'
+                  ? (releaseFallback.sync ?? 'unknown')
+                  : normalizeSyncStatus(serviceResult.value.sync),
               endpoints: buildEndpointList(
                 serviceResult.value.endpoints,
                 serviceResult.value.publicUrl,
                 serviceResult.value.internalUrls,
               ),
               endpointState: 'no_routed_endpoint',
-              deployments: [],
+              deployments: releaseFallback.deployments ?? [],
             }
           : fallback
+
+      if (serviceResult.status !== 'fulfilled') {
+        finalOverview.version = releaseFallback.version ?? finalOverview.version
+        finalOverview.health = releaseFallback.health ?? finalOverview.health
+        finalOverview.sync = releaseFallback.sync ?? finalOverview.sync
+        if ((finalOverview.deployments?.length ?? 0) === 0 && releaseFallback.deployments?.length) {
+          finalOverview.deployments = releaseFallback.deployments
+        }
+      }
 
       if (finalOverview.endpoints.length === 0 && fallback.endpoints.length > 0) {
         finalOverview.endpoints = fallback.endpoints
@@ -512,6 +593,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
           status: deployment.outcome,
           deployedAt: deployment.deployedAt,
         }))
+        if (finalOverview.deployments.length === 0 && releaseFallback.deployments?.length) {
+          finalOverview.deployments = releaseFallback.deployments
+        }
+      } else if (releaseFallback.deployments?.length) {
+        finalOverview.deployments = releaseFallback.deployments
       } else {
         setDeploymentHistoryUnavailable(true)
         setDeploymentHistoryError(
@@ -574,19 +660,22 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     void loadTimeline()
   }, [loadTimeline])
 
-  const argoUrl = useMemo(() => buildArgoAppUrl(decodedServiceId), [decodedServiceId])
+  const argoUrl = useMemo(
+    () => buildArgoAppUrl(serviceIdentity.serviceId || decodedServiceId, serviceIdentity.argoAppName),
+    [decodedServiceId, serviceIdentity.argoAppName, serviceIdentity.serviceId],
+  )
   const grafanaTimeRange = '6h'
   const grafanaUrl = useMemo(
-    () => buildGrafanaDashboardUrl(decodedServiceId, grafanaTimeRange),
-    [decodedServiceId],
+    () => buildGrafanaDashboardUrl(serviceIdentity.serviceId || decodedServiceId, grafanaTimeRange),
+    [decodedServiceId, serviceIdentity.serviceId],
   )
   const latencyPanelUrl = useMemo(
-    () => buildGrafanaLatencyPanelUrl(decodedServiceId, grafanaTimeRange),
-    [decodedServiceId],
+    () => buildGrafanaLatencyPanelUrl(serviceIdentity.serviceId || decodedServiceId, grafanaTimeRange),
+    [decodedServiceId, serviceIdentity.serviceId],
   )
   const errorPanelUrl = useMemo(
-    () => buildGrafanaErrorPanelUrl(decodedServiceId, grafanaTimeRange),
-    [decodedServiceId],
+    () => buildGrafanaErrorPanelUrl(serviceIdentity.serviceId || decodedServiceId, grafanaTimeRange),
+    [decodedServiceId, serviceIdentity.serviceId],
   )
   const deploymentAlert = useMemo(() => {
     const items =
@@ -910,11 +999,13 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                   label="Argo CD Application"
                   description="Open the GitOps application state"
                   href={argoUrl}
+                  unavailableMessage="Unavailable because the Argo CD base URL or application path template is not configured."
                 />
                 <QuickLinkCard
                   label="Grafana Dashboard"
                   description="Open service metrics dashboard"
                   href={grafanaUrl}
+                  unavailableMessage="Unavailable because the Grafana base URL or dashboard path template is not configured."
                 />
                 <div className="rounded-md border border-border bg-background p-3">
                   <p className="text-sm font-medium">Logs</p>

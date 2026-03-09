@@ -114,6 +114,29 @@ export interface ServiceDeployment {
   deployedAt?: string
 }
 
+export interface ReleaseTraceabilityArgoState {
+  appName?: string | null
+  syncStatus?: string | null
+  healthStatus?: string | null
+  revision?: string | null
+}
+
+export interface ReleaseTraceabilityDriftState {
+  isDrifted?: boolean
+  expectedRevision?: string | null
+  liveRevision?: string | null
+}
+
+export interface ReleaseTraceabilityRow {
+  serviceId?: string
+  env?: string
+  commitSha?: string | null
+  imageRef?: string | null
+  deployedAt?: string | null
+  argo?: ReleaseTraceabilityArgoState
+  drift?: ReleaseTraceabilityDriftState
+}
+
 export interface ServiceDetails {
   id: string
   name: string
@@ -416,4 +439,24 @@ export function getServiceDeployments(serviceId: string) {
   return requestServiceEndpoint<{ deployments: ServiceDeployment[] }>(
     `/services/${encodeURIComponent(serviceId)}/deployments`,
   )
+}
+
+export function getReleaseTraceability(params?: {
+  env?: string
+  serviceId?: string
+  limit?: number
+}) {
+  const query = new URLSearchParams()
+  if (params?.env) {
+    query.set('env', params.env)
+  }
+  if (params?.serviceId) {
+    query.set('serviceId', params.serviceId)
+  }
+  if (typeof params?.limit === 'number') {
+    query.set('limit', String(params.limit))
+  }
+
+  const suffix = query.toString()
+  return request<ReleaseTraceabilityRow[]>(suffix ? `/releases?${suffix}` : '/releases')
 }

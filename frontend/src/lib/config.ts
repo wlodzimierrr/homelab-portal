@@ -80,6 +80,34 @@ function readPositiveNumber(value: string | undefined, fallback: number) {
   return parsed
 }
 
+function inferHomelabFrontendDefaults() {
+  if (typeof window === 'undefined') {
+    return {
+      argoBaseUrl: '',
+      grafanaBaseUrl: '',
+    }
+  }
+
+  const hostname = window.location.hostname.toLowerCase()
+  const isHomelabHost =
+    hostname.endsWith('.homelab.local') ||
+    hostname.endsWith('.wlodzimierrr.co.uk')
+
+  if (!isHomelabHost) {
+    return {
+      argoBaseUrl: '',
+      grafanaBaseUrl: '',
+    }
+  }
+
+  return {
+    argoBaseUrl: 'https://argocd.wlodzimierrr.co.uk',
+    grafanaBaseUrl: 'http://monitoring.homelab.local',
+  }
+}
+
+const inferredHomelabDefaults = inferHomelabFrontendDefaults()
+
 export function buildMonitoringUrl({
   baseUrl,
   pathTemplate,
@@ -100,11 +128,11 @@ export function buildMonitoringUrl({
 
 export const config = {
   apiBaseUrl: env.VITE_API_BASE_URL ?? '/api',
-  argoBaseUrl: env.VITE_ARGO_BASE_URL ?? '',
-  grafanaBaseUrl: env.VITE_GRAFANA_BASE_URL ?? '',
+  argoBaseUrl: env.VITE_ARGO_BASE_URL ?? inferredHomelabDefaults.argoBaseUrl,
+  grafanaBaseUrl: env.VITE_GRAFANA_BASE_URL ?? inferredHomelabDefaults.grafanaBaseUrl,
   incidentBannerMinSeverity: env.VITE_INCIDENT_BANNER_MIN_SEVERITY ?? 'warning',
   metricsStaleAfterMinutes: readPositiveNumber(env.VITE_METRICS_STALE_AFTER_MINUTES, 20),
-  argoAppPathTemplate: env.VITE_ARGO_APP_PATH_TEMPLATE ?? '/applications/{serviceId}',
+  argoAppPathTemplate: env.VITE_ARGO_APP_PATH_TEMPLATE ?? '/applications/{argoAppName}',
   grafanaDashboardPathTemplate:
     env.VITE_GRAFANA_DASHBOARD_PATH_TEMPLATE ?? '/d/service-overview?var-service={serviceId}',
   grafanaLatencyPanelPathTemplate:
@@ -118,11 +146,14 @@ export const config = {
     '/explore?var-namespace={{namespace}}&var-app={{app_label}}&from=now-{{time_range}}&to=now',
 }
 
-export function buildArgoAppUrl(serviceId: string) {
+export function buildArgoAppUrl(serviceId: string, argoAppName?: string) {
   return buildMonitoringUrl({
     baseUrl: config.argoBaseUrl,
     pathTemplate: config.argoAppPathTemplate,
-    values: { serviceId },
+    values: {
+      serviceId,
+      argoAppName: argoAppName ?? serviceId,
+    },
     context: 'argo-app-url',
   })
 }

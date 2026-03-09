@@ -1,4 +1,10 @@
-import { getServiceDeployments, type ServiceDeployment } from '@/lib/api'
+import {
+  getReleaseTraceability,
+  getServiceDeployments,
+  isApiRequestError,
+  type ReleaseTraceabilityRow,
+  type ServiceDeployment,
+} from '@/lib/api'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export interface DeploymentMetricSnapshot {
@@ -23,6 +29,8 @@ export interface DeploymentHistoryItem {
 interface DeploymentHistoryOptions {
   limit?: number
 }
+
+const deploymentEndpointFallbackStatuses = new Set([404, 405, 501])
 
 function resolveIdentity(input: ServiceIdentity | string) {
   if (typeof input === 'string') {
@@ -50,6 +58,44 @@ function normalizeDeployment(item: ServiceDeployment, identity: ServiceIdentity)
     availabilityPct: availability,
     hasComparisonWindow,
     regressionScore: computeRegressionScore(errorRate, latency, availability),
+  }
+}
+
+function deriveVersionFromImageRef(imageRef?: string | null) {
+  if (!imageRef) {
+    return 'N/A'
+  }
+
+  const trimmed = imageRef.trim()
+  if (!trimmed) {
+    return 'N/A'
+  }
+
+  const parts = trimmed.split(':')
+  return parts.length > 1 ? parts.slice(1).join(':') : trimmed
+}
+
+function normalizeReleaseDeployment(
+  item: ReleaseTraceabilityRow,
+  identity: ServiceIdentity,
+  index: number,
+): DeploymentHistoryItem {
+  const deployedAt = typeof item.deployedAt === 'string' ? item.deployedAt : undefined
+  const commitSha = typeof item.commitSha === 'string' ? item.commitSha : ''
+  const healthStatus = typeof item.argo?.healthStatus === 'string' ? item.argo.healthStatus : undefined
+  const syncStatus = typeof item.argo?.syncStatus === 'string' ? item.argo.syncStatus : undefined
+
+  return {
+    id: deployedAt || commitSha || `${identity.serviceId}:${index}`,
+    identity,
+    version: deriveVersionFromImageRef(item.imageRef),
+    outcome: healthStatus || syncStatus || 'unknown',
+    deployedAt,
+    errorRatePct: {},
+    p95LatencyMs: {},
+    availabilityPct: {},
+    hasComparisonWindow: false,
+    regressionScore: 0,
   }
 }
 
@@ -126,6 +172,20 @@ function computeRegressionScore(
   return Number((errorPenalty + latencyPenalty + availabilityPenalty).toFixed(3))
 }
 
+async function getReleaseDeploymentFallback(identity: ServiceIdentity, limit: number) {
+  const rows = await getReleaseTraceability({
+    env: identity.env,
+    serviceId: identity.serviceId,
+    limit,
+  })
+
+  return sortByNewest(
+    rows.map((item, index) => normalizeReleaseDeployment(item, identity, index)).filter((item) => {
+      return item.deployedAt || item.version !== 'N/A' || item.outcome !== 'unknown'
+    }),
+  ).slice(0, limit)
+}
+
 export async function getDeploymentHistory(
   service: ServiceIdentity | string,
   options: DeploymentHistoryOptions = {},
@@ -138,6 +198,17 @@ export async function getDeploymentHistory(
     throw new Error('Service ID is required to load deployment history.')
   }
 
-  const response = await getServiceDeployments(serviceId)
-  return sortByNewest(response.deployments.map((item) => normalizeDeployment(item, identity))).slice(0, limit)
+  try {
+    const response = await getServiceDeployments(serviceId)
+    const normalized = sortByNewest(response.deployments.map((item) => normalizeDeployment(item, identity))).slice(0, limit)
+    if (normalized.length > 0) {
+      return normalized
+    }
+    return await getReleaseDeploymentFallback(identity, limit)
+  } catch (error) {
+    if (isApiRequestError(error) && deploymentEndpointFallbackStatuses.has(error.status)) {
+      return await getReleaseDeploymentFallback(identity, limit)
+    }
+    throw error
+  }
 }

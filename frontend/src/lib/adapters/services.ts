@@ -1,10 +1,10 @@
 import {
   getProjects,
-  getService,
-  getServiceDeployments,
+  getReleaseTraceability,
   getServices,
   isApiRequestError,
   type Project,
+  type ReleaseTraceabilityRow,
   type ServiceRegistryApiRow,
 } from '@/lib/api'
 import { getServiceMetricsSummary } from '@/lib/adapters/service-metrics'
@@ -214,41 +214,53 @@ function cloneService(service: ServiceRegistryItem): ServiceRegistryItem {
 }
 
 async function enrichServicesWithLiveMetadata(services: ServiceRegistryItem[]) {
+  const releaseRows = await getReleaseTraceability({ limit: 200 }).catch(() => [])
+  const releaseByKey = new Map<string, ReleaseTraceabilityRow>()
+  for (const row of releaseRows) {
+    const serviceId = typeof row.serviceId === 'string' ? normalizeServiceId(row.serviceId) || row.serviceId : ''
+    const env = typeof row.env === 'string' ? row.env : ''
+    if (!serviceId || !env) {
+      continue
+    }
+    const key = `${serviceId}:${env}`
+    const current = releaseByKey.get(key)
+    const currentDeployedAt = current?.deployedAt ? new Date(current.deployedAt).getTime() : 0
+    const nextDeployedAt = row.deployedAt ? new Date(row.deployedAt).getTime() : 0
+    if (!current || nextDeployedAt >= currentDeployedAt) {
+      releaseByKey.set(key, row)
+    }
+  }
+
   const enriched = await Promise.all(
     services.map(async (service) => {
       const next = cloneService(service)
-      const [detailResult, deploymentsResult, metrics24Result, metrics7Result] = await Promise.allSettled([
-        getService(service.id),
-        getServiceDeployments(service.id),
+      const [metrics24Result, metrics7Result] = await Promise.allSettled([
         getServiceMetricsSummary(service.id, '24h'),
         getServiceMetricsSummary(service.id, '7d'),
       ])
 
-      if (detailResult.status === 'fulfilled') {
-        const details = detailResult.value
-        const nextHealth = normalizeHealthStatus(details.health)
-        const nextSync = normalizeSyncStatus(details.sync)
-        if (nextHealth !== 'unknown') {
+      for (const env of service.environments) {
+        const release = releaseByKey.get(`${service.id}:${env}`)
+        if (!release) {
+          continue
+        }
+        const nextHealth = normalizeHealthStatus(
+          typeof release.argo?.healthStatus === 'string' ? release.argo.healthStatus : undefined,
+        )
+        const nextSync = normalizeSyncStatus(
+          typeof release.argo?.syncStatus === 'string' ? release.argo.syncStatus : undefined,
+        )
+        if (next.health === 'unknown' && nextHealth !== 'unknown') {
           next.health = nextHealth
         }
-        if (nextSync !== 'unknown') {
+        if (next.sync === 'unknown' && nextSync !== 'unknown') {
           next.sync = nextSync
         }
-        if (!next.namespace && details.namespace) {
-          next.namespace = details.namespace
+        if (!next.lastDeployAt && typeof release.deployedAt === 'string') {
+          next.lastDeployAt = release.deployedAt
         }
-        if (!next.appLabel && details.appLabel) {
-          next.appLabel = details.appLabel
-        }
-        if (!next.argoAppName && details.argoAppName) {
-          next.argoAppName = details.argoAppName
-        }
-      }
-
-      if (deploymentsResult.status === 'fulfilled') {
-        const latest = deploymentsResult.value.deployments.find((deployment) => deployment.deployedAt || deployment.version || deployment.status)
-        if (latest?.deployedAt) {
-          next.lastDeployAt = latest.deployedAt
+        if (!next.argoAppName && typeof release.argo?.appName === 'string') {
+          next.argoAppName = release.argo.appName
         }
       }
 
