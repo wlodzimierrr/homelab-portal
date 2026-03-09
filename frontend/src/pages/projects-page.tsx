@@ -226,6 +226,23 @@ export function ProjectsPage() {
               <p className="font-medium">{project.name}</p>
               <p className="text-muted-foreground">Environment: {project.environment}</p>
               <p className="text-muted-foreground">ID: {project.id}</p>
+              {project.owner ? <p className="text-muted-foreground">Owner: {project.owner}</p> : null}
+              {project.repoUrl ? (
+                <p className="text-muted-foreground">
+                  Repo:{' '}
+                  <a href={project.repoUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                    {project.repoUrl}
+                  </a>
+                </p>
+              ) : null}
+              {project.runbookUrl ? (
+                <p className="text-muted-foreground">
+                  Runbook:{' '}
+                  <a href={project.runbookUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                    {project.runbookUrl}
+                  </a>
+                </p>
+              ) : null}
               {catalogByProjectKey.get(`${project.id}:${project.environment}`)?.primaryServiceId ? (
                 <p className="text-muted-foreground">
                   Service:{' '}

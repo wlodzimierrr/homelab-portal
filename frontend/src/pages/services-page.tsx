@@ -13,9 +13,15 @@ import {
 } from '@/lib/api'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import { UptimeIndicator } from '@/components/uptime-indicator'
-import { deriveServiceIdentity, getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
+import {
+  deriveServiceIdentity,
+  getServicesRegistry,
+  type ServiceEnvironmentStatus,
+  type ServiceRegistryItem,
+} from '@/lib/adapters/services'
 import { summarizeDeploymentAlerts, type DeploymentAlertLevel } from '@/lib/deployment-alerts'
 import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
+import { buildArgoAppUrl } from '@/lib/config'
 import { cn } from '@/lib/utils'
 
 type HealthStatus = 'healthy' | 'degraded' | 'unknown'
@@ -78,6 +84,8 @@ function StatusBadge({ label, value }: { label: string; value: string }) {
       ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
       : normalized === 'degraded' || normalized === 'out_of_sync'
         ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+        : normalized === 'gitops_only'
+          ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
         : 'bg-muted text-muted-foreground'
 
   return (
@@ -144,6 +152,57 @@ function IncidentCountBadge({ alert }: { alert: ServiceIncidentBadge }) {
     <span className={cn('inline-flex items-center rounded-full px-2 py-1 text-xs font-medium', tone)}>
       Alerts: {alert.total}
     </span>
+  )
+}
+
+function EnvironmentStatusList({
+  serviceId,
+  statuses,
+}: {
+  serviceId: string
+  statuses: ServiceEnvironmentStatus[]
+}) {
+  if (statuses.length === 0) {
+    return <span className="text-muted-foreground">No registered environments</span>
+  }
+
+  return (
+    <div className="space-y-3">
+      {statuses.map((status) => {
+        const projectLink = `/projects#${encodeURIComponent(projectAnchor(serviceId, status.env))}`
+        const argoUrl = status.argoAppName ? buildArgoAppUrl(serviceId, status.argoAppName) : ''
+
+        return (
+          <div key={`${serviceId}-${status.env}`} className="rounded-md border border-border/70 p-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <AppLink to={projectLink} className="font-medium hover:underline">
+                {status.env}
+              </AppLink>
+              {argoUrl ? (
+                <a
+                  href={argoUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-primary hover:underline"
+                >
+                  Argo status
+                </a>
+              ) : null}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {status.state === 'gitops_only' && status.health === 'unknown' && status.sync === 'unknown' ? (
+                <StatusBadge label="State" value="gitops_only" />
+              ) : (
+                <>
+                  <StatusBadge label="Health" value={status.health} />
+                  <StatusBadge label="Sync" value={status.sync} />
+                </>
+              )}
+            </div>
+          </div>
+        )
+      })}
+    </div>
   )
 }
 
@@ -262,6 +321,9 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
 
       const searchable = [
         service.name,
+        service.owner ?? '',
+        service.repoUrl ?? '',
+        service.runbookUrl ?? '',
         service.publicUrl ?? '',
         service.environments.join(' '),
         service.health,
@@ -307,7 +369,7 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
   return (
     <PageShell
       title="Services"
-      description="Read-only service catalog with environments, runtime status, and external links."
+      description="Git-backed service catalog with ownership metadata, runbooks, and environment status links."
     >
       {!isLoading ? (
         <div className="mb-4 grid gap-3 md:grid-cols-3">
@@ -416,9 +478,10 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
             <thead>
               <tr className="border-b border-border">
                 <th className="px-3 py-3 font-medium text-muted-foreground">Service</th>
-                <th className="px-3 py-3 font-medium text-muted-foreground">Environment(s)</th>
-                <th className="px-3 py-3 font-medium text-muted-foreground">Status</th>
+                <th className="px-3 py-3 font-medium text-muted-foreground">Owner</th>
+                <th className="px-3 py-3 font-medium text-muted-foreground">Environment Status</th>
                 <th className="px-3 py-3 font-medium text-muted-foreground">Project</th>
+                <th className="px-3 py-3 font-medium text-muted-foreground">Repo / Runbook</th>
                 <th className="px-3 py-3 font-medium text-muted-foreground">Public URL</th>
                 <th className="px-3 py-3 font-medium text-muted-foreground">Last Deploy</th>
               </tr>
@@ -435,9 +498,6 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                         <IncidentCountBadge alert={incidentServiceAlerts[service.id]} />
                       </div>
                     ) : null}
-                  </td>
-                  <td className="px-3 py-3 text-muted-foreground">{service.environments.join(', ')}</td>
-                  <td className="px-3 py-3">
                     <div className="mb-2 flex flex-wrap gap-2">
                       <StatusBadge
                         label="Health"
@@ -459,6 +519,10 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                       lastRefreshedAt={service.metricsLastRefreshedAt}
                     />
                   </td>
+                  <td className="px-3 py-3 text-muted-foreground">{service.owner ?? 'Unassigned'}</td>
+                  <td className="px-3 py-3">
+                    <EnvironmentStatusList serviceId={service.id} statuses={service.environmentStatuses} />
+                  </td>
                   <td className="px-3 py-3 text-muted-foreground">
                     {(() => {
                       const matchingRow = service.environments
@@ -466,6 +530,20 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                         .find((row) => row)
                       if (!matchingRow) {
                         const serviceOnly = service.environments.some((env) => serviceOnlyPairs.has(`${service.id}:${env}`))
+                        const fallbackEnv = service.environmentStatuses[0]?.env ?? service.environments[0]
+                        if (!serviceOnly && fallbackEnv) {
+                          return (
+                            <div className="space-y-1">
+                              <AppLink
+                                to={`/projects#${encodeURIComponent(projectAnchor(service.id, fallbackEnv))}`}
+                                className="text-primary hover:underline"
+                              >
+                                {service.name}
+                              </AppLink>
+                              <p className="text-xs text-muted-foreground">GitOps project metadata only.</p>
+                            </div>
+                          )
+                        }
                         return (
                           <div className="space-y-1">
                             <p>{serviceOnly ? 'No linked project' : 'Unmatched'}</p>
@@ -484,6 +562,34 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                         </AppLink>
                       )
                     })()}
+                  </td>
+                  <td className="px-3 py-3">
+                    <div className="space-y-2">
+                      {service.repoUrl ? (
+                        <a
+                          href={service.repoUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="block break-all text-primary hover:underline"
+                        >
+                          Repository
+                        </a>
+                      ) : (
+                        <span className="block text-muted-foreground">Repository not registered</span>
+                      )}
+                      {service.runbookUrl ? (
+                        <a
+                          href={service.runbookUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="block break-all text-primary hover:underline"
+                        >
+                          Runbook
+                        </a>
+                      ) : (
+                        <span className="block text-muted-foreground">Runbook not registered</span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-3 py-3">
                     {service.publicUrl ? (

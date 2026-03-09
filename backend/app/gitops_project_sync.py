@@ -47,6 +47,9 @@ class ProjectRegistryRecord:
     namespace: str
     env: str
     app_label: str
+    owner: str | None
+    repo_url: str | None
+    runbook_url: str | None
     source: str
     source_ref: str
     last_synced_at: datetime
@@ -137,6 +140,95 @@ def _nested_get(payload: dict, *keys: str) -> object | None:
     return current
 
 
+def _first_nonempty_string(*values: object) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _load_service_catalog_metadata(
+    repo_path: Path,
+) -> tuple[dict[str, dict[str, str | None]], list[dict[str, str]]]:
+    catalog_path = repo_path / "services.yaml"
+    if not catalog_path.exists():
+        return {}, []
+
+    with catalog_path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+
+    if not isinstance(payload, dict):
+        return {}, [
+            {
+                "source": DEFAULT_SOURCE,
+                "scope": "services.yaml",
+                "error": "services.yaml must contain a top-level mapping",
+            }
+        ]
+
+    entries = payload.get("services")
+    if entries is None:
+        return {}, []
+    if not isinstance(entries, list):
+        return {}, [
+            {
+                "source": DEFAULT_SOURCE,
+                "scope": "services.yaml",
+                "error": "services.yaml must define services as a list",
+            }
+        ]
+
+    metadata_by_id: dict[str, dict[str, str | None]] = {}
+    failures: list[dict[str, str]] = []
+    for index, item in enumerate(entries):
+        scope = f"services.yaml:services[{index}]"
+        if not isinstance(item, dict):
+            failures.append(
+                {
+                    "source": DEFAULT_SOURCE,
+                    "scope": scope,
+                    "error": "service catalog entry must be a mapping",
+                }
+            )
+            continue
+
+        raw_service_id = _first_nonempty_string(
+            item.get("service_id"),
+            item.get("serviceId"),
+            item.get("project_id"),
+            item.get("projectId"),
+            item.get("name"),
+        )
+        if raw_service_id is None:
+            failures.append(
+                {
+                    "source": DEFAULT_SOURCE,
+                    "scope": scope,
+                    "error": "service catalog entry is missing service_id or name",
+                }
+            )
+            continue
+
+        service_id = _normalize_project_id(raw_service_id)
+        if service_id in metadata_by_id:
+            failures.append(
+                {
+                    "source": DEFAULT_SOURCE,
+                    "scope": scope,
+                    "error": f"duplicate service catalog entry for {service_id}",
+                }
+            )
+            continue
+
+        metadata_by_id[service_id] = {
+            "owner": _first_nonempty_string(item.get("owner"), item.get("owner_email")),
+            "repo_url": _first_nonempty_string(item.get("repo_url"), item.get("repoUrl")),
+            "runbook_url": _first_nonempty_string(item.get("runbook_url"), item.get("runbookUrl")),
+        }
+
+    return metadata_by_id, failures
+
+
 def _load_namespace(app_root: Path) -> str | None:
     candidates = [
         app_root / "base" / "namespace.yaml",
@@ -189,6 +281,8 @@ def _discover_records_from_repo(
 ) -> tuple[list[ProjectRegistryRecord], list[dict[str, str]]]:
     records: list[ProjectRegistryRecord] = []
     failures: list[dict[str, str]] = []
+    service_catalog, catalog_failures = _load_service_catalog_metadata(repo_path)
+    failures.extend(catalog_failures)
 
     env_kustomizations = sorted(repo_path.glob("apps/*/envs/*/kustomization.yaml"))
     for kustomization_path in env_kustomizations:
@@ -202,6 +296,9 @@ def _discover_records_from_repo(
         namespace = _load_namespace(app_root) or project_name
         app_label = _load_app_label(app_root) or project_name
         project_id = _normalize_project_id(app_label)
+        service_metadata = service_catalog.get(project_id) or service_catalog.get(
+            _normalize_project_id(project_name)
+        )
 
         if not namespace.strip() or not app_label.strip():
             failures.append(
@@ -220,6 +317,9 @@ def _discover_records_from_repo(
                 namespace=namespace,
                 env=env_value,
                 app_label=app_label,
+                owner=service_metadata.get("owner") if service_metadata else None,
+                repo_url=service_metadata.get("repo_url") if service_metadata else None,
+                runbook_url=service_metadata.get("runbook_url") if service_metadata else None,
                 source=DEFAULT_SOURCE,
                 source_ref=_build_source_ref(repo_path, env_dir),
                 last_synced_at=synced_at,
@@ -297,15 +397,21 @@ def _upsert_project_registry_records(
                     namespace,
                     env,
                     app_label,
+                    owner,
+                    repo_url,
+                    runbook_url,
                     source,
                     source_ref,
                     last_synced_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (project_id, env) DO UPDATE
                 SET project_name = EXCLUDED.project_name,
                     namespace = EXCLUDED.namespace,
                     app_label = EXCLUDED.app_label,
+                    owner = EXCLUDED.owner,
+                    repo_url = EXCLUDED.repo_url,
+                    runbook_url = EXCLUDED.runbook_url,
                     source = EXCLUDED.source,
                     source_ref = EXCLUDED.source_ref,
                     last_synced_at = EXCLUDED.last_synced_at,
@@ -318,6 +424,9 @@ def _upsert_project_registry_records(
                     row.namespace,
                     row.env,
                     row.app_label,
+                    row.owner,
+                    row.repo_url,
+                    row.runbook_url,
                     row.source,
                     row.source_ref,
                     row.last_synced_at,

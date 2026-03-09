@@ -79,6 +79,9 @@ export interface Project {
   id: string
   name: string
   environment: string
+  owner?: string
+  repoUrl?: string
+  runbookUrl?: string
   health?: string
   sync?: string
   publicUrl?: string

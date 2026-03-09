@@ -191,6 +191,7 @@ cd apps/portal/frontend
 ## Read-only behavior note
 
 - Deploy controls are intentionally not implemented yet (read-only catalog/visibility first).
+- The Services page is Git-backed from `workloads/services.yaml` plus project/service registry sync data.
 - Logs and some deployment/status metadata may be mocked or placeholder-based until backend integration is complete.
 - If Grafana/Loki base URLs are not configured, external logs links remain unavailable/disabled by design.
 
@@ -226,7 +227,7 @@ Alternative: secure `HttpOnly` cookie-based auth.
   - Requires backend cookie issuance/refresh flow and CSRF defenses.
   - More moving pieces for local dev and cross-origin setups.
 
-## Gated Promotion Workflow (staging/prod)
+## Gated Promotion Workflow (dev/prod)
 
 `apps/portal/.github/workflows/gated-promotion.yml` adds a manual pipeline for higher-environment promotion with an approval checkpoint.
 
@@ -234,7 +235,7 @@ Alternative: secure `HttpOnly` cookie-based auth.
 - Modes:
   - `promote`: copies image tags from `dev` overlays into target env overlays.
   - `rollback`: writes explicitly provided rollback tags into target env overlays.
-- Target environments: `staging` or `prod`
+- Target environment: `prod`
 - Policy checks before approval:
   - target overlay files exist
   - candidate tags:
@@ -246,4 +247,4 @@ Alternative: secure `HttpOnly` cookie-based auth.
   - configure required reviewers in GitHub repo settings for these environments
 - Result:
   - after approval, workflow opens a PR in `wlodzimierrr/homelab-workloads`
-  - changed files are constrained to expected env image patch files only
+  - changed files are constrained to expected prod image patch files only

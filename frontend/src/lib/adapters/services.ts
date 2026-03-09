@@ -13,6 +13,15 @@ import { createServiceIdentity, normalizeServiceId, parseNamespaceFromInternalUr
 export type ServiceHealth = 'healthy' | 'degraded' | 'unknown'
 export type ServiceSync = 'synced' | 'out_of_sync' | 'unknown'
 
+export interface ServiceEnvironmentStatus {
+  env: string
+  health: ServiceHealth
+  sync: ServiceSync
+  argoAppName?: string
+  lastDeployAt?: string
+  state: 'live' | 'gitops_only'
+}
+
 export interface ServiceRegistryItem {
   id: string
   name: string
@@ -28,6 +37,10 @@ export interface ServiceRegistryItem {
   namespace?: string
   appLabel?: string
   argoAppName?: string
+  owner?: string
+  repoUrl?: string
+  runbookUrl?: string
+  environmentStatuses: ServiceEnvironmentStatus[]
 }
 
 const serviceFallbackStatuses = new Set([404, 405, 501])
@@ -86,6 +99,19 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
         namespace: inferredNamespace,
         appLabel: canonicalId,
         argoAppName: `${canonicalId}-${project.environment}`,
+        owner: project.owner,
+        repoUrl: project.repoUrl,
+        runbookUrl: project.runbookUrl,
+        environmentStatuses: [
+          {
+            env: project.environment,
+            health: nextHealth,
+            sync: nextSync,
+            argoAppName: `${canonicalId}-${project.environment}`,
+            lastDeployAt: project.lastDeployAt,
+            state: 'gitops_only',
+          },
+        ],
       })
       continue
     }
@@ -121,6 +147,34 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
     if (!current.lastDeployAt && project.lastDeployAt) {
       current.lastDeployAt = project.lastDeployAt
     }
+
+    if (!current.owner && project.owner) {
+      current.owner = project.owner
+    }
+
+    if (!current.repoUrl && project.repoUrl) {
+      current.repoUrl = project.repoUrl
+    }
+
+    if (!current.runbookUrl && project.runbookUrl) {
+      current.runbookUrl = project.runbookUrl
+    }
+
+    const existingEnvironment = current.environmentStatuses.find((status) => status.env === project.environment)
+    if (!existingEnvironment) {
+      current.environmentStatuses.push({
+        env: project.environment,
+        health: nextHealth,
+        sync: nextSync,
+        argoAppName: `${canonicalId}-${project.environment}`,
+        lastDeployAt: project.lastDeployAt,
+        state: 'gitops_only',
+      })
+    }
+  }
+
+  for (const service of grouped.values()) {
+    service.environmentStatuses.sort((a, b) => a.env.localeCompare(b.env))
   }
 
   return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name))
@@ -141,6 +195,15 @@ function adaptApiServices(rows: ServiceRegistryApiRow[]): ServiceRegistryItem[] 
         namespace: row.namespace,
         appLabel: row.appLabel,
         argoAppName: row.argoAppName,
+        environmentStatuses: [
+          {
+            env: row.env,
+            health: 'unknown',
+            sync: 'unknown',
+            argoAppName: row.argoAppName,
+            state: 'live',
+          },
+        ],
       })
       continue
     }
@@ -149,6 +212,23 @@ function adaptApiServices(rows: ServiceRegistryApiRow[]): ServiceRegistryItem[] 
       current.environments.push(row.env)
       current.environments.sort((a, b) => a.localeCompare(b))
     }
+
+    const existingEnvironment = current.environmentStatuses.find((status) => status.env === row.env)
+    if (!existingEnvironment) {
+      current.environmentStatuses.push({
+        env: row.env,
+        health: 'unknown',
+        sync: 'unknown',
+        argoAppName: row.argoAppName,
+        state: 'live',
+      })
+    } else if (!existingEnvironment.argoAppName && row.argoAppName) {
+      existingEnvironment.argoAppName = row.argoAppName
+    }
+  }
+
+  for (const service of grouped.values()) {
+    service.environmentStatuses.sort((a, b) => a.env.localeCompare(b.env))
   }
 
   return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name))
@@ -157,25 +237,51 @@ function adaptApiServices(rows: ServiceRegistryApiRow[]): ServiceRegistryItem[] 
 function mergeProjectMetadata(services: ServiceRegistryItem[], projects: Project[]): ServiceRegistryItem[] {
   const byId = new Map<string, ServiceRegistryItem>()
   for (const service of services) {
-    byId.set(service.id, {
-      ...service,
-      environments: [...service.environments],
-      internalUrls: service.internalUrls ? [...service.internalUrls] : undefined,
-    })
-  }
+      byId.set(service.id, {
+        ...service,
+        environments: [...service.environments],
+        internalUrls: service.internalUrls ? [...service.internalUrls] : undefined,
+        environmentStatuses: service.environmentStatuses.map((status) => ({ ...status })),
+      })
+    }
 
   for (const project of projects) {
     const canonicalId =
       normalizeServiceId(project.name) ||
       normalizeServiceId(project.id) ||
       project.id.trim().toLowerCase()
-    const service = byId.get(canonicalId)
-    if (!service) {
-      continue
-    }
-
     const nextHealth = normalizeHealthStatus(project.health)
     const nextSync = normalizeSyncStatus(project.sync)
+    const service = byId.get(canonicalId)
+    if (!service) {
+      byId.set(canonicalId, {
+        id: canonicalId,
+        name: project.name,
+        environments: [project.environment],
+        health: nextHealth,
+        sync: nextSync,
+        publicUrl: project.publicUrl,
+        internalUrls: project.internalUrl ? [project.internalUrl] : undefined,
+        lastDeployAt: project.lastDeployAt,
+        namespace: parseNamespaceFromInternalUrl(project.internalUrl) ?? undefined,
+        appLabel: canonicalId,
+        argoAppName: `${canonicalId}-${project.environment}`,
+        owner: project.owner,
+        repoUrl: project.repoUrl,
+        runbookUrl: project.runbookUrl,
+        environmentStatuses: [
+          {
+            env: project.environment,
+            health: nextHealth,
+            sync: nextSync,
+            argoAppName: `${canonicalId}-${project.environment}`,
+            lastDeployAt: project.lastDeployAt,
+            state: 'gitops_only',
+          },
+        ],
+      })
+      continue
+    }
 
     if (service.health === 'unknown' && nextHealth !== 'unknown') {
       service.health = nextHealth
@@ -200,6 +306,34 @@ function mergeProjectMetadata(services: ServiceRegistryItem[], projects: Project
     if (!service.lastDeployAt && project.lastDeployAt) {
       service.lastDeployAt = project.lastDeployAt
     }
+
+    if (!service.owner && project.owner) {
+      service.owner = project.owner
+    }
+
+    if (!service.repoUrl && project.repoUrl) {
+      service.repoUrl = project.repoUrl
+    }
+
+    if (!service.runbookUrl && project.runbookUrl) {
+      service.runbookUrl = project.runbookUrl
+    }
+
+    const existingEnvironment = service.environmentStatuses.find((status) => status.env === project.environment)
+    if (!existingEnvironment) {
+      service.environmentStatuses.push({
+        env: project.environment,
+        health: nextHealth,
+        sync: nextSync,
+        argoAppName: `${canonicalId}-${project.environment}`,
+        lastDeployAt: project.lastDeployAt,
+        state: 'gitops_only',
+      })
+    }
+  }
+
+  for (const service of byId.values()) {
+    service.environmentStatuses.sort((a, b) => a.env.localeCompare(b.env))
   }
 
   return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name))
@@ -210,6 +344,7 @@ function cloneService(service: ServiceRegistryItem): ServiceRegistryItem {
     ...service,
     environments: [...service.environments],
     internalUrls: service.internalUrls ? [...service.internalUrls] : undefined,
+    environmentStatuses: service.environmentStatuses.map((status) => ({ ...status })),
   }
 }
 
@@ -262,6 +397,26 @@ async function enrichServicesWithLiveMetadata(services: ServiceRegistryItem[]) {
         if (!next.argoAppName && typeof release.argo?.appName === 'string') {
           next.argoAppName = release.argo.appName
         }
+
+        const environmentStatus = next.environmentStatuses.find((status) => status.env === env)
+        if (environmentStatus) {
+          environmentStatus.health = nextHealth
+          environmentStatus.sync = nextSync
+          environmentStatus.lastDeployAt =
+            typeof release.deployedAt === 'string' ? release.deployedAt : environmentStatus.lastDeployAt
+          environmentStatus.argoAppName =
+            typeof release.argo?.appName === 'string' ? release.argo.appName : environmentStatus.argoAppName
+          environmentStatus.state = 'live'
+        } else {
+          next.environmentStatuses.push({
+            env,
+            health: nextHealth,
+            sync: nextSync,
+            argoAppName: typeof release.argo?.appName === 'string' ? release.argo.appName : undefined,
+            lastDeployAt: typeof release.deployedAt === 'string' ? release.deployedAt : undefined,
+            state: 'live',
+          })
+        }
       }
 
       if (metrics24Result.status === 'fulfilled') {
@@ -274,6 +429,7 @@ async function enrichServicesWithLiveMetadata(services: ServiceRegistryItem[]) {
         next.metricsLastRefreshedAt = next.metricsLastRefreshedAt ?? metrics7Result.value.generatedAt
       }
 
+      next.environmentStatuses.sort((a, b) => a.env.localeCompare(b.env))
       return next
     }),
   )

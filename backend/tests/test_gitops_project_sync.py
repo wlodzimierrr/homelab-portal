@@ -50,9 +50,58 @@ def test_discover_gitops_project_records_reads_app_env_directories(tmp_path: Pat
     assert row.namespace == "homelab-api"
     assert row.env == "dev"
     assert row.app_label == "homelab-api"
+    assert row.owner is None
+    assert row.repo_url is None
+    assert row.runbook_url is None
     assert row.source == "gitops_apps"
     assert row.last_synced_at == synced_at
     assert row.source_ref.endswith(":apps/homelab-api/envs/dev")
+
+
+def test_discover_gitops_project_records_joins_services_yaml_metadata(tmp_path: Path) -> None:
+    repo_path = tmp_path / "workloads"
+    _write(
+        repo_path / "apps" / "homelab-api" / "envs" / "dev" / "kustomization.yaml",
+        "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../../base\n",
+    )
+    _write(
+        repo_path / "apps" / "homelab-api" / "base" / "namespace.yaml",
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: homelab-api\n",
+    )
+    _write(
+        repo_path / "apps" / "homelab-api" / "base" / "deployment.yaml",
+        (
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
+            "  name: homelab-api\n  namespace: homelab-api\n"
+            "  labels:\n    app.kubernetes.io/name: homelab-api\n"
+        ),
+    )
+    _write(
+        repo_path / "services.yaml",
+        (
+            "services:\n"
+            "  - service_id: homelab-api\n"
+            "    name: Homelab API\n"
+            "    owner: wlodzimierrr\n"
+            "    repo_url: https://github.com/wlodzimierrr/homelab/tree/main/apps/portal/backend\n"
+            "    runbook_url: https://github.com/wlodzimierrr/homelab/blob/main/docs/runbooks/homelab-api-service-operations.md\n"
+        ),
+    )
+
+    rows, failures = gitops_project_sync.discover_gitops_project_records(
+        repo_path=repo_path,
+        env_name="dev",
+        synced_at=datetime(2026, 3, 9, tzinfo=timezone.utc),
+    )
+
+    assert failures == []
+    assert len(rows) == 1
+    assert rows[0].owner == "wlodzimierrr"
+    assert rows[0].repo_url == "https://github.com/wlodzimierrr/homelab/tree/main/apps/portal/backend"
+    assert (
+        rows[0].runbook_url
+        == "https://github.com/wlodzimierrr/homelab/blob/main/docs/runbooks/homelab-api-service-operations.md"
+    )
 
 
 def test_resolve_default_workloads_repo_path_does_not_raise_for_shallow_container_layout() -> None:
