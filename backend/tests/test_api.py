@@ -152,7 +152,7 @@ def test_projects_list_does_not_seed_defaults_on_read(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"projects": []}
     assert any(
-        sql.startswith("SELECT PROJECT_ID, PROJECT_NAME, ENV FROM PROJECT_REGISTRY")
+        sql.startswith("SELECT PROJECT_ID, PROJECT_NAME, ENV, OWNER, REPO_URL, RUNBOOK_URL FROM PROJECT_REGISTRY")
         for sql in executed_sql
     )
 
@@ -171,7 +171,7 @@ def test_projects_list_supports_env_filter(monkeypatch) -> None:
             executed_args.append((" ".join(sql.split()).upper(), args))
 
         def fetchall(self):
-            return [("homelab-api", "homelab-api", "dev")]
+            return [("homelab-api", "homelab-api", "dev", None, None, None)]
 
     class _Conn:
         def __enter__(self):
@@ -195,6 +195,61 @@ def test_projects_list_supports_env_filter(monkeypatch) -> None:
         "projects": [{"id": "homelab-api", "name": "homelab-api", "environment": "dev"}]
     }
     assert executed_args[0][1] == ("gitops_apps", "dev")
+
+
+def test_projects_list_includes_gitops_catalog_metadata(monkeypatch) -> None:
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchall(self):
+            return [
+                (
+                    "homelab-api",
+                    "Homelab API",
+                    "dev",
+                    "wlodzimierrr",
+                    "https://github.com/wlodzimierrr/homelab/tree/main/apps/portal/backend",
+                    "https://github.com/wlodzimierrr/homelab/blob/main/docs/runbooks/homelab-api-service-operations.md",
+                )
+            ]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+
+    response = client.get(
+        "/projects",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "projects": [
+            {
+                "id": "homelab-api",
+                "name": "Homelab API",
+                "environment": "dev",
+                "owner": "wlodzimierrr",
+                "repoUrl": "https://github.com/wlodzimierrr/homelab/tree/main/apps/portal/backend",
+                "runbookUrl": "https://github.com/wlodzimierrr/homelab/blob/main/docs/runbooks/homelab-api-service-operations.md",
+            }
+        ]
+    }
 
 
 def test_project_catalog_diagnostics_reports_freshness(monkeypatch) -> None:

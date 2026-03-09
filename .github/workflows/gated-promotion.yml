@@ -4,11 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       target_environment:
-        description: "Promotion target environment"
+        description: "Promotion target environment (prod only in the current GitOps contract)"
         required: true
         type: choice
         options:
-          - staging
           - prod
         default: prod
       action_mode:
@@ -75,7 +74,7 @@ jobs:
           set -euo pipefail
 
           case "$TARGET_ENV" in
-            staging|prod) ;;
+            prod) ;;
             *) echo "Unsupported target environment: $TARGET_ENV"; exit 1 ;;
           esac
 

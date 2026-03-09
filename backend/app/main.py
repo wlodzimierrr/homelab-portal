@@ -168,6 +168,11 @@ class Project(BaseModel):
     id: str
     name: str
     environment: str
+    owner: str | None = None
+    repo_url: str | None = Field(default=None, alias="repoUrl")
+    runbook_url: str | None = Field(default=None, alias="runbookUrl")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ProjectsResponse(BaseModel):
@@ -531,13 +536,13 @@ def _with_connection() -> psycopg.Connection:
     return psycopg.connect(get_psycopg_database_url())
 
 
-def _load_project_rows(env: str | None = None) -> list[dict[str, str]]:
+def _load_project_rows(env: str | None = None) -> list[dict[str, str | None]]:
     with _with_connection() as conn:
         with conn.cursor() as cur:
             if env:
                 cur.execute(
                     """
-                    SELECT project_id, project_name, env
+                    SELECT project_id, project_name, env, owner, repo_url, runbook_url
                     FROM project_registry
                     WHERE source = %s
                       AND env = %s
@@ -548,7 +553,7 @@ def _load_project_rows(env: str | None = None) -> list[dict[str, str]]:
             else:
                 cur.execute(
                     """
-                    SELECT project_id, project_name, env
+                    SELECT project_id, project_name, env, owner, repo_url, runbook_url
                     FROM project_registry
                     WHERE source = %s
                     ORDER BY project_id ASC, env ASC
@@ -562,6 +567,9 @@ def _load_project_rows(env: str | None = None) -> list[dict[str, str]]:
             "service_id": row[0],
             "service_name": row[1],
             "env": row[2],
+            "owner": row[3],
+            "repo_url": row[4],
+            "runbook_url": row[5],
         }
         for row in rows
     ]
@@ -1779,7 +1787,12 @@ def login(payload: LoginRequest) -> LoginResponse:
     )
 
 
-@app.get("/projects", response_model=ProjectsResponse, tags=["metadata"])
+@app.get(
+    "/projects",
+    response_model=ProjectsResponse,
+    response_model_exclude_none=True,
+    tags=["metadata"],
+)
 def list_projects(
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
@@ -1791,6 +1804,9 @@ def list_projects(
                 id=row["service_id"],
                 name=row["service_name"],
                 environment=row["env"],
+                owner=row["owner"] if isinstance(row.get("owner"), str) else None,
+                repoUrl=row["repo_url"] if isinstance(row.get("repo_url"), str) else None,
+                runbookUrl=row["runbook_url"] if isinstance(row.get("runbook_url"), str) else None,
             )
             for row in rows
         ]

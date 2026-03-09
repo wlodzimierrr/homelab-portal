@@ -536,6 +536,101 @@
         }
       }
     },
+    "/services/{service_id}/deployments": {
+      "get": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Get Service Deployments",
+        "operationId": "get_service_deployments_services__service_id__deployments_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "env",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Env"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceDeploymentsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/catalog/reconciliation": {
       "get": {
         "tags": [
@@ -1738,6 +1833,22 @@
             }
           },
           {
+            "name": "appLabel",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Applabel"
+            }
+          },
+          {
             "name": "X-Auth-Request-User",
             "in": "header",
             "required": false,
@@ -2466,6 +2577,39 @@
           "environment": {
             "type": "string",
             "title": "Environment"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "repoUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repourl"
+          },
+          "runbookUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runbookurl"
           }
         },
         "type": "object",
@@ -2765,6 +2909,110 @@
         ],
         "title": "ReleaseTraceabilityResponse"
       },
+      "ServiceDeploymentResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "deployedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployedat"
+          },
+          "errorRatePct": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errorratepct"
+          },
+          "p95LatencyMs": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95Latencyms"
+          },
+          "availabilityPct": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Availabilitypct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "ServiceDeploymentResponse"
+      },
+      "ServiceDeploymentsResponse": {
+        "properties": {
+          "deployments": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceDeploymentResponse"
+            },
+            "type": "array",
+            "title": "Deployments"
+          }
+        },
+        "type": "object",
+        "required": [
+          "deployments"
+        ],
+        "title": "ServiceDeploymentsResponse"
+      },
       "ServiceDetailResponse": {
         "properties": {
           "id": {
@@ -2797,6 +3045,39 @@
               }
             ],
             "title": "Argoappname"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "health": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health"
+          },
+          "sync": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync"
           },
           "source": {
             "type": "string",
