@@ -87,7 +87,7 @@ function ImpactBadge({ item }: { item: DeploymentHistoryItem }) {
   if (!item.hasComparisonWindow && !alert.suspicious) {
     return (
       <span className="inline-flex items-center rounded-full bg-muted px-2 py-1 text-xs font-medium text-muted-foreground">
-        Comparison unavailable
+        No comparison samples
       </span>
     )
   }
@@ -165,6 +165,11 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
     })
   }, [deployments, filterMode, sortMode])
 
+  const hasAnyComparisonWindow = useMemo(
+    () => deployments.some((item) => item.hasComparisonWindow),
+    [deployments],
+  )
+
   return (
     <PageShell
       title={`Deployments: ${normalizedServiceId || 'unknown'}`}
@@ -219,6 +224,18 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
             title="No deployments match current filters."
             description="Try switching filter settings to include more history."
           />
+        ) : null}
+        {!isLoading && !error && deployments.length > 0 && !hasAnyComparisonWindow ? (
+          <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
+              Comparison metrics are not available for these deployment windows.
+            </p>
+            <p className="mt-1 text-xs text-amber-900 dark:text-amber-200">
+              Prometheus has no retained samples for the selected deployment periods. This usually means the
+              deployment is older than the current metrics retention window or happened before service-level
+              request metrics were available.
+            </p>
+          </div>
         ) : null}
         {!isLoading && !error && visibleDeployments.length > 0 ? (
           <div className="overflow-x-auto rounded-md border border-border">
