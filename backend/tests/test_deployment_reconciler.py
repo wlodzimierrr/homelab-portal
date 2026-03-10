@@ -225,3 +225,162 @@ def test_reconcile_recent_gitops_deployments_marks_closed_unmerged_pull_request_
     assert summary["statusCounts"]["failed"] == 1
     assert captured[0]["status"] == "failed"
     assert captured[0]["metadata"]["failureReason"] == "GitOps pull request was closed without merge."
+
+
+def test_reconcile_config_change_requires_argo_revision_match(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 41,
+                "title": "chore(dev): set homelab-web replicas to 2",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/41",
+                "state": "closed",
+                "created_at": "2026-03-10T16:10:32Z",
+                "closed_at": "2026-03-10T16:16:02Z",
+                "merged_at": "2026-03-10T16:16:02Z",
+                "merge_commit_sha": "merge-sha-41",
+                "body": "\n".join(
+                    [
+                        "Automated GitOps config change request.",
+                        "- Service: `homelab-web`",
+                        "- Current image: `ghcr.io/wlodzimierrr/homelab-web:sha-feedfacefeedfacefeedfacefeedfacefeedface`",
+                    ]
+                ),
+                "user": {"login": "wlodzimierrr"},
+                "head": {"ref": "automation/dev-config-change-homelab-web-replicas-2-22912164133"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        captured.append(kwargs)
+        return {"status": kwargs["status"]}
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+
+    summary = deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [
+            {
+                "service_id": "homelab-web",
+                "service_name": "homelab-web",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "homelab-web",
+                "argo_app_name": "homelab-web-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-10T16:12:24Z",
+            }
+        ],
+        select_preferred_service_row=lambda _service_id, rows, _env: rows[0],
+        load_live_argo_status=lambda _row: {
+            "syncStatus": "synced",
+            "healthStatus": "healthy",
+            "revision": "older-merge-sha",
+            "deployedAt": "2026-03-10T16:12:24Z",
+        },
+        list_live_deployments=lambda _row: [{"kind": "Deployment"}],
+        extract_live_image_ref=lambda _deployment: "ghcr.io/wlodzimierrr/homelab-web:sha-feedfacefeedfacefeedfacefeedfacefeedface",
+        service_id="homelab-web",
+        github_fetch_json=_fake_fetch,
+        now=datetime(2026, 3, 10, 16, 16, 10, tzinfo=timezone.utc),
+    )
+
+    assert summary["statusCounts"]["deploying"] == 1
+    assert captured[0]["status"] == "deploying"
+    assert captured[0]["started_at"] == "2026-03-10T16:16:02+00:00"
+    assert captured[0]["finished_at"] is None
+
+
+def test_reconcile_config_change_finished_at_never_precedes_started_at(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 41,
+                "title": "chore(dev): set homelab-web replicas to 2",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/41",
+                "state": "closed",
+                "created_at": "2026-03-10T16:10:32Z",
+                "closed_at": "2026-03-10T16:16:02Z",
+                "merged_at": "2026-03-10T16:16:02Z",
+                "merge_commit_sha": "merge-sha-41",
+                "body": "\n".join(
+                    [
+                        "Automated GitOps config change request.",
+                        "- Service: `homelab-web`",
+                        "- Current image: `ghcr.io/wlodzimierrr/homelab-web:sha-feedfacefeedfacefeedfacefeedfacefeedface`",
+                    ]
+                ),
+                "user": {"login": "wlodzimierrr"},
+                "head": {"ref": "automation/dev-config-change-homelab-web-replicas-2-22912164133"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_args, **_kwargs: {
+            "finishedAt": "2026-03-10T16:12:24+00:00",
+            "deployWindowEnd": "2026-03-10T16:12:24+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        captured.append(kwargs)
+        return {"status": kwargs["status"]}
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+
+    summary = deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [
+            {
+                "service_id": "homelab-web",
+                "service_name": "homelab-web",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "homelab-web",
+                "argo_app_name": "homelab-web-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-10T16:16:30Z",
+            }
+        ],
+        select_preferred_service_row=lambda _service_id, rows, _env: rows[0],
+        load_live_argo_status=lambda _row: {
+            "syncStatus": "synced",
+            "healthStatus": "healthy",
+            "revision": "merge-sha-41",
+            "deployedAt": "2026-03-10T16:12:24Z",
+        },
+        list_live_deployments=lambda _row: [{"kind": "Deployment"}],
+        extract_live_image_ref=lambda _deployment: "ghcr.io/wlodzimierrr/homelab-web:sha-feedfacefeedfacefeedfacefeedfacefeedface",
+        service_id="homelab-web",
+        github_fetch_json=_fake_fetch,
+        now=datetime(2026, 3, 10, 16, 16, 35, tzinfo=timezone.utc),
+    )
+
+    assert summary["statusCounts"]["live"] == 1
+    assert captured[0]["status"] == "live"
+    assert captured[0]["started_at"] == "2026-03-10T16:16:02+00:00"
+    assert captured[0]["finished_at"] == "2026-03-10T16:16:35+00:00"

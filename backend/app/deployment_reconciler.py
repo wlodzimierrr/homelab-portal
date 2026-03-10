@@ -69,6 +69,10 @@ class GitOpsDeploymentEvent:
 
 
 def _parse_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
     if not isinstance(value, str):
         return None
     normalized = value.strip()
@@ -321,6 +325,43 @@ def _failed_operation_reason(live_argo: dict[str, str | None]) -> str | None:
     return f"Argo operation phase is {phase}"
 
 
+def _coalesce_datetime(*values: object) -> datetime | None:
+    for value in values:
+        parsed = _parse_datetime(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _max_datetime(*values: object) -> datetime | None:
+    parsed_values = [parsed for value in values if (parsed := _parse_datetime(value)) is not None]
+    if not parsed_values:
+        return None
+    return max(parsed_values)
+
+
+def _live_rollout_verified(
+    *,
+    event: GitOpsDeploymentEvent,
+    live_argo: dict[str, str | None],
+    live_image: str | None,
+) -> bool:
+    sync_status = str(live_argo.get("syncStatus") or "").strip().lower()
+    health_status = str(live_argo.get("healthStatus") or "").strip().lower()
+    if sync_status != "synced" or health_status != "healthy":
+        return False
+
+    if event.merge_sha:
+        live_revision = str(live_argo.get("revision") or "").strip()
+        if live_revision != event.merge_sha:
+            return False
+
+    if event.action == "config-change":
+        return True
+
+    return live_image == event.target_image
+
+
 def _stalled_reason(
     *,
     target_image: str,
@@ -355,10 +396,10 @@ def _build_reconciled_record(
         int(os.getenv("DEPLOYMENT_RECONCILER_TIMEOUT_SECONDS", str(DEFAULT_VERIFICATION_TIMEOUT_SECONDS))),
     )
     merged_at = event.merged_at
-    started_at = existing_record.get("startedAt") if existing_record else None
-    finished_at = existing_record.get("finishedAt") if existing_record else None
-    deploy_window_start = existing_record.get("deployWindowStart") if existing_record else None
-    deploy_window_end = existing_record.get("deployWindowEnd") if existing_record else None
+    existing_started_at = existing_record.get("startedAt") if existing_record else None
+    existing_finished_at = existing_record.get("finishedAt") if existing_record else None
+    existing_window_start = existing_record.get("deployWindowStart") if existing_record else None
+    existing_window_end = existing_record.get("deployWindowEnd") if existing_record else None
     previous_image = existing_record.get("previousImage") if existing_record else None
     if not isinstance(previous_image, str) or not previous_image:
         if previous_record and isinstance(previous_record.get("targetImage"), str):
@@ -370,40 +411,38 @@ def _build_reconciled_record(
 
     failure_reason: str | None = None
     status = "pending"
+    started_at_dt = _coalesce_datetime(existing_started_at)
+    finished_at_dt = _coalesce_datetime(existing_finished_at)
+    deploy_window_start_dt = _coalesce_datetime(existing_window_start)
+    deploy_window_end_dt = _coalesce_datetime(existing_window_end)
 
     if event.pr_state == "closed" and merged_at is None:
         status = "failed"
         failure_reason = "GitOps pull request was closed without merge."
-        finished_at = finished_at or _serialize_datetime(event.closed_at or now)
-        deploy_window_end = deploy_window_end or finished_at
+        finished_at_dt = _max_datetime(finished_at_dt, event.closed_at, now)
+        deploy_window_end_dt = _max_datetime(deploy_window_end_dt, finished_at_dt)
     elif merged_at is None:
         status = "pending"
     else:
-        started_at = started_at or _serialize_datetime(merged_at)
-        deploy_window_start = deploy_window_start or _serialize_datetime(merged_at)
+        started_at_dt = _max_datetime(started_at_dt, merged_at) or merged_at
+        deploy_window_start_dt = _max_datetime(deploy_window_start_dt, merged_at) or merged_at
         merged_age = now - merged_at
-        sync_status = str(live_argo.get("syncStatus") or "").strip().lower()
-        health_status = str(live_argo.get("healthStatus") or "").strip().lower()
 
         immediate_failure = _failed_operation_reason(live_argo)
         if immediate_failure:
             status = "failed"
             failure_reason = immediate_failure
-            finished_at = finished_at or _serialize_datetime(now)
-            deploy_window_end = deploy_window_end or finished_at
-        elif (
-            live_image == event.target_image
-            and sync_status == "synced"
-            and health_status == "healthy"
-        ):
+            finished_at_dt = _max_datetime(finished_at_dt, now, started_at_dt)
+            deploy_window_end_dt = _max_datetime(deploy_window_end_dt, finished_at_dt)
+        elif _live_rollout_verified(event=event, live_argo=live_argo, live_image=live_image):
             status = "live"
-            finished_at = finished_at or str(live_argo.get("deployedAt") or _serialize_datetime(now))
-            deploy_window_end = deploy_window_end or finished_at
+            finished_at_dt = _max_datetime(finished_at_dt, live_argo.get("deployedAt"), now, started_at_dt)
+            deploy_window_end_dt = _max_datetime(deploy_window_end_dt, finished_at_dt)
         elif selected_service_row is None and merged_age > timedelta(seconds=timeout_seconds):
             status = "failed"
             failure_reason = "No matching service registry row exists for this deployment target."
-            finished_at = finished_at or _serialize_datetime(now)
-            deploy_window_end = deploy_window_end or finished_at
+            finished_at_dt = _max_datetime(finished_at_dt, now, started_at_dt)
+            deploy_window_end_dt = _max_datetime(deploy_window_end_dt, finished_at_dt)
         elif merged_age > timedelta(seconds=timeout_seconds):
             status = "failed"
             failure_reason = _stalled_reason(
@@ -411,8 +450,8 @@ def _build_reconciled_record(
                 live_image=live_image,
                 live_argo=live_argo,
             )
-            finished_at = finished_at or _serialize_datetime(now)
-            deploy_window_end = deploy_window_end or finished_at
+            finished_at_dt = _max_datetime(finished_at_dt, now, started_at_dt)
+            deploy_window_end_dt = _max_datetime(deploy_window_end_dt, finished_at_dt)
         else:
             status = "deploying"
 
@@ -454,10 +493,10 @@ def _build_reconciled_record(
         ),
         "sync_status": live_argo.get("syncStatus") if isinstance(live_argo.get("syncStatus"), str) else None,
         "health_status": live_argo.get("healthStatus") if isinstance(live_argo.get("healthStatus"), str) else None,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "deploy_window_start": deploy_window_start,
-        "deploy_window_end": deploy_window_end,
+        "started_at": _serialize_datetime(started_at_dt),
+        "finished_at": _serialize_datetime(finished_at_dt),
+        "deploy_window_start": _serialize_datetime(deploy_window_start_dt),
+        "deploy_window_end": _serialize_datetime(deploy_window_end_dt),
         "deploy_reason": (
             existing_record.get("deployReason")
             if existing_record and isinstance(existing_record.get("deployReason"), str)
