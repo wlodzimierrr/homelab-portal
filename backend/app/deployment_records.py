@@ -300,7 +300,7 @@ def upsert_deployment_record(
                     compare_url = COALESCE(EXCLUDED.compare_url, deployments.compare_url),
                     git_ref = COALESCE(EXCLUDED.git_ref, deployments.git_ref),
                     metadata = CASE
-                        WHEN EXCLUDED.metadata = '{{}}'::jsonb THEN deployments.metadata
+                        WHEN EXCLUDED.metadata = '{}'::jsonb THEN deployments.metadata
                         ELSE EXCLUDED.metadata
                     END,
                     updated_at = NOW()
