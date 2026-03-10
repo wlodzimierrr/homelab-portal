@@ -362,6 +362,15 @@ def _live_rollout_verified(
     return live_image == event.target_image
 
 
+def _terminal_status(record: dict[str, object] | None) -> str | None:
+    if not record:
+        return None
+    status = record.get("status")
+    if isinstance(status, str) and status in {"live", "failed"}:
+        return status
+    return None
+
+
 def _stalled_reason(
     *,
     target_image: str,
@@ -408,6 +417,92 @@ def _build_reconciled_record(
             previous_image = live_image
         else:
             previous_image = None
+
+    terminal_status = _terminal_status(existing_record)
+    existing_metadata = existing_record.get("metadata") if existing_record else None
+    if terminal_status is not None:
+        metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+        metadata.update(
+            {
+                "lastVerifiedAt": _serialize_datetime(now),
+                "liveImageRef": live_image,
+                "argoRevision": live_argo.get("revision"),
+                "argoSyncStatus": live_argo.get("syncStatus"),
+                "argoHealthStatus": live_argo.get("healthStatus"),
+                "argoOperationPhase": live_argo.get("operationPhase"),
+                "argoOperationMessage": live_argo.get("operationMessage"),
+            }
+        )
+        if terminal_status == "live":
+            metadata.pop("failureReason", None)
+        failure_reason = (
+            metadata.get("failureReason")
+            if isinstance(metadata.get("failureReason"), str)
+            else None
+        )
+        return {
+            "service_id": event.service_id,
+            "env": event.env,
+            "action": event.action,
+            "status": terminal_status,
+            "requested_by": (
+                existing_record.get("requestedBy")
+                if isinstance(existing_record.get("requestedBy"), str)
+                else event.requested_by
+            ),
+            "requested_at": _coalesce_datetime(existing_record.get("requestedAt") if existing_record else None, event.requested_at),
+            "pr_url": (
+                existing_record.get("prUrl")
+                if isinstance(existing_record.get("prUrl"), str)
+                else event.pr_url
+            ),
+            "pr_number": (
+                existing_record.get("prNumber")
+                if isinstance(existing_record.get("prNumber"), int)
+                else event.pr_number
+            ),
+            "merge_sha": (
+                existing_record.get("mergeSha")
+                if isinstance(existing_record.get("mergeSha"), str)
+                else event.merge_sha
+            ),
+            "target_image": (
+                existing_record.get("targetImage")
+                if isinstance(existing_record.get("targetImage"), str)
+                else event.target_image
+            ),
+            "previous_image": previous_image,
+            "argo_app": (
+                selected_service_row.get("argo_app_name")
+                if selected_service_row and isinstance(selected_service_row.get("argo_app_name"), str)
+                else existing_record.get("argoApp")
+                if existing_record and isinstance(existing_record.get("argoApp"), str)
+                else _canonical_argo_app(event.service_id, event.env)
+            ),
+            "sync_status": live_argo.get("syncStatus") if isinstance(live_argo.get("syncStatus"), str) else None,
+            "health_status": live_argo.get("healthStatus") if isinstance(live_argo.get("healthStatus"), str) else None,
+            "started_at": existing_started_at,
+            "finished_at": existing_finished_at,
+            "deploy_window_start": existing_window_start,
+            "deploy_window_end": existing_window_end,
+            "deploy_reason": (
+                existing_record.get("deployReason")
+                if existing_record and isinstance(existing_record.get("deployReason"), str)
+                else f"GitOps {event.action} via PR #{event.pr_number}"
+            ),
+            "compare_url": (
+                existing_record.get("compareUrl")
+                if existing_record and isinstance(existing_record.get("compareUrl"), str)
+                else _build_compare_url(event=event, previous_record=previous_record)
+            ),
+            "git_ref": (
+                existing_record.get("gitRef")
+                if existing_record and isinstance(existing_record.get("gitRef"), str)
+                else event.git_ref
+            ),
+            "request_key": event.request_key,
+            "metadata": metadata,
+        }
 
     failure_reason: str | None = None
     status = "pending"

@@ -384,3 +384,98 @@ def test_reconcile_config_change_finished_at_never_precedes_started_at(monkeypat
     assert captured[0]["status"] == "live"
     assert captured[0]["started_at"] == "2026-03-10T16:16:02+00:00"
     assert captured[0]["finished_at"] == "2026-03-10T16:16:35+00:00"
+
+
+def test_reconcile_preserves_terminal_live_status_for_historical_rows(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+    source_sha = "e" * 40
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 39,
+                "title": f"chore(dev): bump portal images to sha-{source_sha}",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/39",
+                "state": "closed",
+                "created_at": "2026-03-10T15:55:57Z",
+                "closed_at": "2026-03-10T16:08:08Z",
+                "merged_at": "2026-03-10T16:08:08Z",
+                "merge_commit_sha": "merge-sha-39",
+                "body": f"- backend -> `ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}`",
+                "user": {"login": "github-actions[bot]"},
+                "head": {"ref": f"automation/dev-image-bump-{source_sha}"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_args, **_kwargs: {
+            "status": "live",
+            "requestedBy": "github-actions[bot]",
+            "requestedAt": "2026-03-10T15:55:57+00:00",
+            "prUrl": "https://github.com/wlodzimierrr/homelab-workloads/pull/39",
+            "prNumber": 39,
+            "mergeSha": "merge-sha-39",
+            "targetImage": f"ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}",
+            "argoApp": "homelab-api-dev",
+            "startedAt": "2026-03-10T16:08:08+00:00",
+            "finishedAt": "2026-03-10T16:12:37+00:00",
+            "deployWindowStart": "2026-03-10T16:08:08+00:00",
+            "deployWindowEnd": "2026-03-10T16:12:37+00:00",
+            "deployReason": "GitOps deploy via PR #39",
+            "compareUrl": "https://github.com/wlodzimierrr/homelab-portal/compare/aaa...bbb",
+            "gitRef": f"automation/dev-image-bump-{source_sha}",
+            "metadata": {
+                "source": "deployment-reconciler",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_args, **_kwargs: {
+            "requestedAt": "2026-03-10T16:32:44+00:00",
+            "status": "live",
+        },
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        captured.append(kwargs)
+        return {"status": kwargs["status"]}
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+
+    summary = deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-10T16:37:00Z",
+            }
+        ],
+        select_preferred_service_row=lambda _service_id, rows, _env: rows[0],
+        load_live_argo_status=lambda _row: {
+            "syncStatus": "synced",
+            "healthStatus": "healthy",
+            "revision": "merge-sha-43",
+            "deployedAt": "2026-03-10T16:37:20Z",
+        },
+        list_live_deployments=lambda _row: [{"kind": "Deployment"}],
+        extract_live_image_ref=lambda _deployment: "ghcr.io/wlodzimierrr/homelab-api:sha-new",
+        service_id="homelab-api",
+        github_fetch_json=_fake_fetch,
+        now=datetime(2026, 3, 10, 16, 37, 21, tzinfo=timezone.utc),
+    )
+
+    assert summary["statusCounts"]["live"] == 1
+    assert captured[0]["status"] == "live"
+    assert captured[0]["started_at"] == "2026-03-10T16:08:08+00:00"
+    assert captured[0]["finished_at"] == "2026-03-10T16:12:37+00:00"
