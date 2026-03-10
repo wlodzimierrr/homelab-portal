@@ -686,7 +686,7 @@ def _upsert_deployment_record_row(
     )
 
     with _with_connection() as conn:
-        return upsert_deployment_record(
+        row = upsert_deployment_record(
             conn,
             service_id=payload.service_id,
             env=payload.env,
@@ -712,6 +712,9 @@ def _upsert_deployment_record_row(
             request_key=payload.request_key,
             metadata=payload.metadata,
         )
+    deployment_history_cache.clear()
+    deployment_reconcile_cache.clear()
+    return row
 
 
 def _parse_bool_env(var_name: str, default: bool) -> bool:
@@ -757,6 +760,7 @@ def _reconcile_recent_deployment_activity(
             service_id=service_id,
             env=env,
         )
+    deployment_history_cache.clear()
     return DeploymentReconcileResponse(**result)
 
 
