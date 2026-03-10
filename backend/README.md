@@ -7,10 +7,13 @@ FastAPI backend scaffold for task `T1.2.1`.
 - `GET /health`
 - `GET /health?includeProviders=true`
 - `POST /auth/login`
+- `POST /deployments`
+- `GET /deployments/{deploymentId}`
 - `GET /projects?env=dev`
 - `GET /projects/diagnostics?env=dev`
 - `GET /services?env=dev&namespace=homelab-api`
 - `GET /services/{serviceId}?env=dev`
+- `GET /services/{serviceId}/deployments?env=dev&limit=20`
 - `GET /catalog/reconciliation?env=dev`
 - `POST /service-registry/sync?source=cluster_services|gitops_apps&env=dev`
 - `GET /service-registry/diagnostics?env=dev`
