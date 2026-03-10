@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import math
 import os
+from threading import Event, Thread
 import time
 from typing import Any, Literal
 from uuid import uuid4
@@ -24,6 +25,7 @@ from app.deployment_records import (
     list_deployment_records_for_service,
     upsert_deployment_record,
 )
+from app.deployment_reconciler import reconcile_recent_gitops_deployments
 from app.health_timeline import (
     TimelinePoint,
     classify_timeline_status,
@@ -76,8 +78,11 @@ timeline_cache = TTLCache()
 logs_quickview_cache = TTLCache()
 alerts_cache = TTLCache()
 deployment_history_cache = TTLCache()
+deployment_reconcile_cache = TTLCache()
 metrics_namespace_label = os.getenv("OBS_METRICS_NAMESPACE", os.getenv("POD_NAMESPACE", "default"))
 metrics_app_label = os.getenv("OBS_METRICS_APP_LABEL", "homelab-api")
+deployment_reconciler_stop = Event()
+deployment_reconciler_thread: Thread | None = None
 http_requests_total = Counter(
     "http_requests_total",
     "Total HTTP requests handled by the homelab API.",
@@ -96,6 +101,7 @@ def clear_observability_caches_for_tests() -> None:
     logs_quickview_cache.clear()
     alerts_cache.clear()
     deployment_history_cache.clear()
+    deployment_reconcile_cache.clear()
 
 
 @app.middleware("http")
@@ -121,6 +127,47 @@ async def observe_http_requests(request, call_next):
             **labels,
             status=str(status_code),
         ).inc()
+
+
+@app.on_event("startup")
+def start_deployment_reconciler_loop() -> None:
+    global deployment_reconciler_thread
+
+    if not _deployment_reconciler_enabled():
+        return
+    if deployment_reconciler_thread and deployment_reconciler_thread.is_alive():
+        return
+
+    deployment_reconciler_stop.clear()
+
+    def _run() -> None:
+        logger.info(
+            "deployment_reconciler_started interval_seconds=%s",
+            _deployment_reconciler_interval_seconds(),
+        )
+        while not deployment_reconciler_stop.is_set():
+            try:
+                _reconcile_recent_deployment_activity()
+            except Exception as exc:  # pragma: no cover - live background loop only
+                logger.warning("deployment_reconciler_iteration_failed error=%s", exc)
+            deployment_reconciler_stop.wait(_deployment_reconciler_interval_seconds())
+
+    deployment_reconciler_thread = Thread(
+        target=_run,
+        name="deployment-reconciler",
+        daemon=True,
+    )
+    deployment_reconciler_thread.start()
+
+
+@app.on_event("shutdown")
+def stop_deployment_reconciler_loop() -> None:
+    global deployment_reconciler_thread
+
+    deployment_reconciler_stop.set()
+    if deployment_reconciler_thread and deployment_reconciler_thread.is_alive():
+        deployment_reconciler_thread.join(timeout=1.0)
+    deployment_reconciler_thread = None
 
 
 class MonitoringProviderStatusResponse(BaseModel):
@@ -252,6 +299,7 @@ class DeploymentRecordResponse(BaseModel):
     finished_at: str | None = Field(default=None, alias="finishedAt")
     deploy_window_start: str | None = Field(default=None, alias="deployWindowStart")
     deploy_window_end: str | None = Field(default=None, alias="deployWindowEnd")
+    failure_reason: str | None = Field(default=None, alias="failureReason")
     error_rate_pct: dict[str, float] | None = Field(default=None, alias="errorRatePct")
     p95_latency_ms: dict[str, float] | None = Field(default=None, alias="p95LatencyMs")
     availability_pct: dict[str, float] | None = Field(default=None, alias="availabilityPct")
@@ -262,6 +310,15 @@ class DeploymentRecordResponse(BaseModel):
 
 class ServiceDeploymentsResponse(BaseModel):
     deployments: list[DeploymentRecordResponse]
+
+
+class DeploymentReconcileResponse(BaseModel):
+    pull_requests_scanned: int = Field(alias="pullRequestsScanned")
+    records_upserted: int = Field(alias="recordsUpserted")
+    status_counts: dict[str, int] = Field(alias="statusCounts")
+    generated_at: str = Field(alias="generatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class CreateDeploymentRecordRequest(BaseModel):
@@ -657,6 +714,82 @@ def _upsert_deployment_record_row(
         )
 
 
+def _parse_bool_env(var_name: str, default: bool) -> bool:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _deployment_reconciler_enabled() -> bool:
+    default_enabled = bool(os.getenv("KUBERNETES_SERVICE_HOST"))
+    return _parse_bool_env("DEPLOYMENT_RECONCILER_ENABLED", default_enabled)
+
+
+def _deployment_reconciler_readthrough_enabled() -> bool:
+    return _parse_bool_env(
+        "DEPLOYMENT_RECONCILER_READTHROUGH_ENABLED",
+        _deployment_reconciler_enabled(),
+    )
+
+
+def _deployment_reconciler_interval_seconds() -> int:
+    return max(15, int(os.getenv("DEPLOYMENT_RECONCILER_INTERVAL_SECONDS", "60")))
+
+
+def _deployment_reconciler_read_ttl_seconds() -> int:
+    return max(0, int(os.getenv("DEPLOYMENT_RECONCILER_READ_TTL_SECONDS", "30")))
+
+
+def _reconcile_recent_deployment_activity(
+    *,
+    service_id: str | None = None,
+    env: str | None = None,
+) -> DeploymentReconcileResponse:
+    with _with_connection() as conn:
+        result = reconcile_recent_gitops_deployments(
+            conn,
+            load_service_rows=_load_service_rows,
+            select_preferred_service_row=_select_preferred_service_row,
+            load_live_argo_status=_load_live_argo_status_for_service,
+            list_live_deployments=_list_live_deployments_for_service,
+            extract_live_image_ref=_extract_live_deployment_image_ref,
+            service_id=service_id,
+            env=env,
+        )
+    return DeploymentReconcileResponse(**result)
+
+
+def _maybe_reconcile_recent_deployments(
+    *,
+    service_id: str | None = None,
+    env: str | None = None,
+) -> DeploymentReconcileResponse | None:
+    if not _deployment_reconciler_readthrough_enabled():
+        return None
+
+    cache_key = ("deployment-reconcile", service_id or "*", env or "*")
+    ttl_seconds = _deployment_reconciler_read_ttl_seconds()
+
+    def _load() -> DeploymentReconcileResponse | None:
+        try:
+            return _reconcile_recent_deployment_activity(service_id=service_id, env=env)
+        except Exception as exc:  # pragma: no cover - live fallback only
+            logger.warning(
+                "deployment_reconcile_readthrough_failed service_id=%s env=%s error=%s",
+                service_id,
+                env,
+                exc,
+            )
+            return None
+
+    return deployment_reconcile_cache.get_or_set(
+        key=cache_key,
+        ttl_seconds=ttl_seconds,
+        loader=_load,
+    )
+
+
 def _load_project_rows(env: str | None = None) -> list[dict[str, str | None]]:
     with _with_connection() as conn:
         with conn.cursor() as cur:
@@ -980,6 +1113,9 @@ def _load_live_argo_status_for_service(
     operation_state = status_payload.get("operationState", {})
     if not isinstance(operation_state, dict):
         operation_state = {}
+    operation_message = operation_state.get("message")
+    if not isinstance(operation_message, str):
+        operation_message = None
 
     return {
         "appName": app_name,
@@ -993,6 +1129,10 @@ def _load_live_argo_status_for_service(
         else status_payload.get("reconciledAt")
         if isinstance(status_payload.get("reconciledAt"), str)
         else None,
+        "operationPhase": operation_state.get("phase")
+        if isinstance(operation_state.get("phase"), str)
+        else None,
+        "operationMessage": operation_message,
     }
 
 
@@ -1512,6 +1652,12 @@ def _build_deployment_record_response(
         else {}
     )
     image_ref = record.get("targetImage") if isinstance(record.get("targetImage"), str) else None
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else None
+    failure_reason = (
+        metadata.get("failureReason")
+        if isinstance(metadata, dict) and isinstance(metadata.get("failureReason"), str)
+        else None
+    )
 
     return DeploymentRecordResponse(
         id=str(record.get("deploymentId") or ""),
@@ -1559,10 +1705,11 @@ def _build_deployment_record_response(
             if isinstance(record.get("deployWindowEnd"), str)
             else None
         ),
+        failureReason=failure_reason,
         errorRatePct=metric_snapshots.get("errorRatePct"),
         p95LatencyMs=metric_snapshots.get("p95LatencyMs"),
         availabilityPct=metric_snapshots.get("availabilityPct"),
-        metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
+        metadata=metadata,
     )
 
 
@@ -2180,6 +2327,20 @@ def get_service(
     )
 
 
+@app.post(
+    "/deployments/reconcile",
+    response_model=DeploymentReconcileResponse,
+    tags=["metadata"],
+)
+def reconcile_deployments(
+    service_id: str | None = Query(default=None, alias="serviceId"),
+    env: str | None = Query(default=None),
+    _: str = Depends(require_admin),
+) -> DeploymentReconcileResponse:
+    deployment_reconcile_cache.clear()
+    return _reconcile_recent_deployment_activity(service_id=service_id, env=env)
+
+
 @app.get(
     "/deployments/{deployment_id}",
     response_model=DeploymentRecordResponse,
@@ -2198,6 +2359,12 @@ def get_deployment(
 
     service_id = str(record.get("serviceId") or "")
     env = record.get("env") if isinstance(record.get("env"), str) else None
+    if service_id:
+        _maybe_reconcile_recent_deployments(service_id=service_id, env=env)
+        refreshed = _get_deployment_record_by_id(deployment_id)
+        if refreshed is not None:
+            record = refreshed
+
     service_rows = _load_service_rows(service_id=service_id or None, env=env)
     selected = _select_preferred_service_row(service_id, service_rows, env) if service_id else None
     return _build_deployment_record_response(record, selected)
@@ -2230,11 +2397,13 @@ def get_service_deployments(
     limit: int = Query(default=20, ge=1, le=100),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceDeploymentsResponse:
+    selected_env = env or os.getenv("PORTAL_ENV", "dev")
+    _maybe_reconcile_recent_deployments(service_id=service_id, env=selected_env)
     service_rows = _load_service_rows(service_id=service_id, env=env)
     selected = _select_preferred_service_row(
         service_id,
         service_rows,
-        env or os.getenv("PORTAL_ENV", "dev"),
+        selected_env,
     )
     rows = _list_deployment_records_for_service(service_id, env=env, limit=limit)
     deployments = [_build_deployment_record_response(row, selected) for row in rows]

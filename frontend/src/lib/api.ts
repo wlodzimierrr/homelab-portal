@@ -118,12 +118,34 @@ export interface DeploymentMetricSnapshot {
 
 export interface ServiceDeployment {
   id: string
+  serviceId?: string
+  env?: string
+  action?: string
   version?: string
   status?: string
+  requestedAt?: string
+  requestedBy?: string
   deployedAt?: string
+  imageRef?: string
+  previousImageRef?: string
+  gitRef?: string
+  gitPrUrl?: string
+  gitPrNumber?: number
+  compareUrl?: string
+  mergeSha?: string
+  argoApp?: string
+  syncStatus?: string
+  healthStatus?: string
+  deployReason?: string
+  startedAt?: string
+  finishedAt?: string
+  deployWindowStart?: string
+  deployWindowEnd?: string
+  failureReason?: string
   errorRatePct?: DeploymentMetricSnapshot
   p95LatencyMs?: DeploymentMetricSnapshot
   availabilityPct?: DeploymentMetricSnapshot
+  metadata?: Record<string, unknown>
 }
 
 export interface ReleaseTraceabilityArgoState {

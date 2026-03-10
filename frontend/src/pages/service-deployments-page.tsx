@@ -43,8 +43,10 @@ function normalizeServiceId(rawServiceId: string) {
 function OutcomeBadge({ outcome }: { outcome: string }) {
   const normalized = outcome.toLowerCase()
   const tone =
-    normalized === 'succeeded' || normalized === 'healthy'
+    normalized === 'live' || normalized === 'succeeded' || normalized === 'healthy'
       ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+      : normalized === 'deploying' || normalized === 'pending'
+        ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
       : normalized === 'failed' || normalized === 'degraded' || normalized === 'error'
         ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
         : 'bg-muted text-muted-foreground'
@@ -54,6 +56,13 @@ function OutcomeBadge({ outcome }: { outcome: string }) {
       {outcome}
     </span>
   )
+}
+
+function formatAction(action: string) {
+  if (action === 'config-change') {
+    return 'Config change'
+  }
+  return action.charAt(0).toUpperCase() + action.slice(1)
 }
 
 function formatDelta(unit: 'pct' | 'ms', value?: number) {
@@ -178,7 +187,7 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-muted-foreground">
-            Showing up to 20 recent deployments with error, latency, and availability deltas.
+            Showing up to 20 recent deployment records with lifecycle state, Git linkage, and observability deltas.
           </p>
           <AppLink
             to={`/services/${encodeURIComponent(normalizedServiceId)}`}
@@ -242,22 +251,39 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
             <table className="min-w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-border">
-                  <th className="px-3 py-2 font-medium text-muted-foreground">Deployed At</th>
-                  <th className="px-3 py-2 font-medium text-muted-foreground">Version / Tag</th>
-                  <th className="px-3 py-2 font-medium text-muted-foreground">Outcome</th>
+                  <th className="px-3 py-2 font-medium text-muted-foreground">Requested / Completed</th>
+                  <th className="px-3 py-2 font-medium text-muted-foreground">Action / Version</th>
+                  <th className="px-3 py-2 font-medium text-muted-foreground">Status</th>
                   <th className="px-3 py-2 font-medium text-muted-foreground">Error Rate Delta</th>
                   <th className="px-3 py-2 font-medium text-muted-foreground">P95 Latency Delta</th>
                   <th className="px-3 py-2 font-medium text-muted-foreground">Availability Impact</th>
-                  <th className="px-3 py-2 font-medium text-muted-foreground">Observability</th>
+                  <th className="px-3 py-2 font-medium text-muted-foreground">Git / Reason</th>
                 </tr>
               </thead>
               <tbody>
                 {visibleDeployments.map((item) => (
                   <tr key={item.id} className="border-b border-border/70">
-                    <td className="px-3 py-2 text-muted-foreground">{formatTimestamp(item.deployedAt)}</td>
-                    <td className="px-3 py-2">{item.version}</td>
                     <td className="px-3 py-2">
-                      <OutcomeBadge outcome={item.outcome} />
+                      <p className="text-muted-foreground">{formatTimestamp(item.requestedAt)}</p>
+                      <p className="text-xs text-muted-foreground">completed: {formatTimestamp(item.deployedAt)}</p>
+                    </td>
+                    <td className="px-3 py-2">
+                      <p className="font-medium">{formatAction(item.action)}</p>
+                      <p>{item.version}</p>
+                      {item.argoApp ? <p className="text-xs text-muted-foreground">Argo: {item.argoApp}</p> : null}
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="space-y-1">
+                        <OutcomeBadge outcome={item.outcome} />
+                        {item.failureReason ? (
+                          <p className="max-w-xs text-xs text-amber-700 dark:text-amber-300">{item.failureReason}</p>
+                        ) : null}
+                        {!item.failureReason && (item.syncStatus || item.healthStatus) ? (
+                          <p className="text-xs text-muted-foreground">
+                            sync: {item.syncStatus ?? 'unknown'} / health: {item.healthStatus ?? 'unknown'}
+                          </p>
+                        ) : null}
+                      </div>
                     </td>
                     <td className="px-3 py-2">
                       <p>{formatBeforeAfter('pct', item.errorRatePct.before, item.errorRatePct.after)}</p>
@@ -278,7 +304,35 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
                       </p>
                     </td>
                     <td className="px-3 py-2">
-                      <ImpactBadge item={item} />
+                      <div className="space-y-1">
+                        <ImpactBadge item={item} />
+                        {item.gitPrUrl ? (
+                          <a
+                            href={item.gitPrUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block text-xs text-primary hover:underline"
+                          >
+                            PR #{item.gitPrNumber ?? 'link'}
+                          </a>
+                        ) : null}
+                        {item.compareUrl ? (
+                          <a
+                            href={item.compareUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block text-xs text-primary hover:underline"
+                          >
+                            Compare / diff
+                          </a>
+                        ) : null}
+                        {item.deployReason ? (
+                          <p className="max-w-xs text-xs text-muted-foreground">{item.deployReason}</p>
+                        ) : null}
+                        {!item.deployReason && item.gitRef ? (
+                          <p className="max-w-xs text-xs text-muted-foreground">{item.gitRef}</p>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 ))}

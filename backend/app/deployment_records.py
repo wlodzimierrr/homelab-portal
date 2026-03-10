@@ -181,6 +181,53 @@ def get_deployment_record(
     return _row_from_tuple(row)
 
 
+def get_deployment_record_by_request_key(
+    conn: psycopg.Connection,
+    request_key: str,
+) -> DeploymentRecordRow | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            {_base_select_sql()}
+            WHERE request_key = %s
+            """,
+            (request_key,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return _row_from_tuple(row)
+
+
+def get_latest_deployment_record_for_service(
+    conn: psycopg.Connection,
+    *,
+    service_id: str,
+    env: str,
+    exclude_request_key: str | None = None,
+) -> DeploymentRecordRow | None:
+    conditions = ["service_id = %s", "env = %s"]
+    params: list[object] = [service_id, env]
+    if exclude_request_key:
+        conditions.append("(request_key IS NULL OR request_key <> %s)")
+        params.append(exclude_request_key)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            {_base_select_sql()}
+            WHERE {' AND '.join(conditions)}
+            ORDER BY requested_at DESC, deployment_id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return _row_from_tuple(row)
+
+
 def upsert_deployment_record(
     conn: psycopg.Connection,
     *,

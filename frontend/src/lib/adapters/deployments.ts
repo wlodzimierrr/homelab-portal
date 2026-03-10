@@ -16,9 +16,22 @@ export interface DeploymentMetricSnapshot {
 export interface DeploymentHistoryItem {
   id: string
   identity: ServiceIdentity
+  action: string
   version: string
   outcome: string
+  requestedAt?: string
+  requestedBy?: string
   deployedAt?: string
+  gitPrUrl?: string
+  gitPrNumber?: number
+  compareUrl?: string
+  gitRef?: string
+  deployReason?: string
+  failureReason?: string
+  argoApp?: string
+  syncStatus?: string
+  healthStatus?: string
+  metadata?: Record<string, unknown>
   errorRatePct: DeploymentMetricSnapshot
   p95LatencyMs: DeploymentMetricSnapshot
   availabilityPct: DeploymentMetricSnapshot
@@ -50,9 +63,22 @@ function normalizeDeployment(item: ServiceDeployment, identity: ServiceIdentity)
   return {
     id: item.id,
     identity,
+    action: item.action ?? 'deploy',
     version: item.version ?? 'N/A',
     outcome: item.status ?? 'unknown',
-    deployedAt: item.deployedAt,
+    requestedAt: item.requestedAt,
+    requestedBy: item.requestedBy,
+    deployedAt: item.deployedAt ?? item.finishedAt ?? item.startedAt ?? item.requestedAt,
+    gitPrUrl: item.gitPrUrl,
+    gitPrNumber: item.gitPrNumber,
+    compareUrl: item.compareUrl,
+    gitRef: item.gitRef,
+    deployReason: item.deployReason,
+    failureReason: item.failureReason,
+    argoApp: item.argoApp,
+    syncStatus: item.syncStatus,
+    healthStatus: item.healthStatus,
+    metadata: item.metadata,
     errorRatePct: errorRate,
     p95LatencyMs: latency,
     availabilityPct: availability,
@@ -88,6 +114,7 @@ function normalizeReleaseDeployment(
   return {
     id: deployedAt || commitSha || `${identity.serviceId}:${index}`,
     identity,
+    action: 'deploy',
     version: deriveVersionFromImageRef(item.imageRef),
     outcome: healthStatus || syncStatus || 'unknown',
     deployedAt,

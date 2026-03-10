@@ -695,6 +695,108 @@
         }
       }
     },
+    "/deployments/reconcile": {
+      "post": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Reconcile Deployments",
+        "operationId": "reconcile_deployments_deployments_reconcile_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Serviceid"
+            }
+          },
+          {
+            "name": "env",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Env"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentReconcileResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/services/{service_id}/deployments": {
       "get": {
         "tags": [
@@ -2656,6 +2758,37 @@
         ],
         "title": "CreateProjectRequest"
       },
+      "DeploymentReconcileResponse": {
+        "properties": {
+          "pullRequestsScanned": {
+            "type": "integer",
+            "title": "Pullrequestsscanned"
+          },
+          "recordsUpserted": {
+            "type": "integer",
+            "title": "Recordsupserted"
+          },
+          "statusCounts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Statuscounts"
+          },
+          "generatedAt": {
+            "type": "string",
+            "title": "Generatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pullRequestsScanned",
+          "recordsUpserted",
+          "statusCounts",
+          "generatedAt"
+        ],
+        "title": "DeploymentReconcileResponse"
+      },
       "DeploymentRecordResponse": {
         "properties": {
           "id": {
@@ -2904,6 +3037,17 @@
               }
             ],
             "title": "Deploywindowend"
+          },
+          "failureReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failurereason"
           },
           "errorRatePct": {
             "anyOf": [
