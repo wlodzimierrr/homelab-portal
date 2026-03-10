@@ -36,6 +36,8 @@ concurrency:
 
 env:
   GITOPS_REPO: wlodzimierrr/homelab-workloads
+  PORTAL_DEPLOYMENT_API_URL: ${{ secrets.PORTAL_DEPLOYMENT_API_URL }}
+  PORTAL_DEPLOYMENT_API_TOKEN: ${{ secrets.PORTAL_DEPLOYMENT_API_TOKEN }}
 
 jobs:
   prepare:
@@ -268,6 +270,7 @@ jobs:
           done <<< "$changed_files"
 
       - name: Create PR in GitOps repo
+        id: create_pr
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.HOMELAB_WORKLOADS_REPO_TOKEN }}
@@ -277,3 +280,71 @@ jobs:
           title: ${{ needs.prepare.outputs.pr_title }}
           commit-message: ${{ needs.prepare.outputs.pr_title }}
           body: ${{ needs.prepare.outputs.pr_body }}
+
+      - name: Record deployment requests in portal backend
+        env:
+          TARGET_ENV: ${{ needs.prepare.outputs.target_environment }}
+          ACTION_MODE: ${{ needs.prepare.outputs.action_mode }}
+          API_TAG: ${{ needs.prepare.outputs.api_tag }}
+          WEB_TAG: ${{ needs.prepare.outputs.web_tag }}
+          BRANCH_NAME: ${{ needs.prepare.outputs.branch_name }}
+          PR_URL: ${{ steps.create_pr.outputs.pull-request-url }}
+          PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PORTAL_DEPLOYMENT_API_URL:-}" ] || [ -z "${PORTAL_DEPLOYMENT_API_TOKEN:-}" ]; then
+            echo "Skipping deployment record write; PORTAL_DEPLOYMENT_API_URL or PORTAL_DEPLOYMENT_API_TOKEN is not configured."
+            exit 0
+          fi
+
+          api_url="${PORTAL_DEPLOYMENT_API_URL%/}/deployments"
+
+          record() {
+            local service_id="$1"
+            local image_ref="$2"
+            local argo_app="$3"
+            local request_key="$4"
+
+            cat <<EOF >/tmp/deployment-record.json
+          {
+            "serviceId": "${service_id}",
+            "env": "${TARGET_ENV}",
+            "action": "${ACTION_MODE}",
+            "status": "pending",
+            "gitPrUrl": "${PR_URL}",
+            "gitPrNumber": ${PR_NUMBER},
+            "imageRef": "${image_ref}",
+            "argoApp": "${argo_app}",
+            "gitRef": "${BRANCH_NAME}",
+            "deployReason": "GitHub gated ${ACTION_MODE} request",
+            "requestKey": "${request_key}",
+            "metadata": {
+              "source": "gated-promotion.yml",
+              "workflowRunId": "${GITHUB_RUN_ID}",
+              "workflowRunUrl": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+              "gitopsRepo": "${GITOPS_REPO}"
+            }
+          }
+          EOF
+
+            curl --fail-with-body --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer ${PORTAL_DEPLOYMENT_API_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data @/tmp/deployment-record.json \
+              "${api_url}"
+          }
+
+          record \
+            "homelab-api" \
+            "ghcr.io/${OWNER}/homelab-api:${API_TAG}" \
+            "homelab-api-${TARGET_ENV}" \
+            "gated-promotion:${GITHUB_RUN_ID}:homelab-api:${TARGET_ENV}:${ACTION_MODE}"
+
+          record \
+            "homelab-web" \
+            "ghcr.io/${OWNER}/homelab-web:${WEB_TAG}" \
+            "homelab-web-${TARGET_ENV}" \
+            "gated-promotion:${GITHUB_RUN_ID}:homelab-web:${TARGET_ENV}:${ACTION_MODE}"

@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import time
+from typing import Any, Literal
 from uuid import uuid4
 from urllib import parse as urlparse
 
@@ -18,6 +19,11 @@ from app.alerts_feed import (
 )
 from app.catalog_reconciliation import build_catalog_join
 from app.db import get_psycopg_database_url
+from app.deployment_records import (
+    get_deployment_record,
+    list_deployment_records_for_service,
+    upsert_deployment_record,
+)
 from app.health_timeline import (
     TimelinePoint,
     classify_timeline_status,
@@ -220,20 +226,70 @@ class ServiceDetailResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-class ServiceDeploymentResponse(BaseModel):
+class DeploymentRecordResponse(BaseModel):
     id: str
+    service_id: str = Field(alias="serviceId")
+    env: str
+    action: str
     version: str | None = None
     status: str | None = None
+    requested_at: str | None = Field(default=None, alias="requestedAt")
+    requested_by: str | None = Field(default=None, alias="requestedBy")
     deployed_at: str | None = Field(default=None, alias="deployedAt")
+    commit_sha: str | None = Field(default=None, alias="commitSha")
+    image_ref: str | None = Field(default=None, alias="imageRef")
+    previous_image_ref: str | None = Field(default=None, alias="previousImageRef")
+    git_ref: str | None = Field(default=None, alias="gitRef")
+    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
+    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
+    compare_url: str | None = Field(default=None, alias="compareUrl")
+    merge_sha: str | None = Field(default=None, alias="mergeSha")
+    argo_app: str | None = Field(default=None, alias="argoApp")
+    sync_status: str | None = Field(default=None, alias="syncStatus")
+    health_status: str | None = Field(default=None, alias="healthStatus")
+    deploy_reason: str | None = Field(default=None, alias="deployReason")
+    started_at: str | None = Field(default=None, alias="startedAt")
+    finished_at: str | None = Field(default=None, alias="finishedAt")
+    deploy_window_start: str | None = Field(default=None, alias="deployWindowStart")
+    deploy_window_end: str | None = Field(default=None, alias="deployWindowEnd")
     error_rate_pct: dict[str, float] | None = Field(default=None, alias="errorRatePct")
     p95_latency_ms: dict[str, float] | None = Field(default=None, alias="p95LatencyMs")
     availability_pct: dict[str, float] | None = Field(default=None, alias="availabilityPct")
+    metadata: dict[str, Any] | None = None
 
     model_config = ConfigDict(populate_by_name=True)
 
 
 class ServiceDeploymentsResponse(BaseModel):
-    deployments: list[ServiceDeploymentResponse]
+    deployments: list[DeploymentRecordResponse]
+
+
+class CreateDeploymentRecordRequest(BaseModel):
+    service_id: str = Field(alias="serviceId", min_length=1)
+    env: str = Field(min_length=1)
+    action: Literal["deploy", "promote", "rollback", "config-change"]
+    status: Literal["pending", "deploying", "live", "failed"] = "pending"
+    requested_at: datetime | None = Field(default=None, alias="requestedAt")
+    requested_by: str | None = Field(default=None, alias="requestedBy")
+    pr_url: str | None = Field(default=None, alias="gitPrUrl")
+    pr_number: int | None = Field(default=None, alias="gitPrNumber")
+    merge_sha: str | None = Field(default=None, alias="mergeSha")
+    target_image: str | None = Field(default=None, alias="imageRef")
+    previous_image: str | None = Field(default=None, alias="previousImageRef")
+    argo_app: str | None = Field(default=None, alias="argoApp")
+    sync_status: str | None = Field(default=None, alias="syncStatus")
+    health_status: str | None = Field(default=None, alias="healthStatus")
+    started_at: datetime | None = Field(default=None, alias="startedAt")
+    finished_at: datetime | None = Field(default=None, alias="finishedAt")
+    deploy_window_start: datetime | None = Field(default=None, alias="deployWindowStart")
+    deploy_window_end: datetime | None = Field(default=None, alias="deployWindowEnd")
+    deploy_reason: str | None = Field(default=None, alias="deployReason")
+    compare_url: str | None = Field(default=None, alias="compareUrl")
+    git_ref: str | None = Field(default=None, alias="gitRef")
+    request_key: str | None = Field(default=None, alias="requestKey")
+    metadata: dict[str, Any] | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ServiceRegistrySyncFailure(BaseModel):
@@ -534,6 +590,71 @@ def require_admin(
 
 def _with_connection() -> psycopg.Connection:
     return psycopg.connect(get_psycopg_database_url())
+
+
+def _list_deployment_records_for_service(
+    service_id: str,
+    env: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, object]]:
+    with _with_connection() as conn:
+        return list_deployment_records_for_service(
+            conn,
+            service_id=service_id,
+            env=env,
+            limit=limit,
+        )
+
+
+def _get_deployment_record_by_id(deployment_id: str) -> dict[str, object] | None:
+    with _with_connection() as conn:
+        return get_deployment_record(conn, deployment_id)
+
+
+def _upsert_deployment_record_row(
+    payload: CreateDeploymentRecordRequest,
+    *,
+    requested_by: str | None = None,
+) -> dict[str, object]:
+    service_rows = _load_service_rows(service_id=payload.service_id, env=payload.env)
+    selected = _select_preferred_service_row(
+        payload.service_id,
+        service_rows,
+        payload.env,
+    )
+    inferred_argo_app = (
+        selected["argo_app_name"]
+        if selected and isinstance(selected.get("argo_app_name"), str)
+        else None
+    )
+
+    with _with_connection() as conn:
+        return upsert_deployment_record(
+            conn,
+            service_id=payload.service_id,
+            env=payload.env,
+            action=payload.action,
+            status=payload.status,
+            requested_by=payload.requested_by or requested_by,
+            requested_at=payload.requested_at,
+            pr_url=payload.pr_url,
+            pr_number=payload.pr_number,
+            merge_sha=payload.merge_sha,
+            target_image=payload.target_image,
+            previous_image=payload.previous_image,
+            argo_app=payload.argo_app or inferred_argo_app,
+            sync_status=payload.sync_status,
+            health_status=payload.health_status,
+            started_at=payload.started_at,
+            finished_at=payload.finished_at,
+            deploy_window_start=payload.deploy_window_start,
+            deploy_window_end=payload.deploy_window_end,
+            deploy_reason=payload.deploy_reason,
+            compare_url=payload.compare_url,
+            git_ref=payload.git_ref,
+            request_key=payload.request_key,
+            metadata=payload.metadata,
+        )
 
 
 def _load_project_rows(env: str | None = None) -> list[dict[str, str | None]]:
@@ -1372,6 +1493,79 @@ def _load_deployment_metric_snapshots(
     )
 
 
+def _deployment_record_sort_timestamp(record: dict[str, object]) -> str | None:
+    for key in ("finishedAt", "deployWindowStart", "startedAt", "requestedAt"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _build_deployment_record_response(
+    record: dict[str, object],
+    service_row: dict[str, str | None] | None,
+) -> DeploymentRecordResponse:
+    observed_at = _deployment_record_sort_timestamp(record)
+    metric_snapshots = (
+        _load_deployment_metric_snapshots(service_row, {"deployedAt": observed_at})
+        if observed_at
+        else {}
+    )
+    image_ref = record.get("targetImage") if isinstance(record.get("targetImage"), str) else None
+
+    return DeploymentRecordResponse(
+        id=str(record.get("deploymentId") or ""),
+        serviceId=str(record.get("serviceId") or ""),
+        env=str(record.get("env") or ""),
+        action=str(record.get("action") or ""),
+        version=_extract_version_from_image_ref(image_ref),
+        status=record.get("status") if isinstance(record.get("status"), str) else None,
+        requestedAt=record.get("requestedAt") if isinstance(record.get("requestedAt"), str) else None,
+        requestedBy=record.get("requestedBy") if isinstance(record.get("requestedBy"), str) else None,
+        deployedAt=observed_at,
+        commitSha=record.get("mergeSha") if isinstance(record.get("mergeSha"), str) else None,
+        imageRef=image_ref,
+        previousImageRef=(
+            record.get("previousImage")
+            if isinstance(record.get("previousImage"), str)
+            else None
+        ),
+        gitRef=record.get("gitRef") if isinstance(record.get("gitRef"), str) else None,
+        gitPrUrl=record.get("prUrl") if isinstance(record.get("prUrl"), str) else None,
+        gitPrNumber=record.get("prNumber") if isinstance(record.get("prNumber"), int) else None,
+        compareUrl=record.get("compareUrl") if isinstance(record.get("compareUrl"), str) else None,
+        mergeSha=record.get("mergeSha") if isinstance(record.get("mergeSha"), str) else None,
+        argoApp=record.get("argoApp") if isinstance(record.get("argoApp"), str) else None,
+        syncStatus=record.get("syncStatus") if isinstance(record.get("syncStatus"), str) else None,
+        healthStatus=(
+            record.get("healthStatus")
+            if isinstance(record.get("healthStatus"), str)
+            else None
+        ),
+        deployReason=(
+            record.get("deployReason")
+            if isinstance(record.get("deployReason"), str)
+            else None
+        ),
+        startedAt=record.get("startedAt") if isinstance(record.get("startedAt"), str) else None,
+        finishedAt=record.get("finishedAt") if isinstance(record.get("finishedAt"), str) else None,
+        deployWindowStart=(
+            record.get("deployWindowStart")
+            if isinstance(record.get("deployWindowStart"), str)
+            else None
+        ),
+        deployWindowEnd=(
+            record.get("deployWindowEnd")
+            if isinstance(record.get("deployWindowEnd"), str)
+            else None
+        ),
+        errorRatePct=metric_snapshots.get("errorRatePct"),
+        p95LatencyMs=metric_snapshots.get("p95LatencyMs"),
+        availabilityPct=metric_snapshots.get("availabilityPct"),
+        metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
+    )
+
+
 def _query_prometheus_scalar(
     query: str,
     metric_name: str,
@@ -1987,6 +2181,45 @@ def get_service(
 
 
 @app.get(
+    "/deployments/{deployment_id}",
+    response_model=DeploymentRecordResponse,
+    tags=["metadata"],
+)
+def get_deployment(
+    deployment_id: str,
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> DeploymentRecordResponse:
+    record = _get_deployment_record_by_id(deployment_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment record not found",
+        )
+
+    service_id = str(record.get("serviceId") or "")
+    env = record.get("env") if isinstance(record.get("env"), str) else None
+    service_rows = _load_service_rows(service_id=service_id or None, env=env)
+    selected = _select_preferred_service_row(service_id, service_rows, env) if service_id else None
+    return _build_deployment_record_response(record, selected)
+
+
+@app.post(
+    "/deployments",
+    response_model=DeploymentRecordResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["metadata"],
+)
+def create_deployment_record(
+    payload: CreateDeploymentRecordRequest,
+    admin_user: str = Depends(require_admin),
+) -> DeploymentRecordResponse:
+    record = _upsert_deployment_record_row(payload, requested_by=admin_user)
+    service_rows = _load_service_rows(service_id=payload.service_id, env=payload.env)
+    selected = _select_preferred_service_row(payload.service_id, service_rows, payload.env)
+    return _build_deployment_record_response(record, selected)
+
+
+@app.get(
     "/services/{service_id}/deployments",
     response_model=ServiceDeploymentsResponse,
     tags=["metadata"],
@@ -1994,6 +2227,7 @@ def get_service(
 def get_service_deployments(
     service_id: str,
     env: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceDeploymentsResponse:
     service_rows = _load_service_rows(service_id=service_id, env=env)
@@ -2002,34 +2236,8 @@ def get_service_deployments(
         service_rows,
         env or os.getenv("PORTAL_ENV", "dev"),
     )
-    rows = _sort_release_rows_by_deployed_at(_load_release_rows_for_service(service_id, env))
-    if selected and not any(_release_row_has_meaningful_metadata(row) for row in rows):
-        rows = _sort_release_rows_by_deployed_at(_load_live_service_runtime_rows(selected))
-
-    deployments: list[ServiceDeploymentResponse] = []
-    for index, row in enumerate(rows):
-        metric_snapshots = _load_deployment_metric_snapshots(selected, row)
-        deployments.append(
-            ServiceDeploymentResponse(
-                id=str(row.get("commitSha") or row.get("deployedAt") or f"{service_id}:{index}"),
-                version=_extract_version_from_image_ref(
-                    row.get("imageRef") if isinstance(row.get("imageRef"), str) else None
-                ),
-                status=(
-                    row["argo"].get("healthStatus")
-                    if isinstance(row.get("argo"), dict)
-                    and isinstance(row["argo"].get("healthStatus"), str)
-                    else row["argo"].get("syncStatus")
-                    if isinstance(row.get("argo"), dict)
-                    and isinstance(row["argo"].get("syncStatus"), str)
-                    else None
-                ),
-                deployedAt=row.get("deployedAt") if isinstance(row.get("deployedAt"), str) else None,
-                errorRatePct=metric_snapshots.get("errorRatePct"),
-                p95LatencyMs=metric_snapshots.get("p95LatencyMs"),
-                availabilityPct=metric_snapshots.get("availabilityPct"),
-            )
-        )
+    rows = _list_deployment_records_for_service(service_id, env=env, limit=limit)
+    deployments = [_build_deployment_record_response(row, selected) for row in rows]
 
     return ServiceDeploymentsResponse(deployments=deployments)
 

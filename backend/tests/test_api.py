@@ -1324,7 +1324,7 @@ def test_service_details_fall_back_to_live_runtime_metadata(monkeypatch) -> None
     assert body["sync"] == "synced"
 
 
-def test_service_deployments_endpoint_returns_release_rows(monkeypatch) -> None:
+def test_service_deployments_endpoint_returns_deployment_records(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.main._load_service_rows",
         lambda **_kwargs: [
@@ -1342,29 +1342,26 @@ def test_service_deployments_endpoint_returns_release_rows(monkeypatch) -> None:
         ],
     )
     monkeypatch.setattr(
-        "app.main._load_release_rows_for_service",
+        "app.main._list_deployment_records_for_service",
         lambda *_args, **_kwargs: [
             {
+                "deploymentId": "dep-123",
                 "serviceId": "homelab-api",
                 "env": "dev",
-                "commitSha": "abc123",
-                "imageRef": "ghcr.io/example/homelab-api:v1.2.3",
-                "deployedAt": "2026-03-06T12:00:00Z",
-                "argo": {
-                    "appName": "homelab-api-dev",
-                    "syncStatus": "synced",
-                    "healthStatus": "healthy",
-                    "revision": "abc123",
-                },
-                "drift": {
-                    "isDrifted": False,
-                    "expectedRevision": "abc123",
-                    "liveRevision": "abc123",
-                },
+                "action": "deploy",
+                "status": "live",
+                "requestedAt": "2026-03-06T11:55:00Z",
+                "finishedAt": "2026-03-06T12:00:00Z",
+                "mergeSha": "abc123",
+                "targetImage": "ghcr.io/example/homelab-api:v1.2.3",
+                "prUrl": "https://github.com/example/homelab-workloads/pull/12",
+                "prNumber": 12,
+                "compareUrl": "https://github.com/example/homelab-portal/compare/old...new",
+                "gitRef": "automation/dev-image-bump-abc123",
+                "metadata": {"source": "workflow"},
             }
         ],
     )
-    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
     monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: {})
 
     response = client.get(
@@ -1375,13 +1372,19 @@ def test_service_deployments_endpoint_returns_release_rows(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert len(body["deployments"]) == 1
-    assert body["deployments"][0]["id"] == "abc123"
+    assert body["deployments"][0]["id"] == "dep-123"
+    assert body["deployments"][0]["serviceId"] == "homelab-api"
+    assert body["deployments"][0]["env"] == "dev"
+    assert body["deployments"][0]["action"] == "deploy"
     assert body["deployments"][0]["version"] == "v1.2.3"
-    assert body["deployments"][0]["status"] == "healthy"
+    assert body["deployments"][0]["status"] == "live"
+    assert body["deployments"][0]["requestedAt"] == "2026-03-06T11:55:00Z"
     assert body["deployments"][0]["deployedAt"] == "2026-03-06T12:00:00Z"
+    assert body["deployments"][0]["gitPrUrl"] == "https://github.com/example/homelab-workloads/pull/12"
+    assert body["deployments"][0]["compareUrl"] == "https://github.com/example/homelab-portal/compare/old...new"
 
 
-def test_service_deployments_endpoint_falls_back_to_live_runtime_rows(monkeypatch) -> None:
+def test_service_deployments_endpoint_returns_empty_list_without_records(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.main._load_service_rows",
         lambda **_kwargs: [
@@ -1398,52 +1401,7 @@ def test_service_deployments_endpoint_falls_back_to_live_runtime_rows(monkeypatc
             }
         ],
     )
-    monkeypatch.setattr(
-        "app.main._load_release_rows_for_service",
-        lambda *_args, **_kwargs: [
-            {
-                "serviceId": "homelab-api",
-                "env": "dev",
-                "commitSha": None,
-                "imageRef": None,
-                "deployedAt": None,
-                "argo": {
-                    "appName": "homelab-api-dev",
-                    "syncStatus": "unknown",
-                    "healthStatus": "unknown",
-                    "revision": None,
-                },
-                "drift": {
-                    "isDrifted": False,
-                    "expectedRevision": None,
-                    "liveRevision": None,
-                },
-            }
-        ],
-    )
-    monkeypatch.setattr(
-        "app.main._load_live_service_runtime_rows",
-        lambda _row: [
-            {
-                "serviceId": "homelab-api",
-                "env": "dev",
-                "commitSha": None,
-                "imageRef": "ghcr.io/example/homelab-api:v2.0.0",
-                "deployedAt": "2026-03-07T10:00:00Z",
-                "argo": {
-                    "appName": "homelab-api-dev",
-                    "syncStatus": "synced",
-                    "healthStatus": "healthy",
-                    "revision": "def456",
-                },
-                "drift": {
-                    "isDrifted": False,
-                    "expectedRevision": None,
-                    "liveRevision": "def456",
-                },
-            }
-        ],
-    )
+    monkeypatch.setattr("app.main._list_deployment_records_for_service", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: {})
 
     response = client.get(
@@ -1453,10 +1411,7 @@ def test_service_deployments_endpoint_falls_back_to_live_runtime_rows(monkeypatc
 
     assert response.status_code == 200
     body = response.json()
-    assert len(body["deployments"]) == 1
-    assert body["deployments"][0]["version"] == "v2.0.0"
-    assert body["deployments"][0]["status"] == "healthy"
-    assert body["deployments"][0]["deployedAt"] == "2026-03-07T10:00:00Z"
+    assert body["deployments"] == []
 
 
 def test_service_deployments_endpoint_includes_observability_snapshots(monkeypatch) -> None:
@@ -1477,29 +1432,21 @@ def test_service_deployments_endpoint_includes_observability_snapshots(monkeypat
         ],
     )
     monkeypatch.setattr(
-        "app.main._load_release_rows_for_service",
+        "app.main._list_deployment_records_for_service",
         lambda *_args, **_kwargs: [
             {
+                "deploymentId": "dep-123",
                 "serviceId": "homelab-api",
                 "env": "dev",
-                "commitSha": "abc123",
-                "imageRef": "ghcr.io/example/homelab-api:v1.2.3",
-                "deployedAt": "2026-03-06T12:00:00Z",
-                "argo": {
-                    "appName": "homelab-api-dev",
-                    "syncStatus": "synced",
-                    "healthStatus": "healthy",
-                    "revision": "abc123",
-                },
-                "drift": {
-                    "isDrifted": False,
-                    "expectedRevision": "abc123",
-                    "liveRevision": "abc123",
-                },
+                "action": "deploy",
+                "status": "live",
+                "requestedAt": "2026-03-06T11:55:00Z",
+                "finishedAt": "2026-03-06T12:00:00Z",
+                "mergeSha": "abc123",
+                "targetImage": "ghcr.io/example/homelab-api:v1.2.3",
             }
         ],
     )
-    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
     monkeypatch.setattr(
         "app.main._load_deployment_metric_snapshots",
         lambda *_args, **_kwargs: {
@@ -1519,6 +1466,157 @@ def test_service_deployments_endpoint_includes_observability_snapshots(monkeypat
     assert body["deployments"][0]["errorRatePct"] == {"before": 0.1, "after": 0.3, "delta": 0.2}
     assert body["deployments"][0]["p95LatencyMs"] == {"before": 110.0, "after": 140.0, "delta": 30.0}
     assert body["deployments"][0]["availabilityPct"] == {"before": 99.9, "after": 99.4, "delta": -0.5}
+
+
+def test_create_deployment_record_endpoint_returns_record(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_upsert(payload, *, requested_by):
+        captured["service_id"] = payload.service_id
+        captured["env"] = payload.env
+        captured["action"] = payload.action
+        captured["requested_by"] = requested_by
+        return {
+            "deploymentId": "dep-123",
+            "serviceId": payload.service_id,
+            "env": payload.env,
+            "action": payload.action,
+            "status": payload.status,
+            "requestedAt": "2026-03-09T20:00:00Z",
+            "requestedBy": requested_by,
+            "prUrl": payload.pr_url,
+            "prNumber": payload.pr_number,
+            "mergeSha": payload.merge_sha,
+            "targetImage": payload.target_image,
+            "previousImage": payload.previous_image,
+            "argoApp": "homelab-api-dev",
+            "syncStatus": None,
+            "healthStatus": None,
+            "startedAt": None,
+            "finishedAt": None,
+            "deployWindowStart": None,
+            "deployWindowEnd": None,
+            "deployReason": payload.deploy_reason,
+            "compareUrl": payload.compare_url,
+            "gitRef": payload.git_ref,
+            "metadata": payload.metadata or {},
+        }
+
+    monkeypatch.setattr("app.main._upsert_deployment_record_row", _fake_upsert)
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-07T00:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: {})
+
+    response = client.post(
+        "/deployments",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={
+            "serviceId": "homelab-api",
+            "env": "dev",
+            "action": "deploy",
+            "status": "pending",
+            "requestedAt": "2026-03-09T20:00:00Z",
+            "gitPrUrl": "https://github.com/example/homelab-workloads/pull/12",
+            "gitPrNumber": 12,
+            "mergeSha": "abc123",
+            "imageRef": "ghcr.io/example/homelab-api:sha-abc123",
+            "previousImageRef": "ghcr.io/example/homelab-api:sha-old",
+            "gitRef": "automation/dev-image-bump-abc123",
+            "compareUrl": "https://github.com/example/homelab-portal/compare/old...new",
+            "deployReason": "Ship fix",
+            "metadata": {"source": "workflow"},
+        },
+    )
+
+    assert response.status_code == 201
+    assert captured == {
+        "service_id": "homelab-api",
+        "env": "dev",
+        "action": "deploy",
+        "requested_by": "dev-static-token",
+    }
+    body = response.json()
+    assert body["id"] == "dep-123"
+    assert body["serviceId"] == "homelab-api"
+    assert body["action"] == "deploy"
+    assert body["status"] == "pending"
+    assert body["gitPrUrl"] == "https://github.com/example/homelab-workloads/pull/12"
+    assert body["imageRef"] == "ghcr.io/example/homelab-api:sha-abc123"
+
+
+def test_get_deployment_endpoint_returns_record(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._get_deployment_record_by_id",
+        lambda _deployment_id: {
+            "deploymentId": "dep-123",
+            "serviceId": "homelab-api",
+            "env": "dev",
+            "action": "deploy",
+            "status": "live",
+            "requestedAt": "2026-03-09T20:00:00Z",
+            "requestedBy": "dev-static-token",
+            "prUrl": "https://github.com/example/homelab-workloads/pull/12",
+            "prNumber": 12,
+            "mergeSha": "abc123",
+            "targetImage": "ghcr.io/example/homelab-api:v1.2.3",
+            "previousImage": "ghcr.io/example/homelab-api:v1.2.2",
+            "argoApp": "homelab-api-dev",
+            "syncStatus": "synced",
+            "healthStatus": "healthy",
+            "startedAt": "2026-03-09T20:01:00Z",
+            "finishedAt": "2026-03-09T20:03:00Z",
+            "deployWindowStart": "2026-03-09T20:01:00Z",
+            "deployWindowEnd": "2026-03-09T20:08:00Z",
+            "deployReason": "Ship fix",
+            "compareUrl": "https://github.com/example/homelab-portal/compare/old...new",
+            "gitRef": "automation/dev-image-bump-abc123",
+            "metadata": {"source": "workflow"},
+        },
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-07T00:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: {})
+
+    response = client.get(
+        "/deployments/dep-123",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "dep-123"
+    assert body["serviceId"] == "homelab-api"
+    assert body["status"] == "live"
+    assert body["deployedAt"] == "2026-03-09T20:03:00Z"
+    assert body["healthStatus"] == "healthy"
 
 
 def test_releases_endpoint_returns_traceability_rows(monkeypatch) -> None:
