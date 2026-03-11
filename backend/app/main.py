@@ -11,7 +11,7 @@ from urllib import parse as urlparse
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from app.alerts_feed import (
@@ -67,6 +67,8 @@ from app.release_traceability import (
     load_argo_metadata_rows,
     load_ci_metadata_rows,
 )
+from app.service_identity import is_canonical_service_id
+from app.service_identity_validation import build_service_identity_diagnostics
 from app.service_registry_sync import _kube_get_json, sync_service_registry_from_cluster
 from app.observability_cache import TTLCache
 from app.observability_config import (
@@ -377,6 +379,13 @@ class CreateDeploymentRecordRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @field_validator("service_id")
+    @classmethod
+    def validate_canonical_service_id(cls, value: str) -> str:
+        if not is_canonical_service_id(value):
+            raise ValueError("serviceId must use canonical lowercase-hyphen identity")
+        return value
+
 
 class ServiceRegistrySyncFailure(BaseModel):
     source: str
@@ -479,12 +488,49 @@ class CatalogJoinResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ServiceIdentityMonitoringSelectorResponse(BaseModel):
+    namespace: str
+    app_label: str = Field(alias="appLabel")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceIdentityDriftRowResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    env: str
+    project_id: str | None = Field(default=None, alias="projectId")
+    catalog_linked: bool = Field(alias="catalogLinked")
+    namespace: str
+    expected_namespace: str | None = Field(default=None, alias="expectedNamespace")
+    app_label: str = Field(alias="appLabel")
+    expected_app_label: str | None = Field(default=None, alias="expectedAppLabel")
+    argo_app_name: str | None = Field(default=None, alias="argoAppName")
+    expected_argo_app_name: str | None = Field(default=None, alias="expectedArgoAppName")
+    release_argo_app_name: str | None = Field(default=None, alias="releaseArgoAppName")
+    gitops_path: str | None = Field(default=None, alias="gitopsPath")
+    expected_gitops_path: str | None = Field(default=None, alias="expectedGitopsPath")
+    monitoring_selector: ServiceIdentityMonitoringSelectorResponse = Field(alias="monitoringSelector")
+    violations: list[str]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceIdentityDiagnosticsResponse(BaseModel):
+    drift_count: int = Field(alias="driftCount")
+    ok_count: int = Field(alias="okCount")
+    drift_keys: list[str] = Field(alias="driftKeys")
+    rows: list[ServiceIdentityDriftRowResponse]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ServiceRegistryDiagnosticsResponse(BaseModel):
     generated_at: str = Field(alias="generatedAt")
     env: str | None = None
     freshness: ServiceRegistryFreshnessResponse
     join_mismatch: ServiceRegistryJoinMismatchResponse = Field(alias="joinMismatch")
     catalog_join: CatalogJoinDiagnosticsResponse = Field(alias="catalogJoin")
+    identity_drift: ServiceIdentityDiagnosticsResponse = Field(alias="identityDrift")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -906,7 +952,7 @@ def _load_project_catalog_rows(
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT project_id, project_name, env, namespace, app_label
+                SELECT project_id, project_name, env, namespace, app_label, source_ref
                 FROM project_registry
                 WHERE {where_clause}
                 ORDER BY project_id ASC, env ASC
@@ -922,6 +968,7 @@ def _load_project_catalog_rows(
             "env": row[2],
             "namespace": row[3],
             "app_label": row[4],
+            "source_ref": row[5],
         }
         for row in rows
     ]
@@ -2629,18 +2676,30 @@ def get_service_registry_diagnostics(
             state = "fresh"
 
     project_rows = _load_project_rows()
+    project_catalog_rows = _load_project_catalog_rows(env=env)
+    service_catalog_rows = _load_service_catalog_rows(env=env)
+    ci_rows = load_ci_metadata_rows()
+    argo_rows = load_argo_metadata_rows()
     mismatches = build_release_join_diagnostics(
         project_rows=project_rows,
-        ci_rows=load_ci_metadata_rows(),
-        argo_rows=load_argo_metadata_rows(),
+        ci_rows=ci_rows,
+        argo_rows=argo_rows,
         env_filter=env,
         service_id_filter=None,
     )
     catalog_join = build_catalog_join(
-        project_rows=_load_project_catalog_rows(env=env),
-        service_rows=_load_service_catalog_rows(env=env),
+        project_rows=project_catalog_rows,
+        service_rows=service_catalog_rows,
         env_filter=env,
         project_id_filter=None,
+        service_id_filter=None,
+    )
+    identity_drift = build_service_identity_diagnostics(
+        project_rows=project_catalog_rows,
+        service_rows=service_catalog_rows,
+        ci_rows=ci_rows,
+        argo_rows=argo_rows,
+        env_filter=env,
         service_id_filter=None,
     )
 
@@ -2659,6 +2718,7 @@ def get_service_registry_diagnostics(
         ),
         joinMismatch=ServiceRegistryJoinMismatchResponse(**mismatches),
         catalogJoin=CatalogJoinDiagnosticsResponse(**catalog_join["diagnostics"]),
+        identityDrift=ServiceIdentityDiagnosticsResponse(**identity_drift),
     )
 
 

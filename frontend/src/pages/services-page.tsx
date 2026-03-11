@@ -255,6 +255,11 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
         ) {
           nextWarnings.push('Release metadata has unmatched CI or Argo rows; some service status links may be incomplete.')
         }
+        if (diagnosticsResult.value.identityDrift.driftCount > 0) {
+          nextWarnings.push(
+            `Canonical service identity drift detected for ${diagnosticsResult.value.identityDrift.driftKeys.join(', ')}. Review service registry diagnostics before shipping changes.`,
+          )
+        }
       } else {
         setDiagnostics(null)
         nextWarnings.push('Service freshness diagnostics are unavailable.')
@@ -352,6 +357,7 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
     (diagnostics?.catalogJoin.serviceOnlyCount ?? 0) +
     (diagnostics?.catalogJoin.oneToManyCount ?? 0) +
     (diagnostics?.catalogJoin.ambiguousJoinCount ?? 0)
+  const identityDriftCount = diagnostics?.identityDrift.driftCount ?? 0
   const serviceOnlyPairs = new Set(
     (diagnostics?.catalogJoin.serviceOnlyKeys ?? []).map((key) => {
       const [serviceId, , env] = key.split('|')
@@ -372,7 +378,7 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
       description="Git-backed service catalog with ownership metadata, runbooks, and environment status links."
     >
       {!isLoading ? (
-        <div className="mb-4 grid gap-3 md:grid-cols-3">
+        <div className="mb-4 grid gap-3 md:grid-cols-4">
           <SummaryCard
             label="Catalog source"
             value={
@@ -402,6 +408,15 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                 : mismatchCount === 0
                   ? 'Project and service joins are aligned.'
                   : 'Catalog reconciliation needs review.'
+            }
+          />
+          <SummaryCard
+            label="Identity drift"
+            value={String(identityDriftCount)}
+            meta={
+              identityDriftCount === 0
+                ? 'Service IDs, labels, Argo app names, and GitOps paths agree.'
+                : 'Canonical identity drift needs operator review.'
             }
           />
         </div>

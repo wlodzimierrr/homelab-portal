@@ -4,6 +4,7 @@ import pytest
 
 from scripts.live_catalog_validation import (
     _is_legacy_project_row,
+    _validate_identity_drift,
     _select_service_id,
     _validate_alerts,
     _validate_freshness,
@@ -102,6 +103,7 @@ def test_build_validation_report_includes_warning_entries() -> None:
         project_diagnostics={"state": "warning", "rowCount": 2, "warning": True, "lastSyncedAt": "x"},
         service_result={"count": 2},
         service_diagnostics={"state": "fresh", "rowCount": 2, "warning": False, "lastSyncedAt": "x"},
+        identity_result={"driftCount": 0, "okCount": 2},
         release_result={"count": 2},
         metrics_result={"provider": "prometheus", "status": "healthy", "noDataFields": 0},
         alerts_result={"provider": "alertmanager", "status": "healthy", "count": 0},
@@ -121,3 +123,16 @@ def test_is_legacy_project_row_matches_seeded_markers() -> None:
 def test_validate_services_rejects_empty_response() -> None:
     with pytest.raises(SystemExit, match="zero rows"):
         _validate_services({"services": []})
+
+
+def test_validate_identity_drift_rejects_drifted_registry() -> None:
+    with pytest.raises(SystemExit, match="service identity drift detected"):
+        _validate_identity_drift(
+            {
+                "identityDrift": {
+                    "driftCount": 1,
+                    "okCount": 1,
+                    "driftKeys": ["homelab-api|dev"],
+                }
+            }
+        )

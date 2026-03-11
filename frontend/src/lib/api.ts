@@ -288,12 +288,43 @@ export interface ServiceRegistryJoinMismatch {
   argoUnmatchedKeys: string[]
 }
 
+export interface ServiceIdentityMonitoringSelector {
+  namespace: string
+  appLabel: string
+}
+
+export interface ServiceIdentityDriftRow {
+  serviceId: string
+  env: string
+  projectId?: string | null
+  catalogLinked: boolean
+  namespace: string
+  expectedNamespace?: string | null
+  appLabel: string
+  expectedAppLabel?: string | null
+  argoAppName?: string | null
+  expectedArgoAppName?: string | null
+  releaseArgoAppName?: string | null
+  gitopsPath?: string | null
+  expectedGitopsPath?: string | null
+  monitoringSelector: ServiceIdentityMonitoringSelector
+  violations: string[]
+}
+
+export interface ServiceIdentityDiagnostics {
+  driftCount: number
+  okCount: number
+  driftKeys: string[]
+  rows: ServiceIdentityDriftRow[]
+}
+
 export interface ServiceRegistryDiagnosticsResponse {
   generatedAt: string
   env?: string
   freshness: RegistryFreshness
   joinMismatch: ServiceRegistryJoinMismatch
   catalogJoin: CatalogJoinDiagnostics
+  identityDrift: ServiceIdentityDiagnostics
 }
 
 export interface MonitoringProvidersDiagnosticsResponse {

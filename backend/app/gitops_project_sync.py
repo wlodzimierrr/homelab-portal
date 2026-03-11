@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
-import re
 import subprocess
 from tempfile import TemporaryDirectory
 import time
@@ -13,6 +12,7 @@ from uuid import uuid4
 
 import psycopg
 import yaml
+from app.service_identity import normalize_service_id
 
 logger = logging.getLogger("homelab.backend.gitops_project_sync")
 
@@ -57,13 +57,6 @@ class ProjectRegistryRecord:
 
 def _utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
-
-
-def _normalize_project_id(value: str) -> str:
-    normalized = value.strip().lower()
-    normalized = re.sub(r"[^a-z0-9._-]+", "-", normalized)
-    normalized = normalized.strip("-")
-    return normalized or "unknown-project"
 
 
 def _workloads_repo_path() -> Path:
@@ -209,7 +202,7 @@ def _load_service_catalog_metadata(
             )
             continue
 
-        service_id = _normalize_project_id(raw_service_id)
+        service_id = normalize_service_id(raw_service_id)
         if service_id in metadata_by_id:
             failures.append(
                 {
@@ -295,9 +288,9 @@ def _discover_records_from_repo(
         project_name = app_root.name
         namespace = _load_namespace(app_root) or project_name
         app_label = _load_app_label(app_root) or project_name
-        project_id = _normalize_project_id(app_label)
+        project_id = normalize_service_id(app_label)
         service_metadata = service_catalog.get(project_id) or service_catalog.get(
-            _normalize_project_id(project_name)
+            normalize_service_id(project_name)
         )
 
         if not namespace.strip() or not app_label.strip():

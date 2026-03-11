@@ -4107,6 +4107,191 @@
         ],
         "title": "ServiceHealthTimelineSegmentResponse"
       },
+      "ServiceIdentityDiagnosticsResponse": {
+        "properties": {
+          "driftCount": {
+            "type": "integer",
+            "title": "Driftcount"
+          },
+          "okCount": {
+            "type": "integer",
+            "title": "Okcount"
+          },
+          "driftKeys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Driftkeys"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceIdentityDriftRowResponse"
+            },
+            "type": "array",
+            "title": "Rows"
+          }
+        },
+        "type": "object",
+        "required": [
+          "driftCount",
+          "okCount",
+          "driftKeys",
+          "rows"
+        ],
+        "title": "ServiceIdentityDiagnosticsResponse"
+      },
+      "ServiceIdentityDriftRowResponse": {
+        "properties": {
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "env": {
+            "type": "string",
+            "title": "Env"
+          },
+          "projectId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projectid"
+          },
+          "catalogLinked": {
+            "type": "boolean",
+            "title": "Cataloglinked"
+          },
+          "namespace": {
+            "type": "string",
+            "title": "Namespace"
+          },
+          "expectedNamespace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expectednamespace"
+          },
+          "appLabel": {
+            "type": "string",
+            "title": "Applabel"
+          },
+          "expectedAppLabel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expectedapplabel"
+          },
+          "argoAppName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Argoappname"
+          },
+          "expectedArgoAppName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expectedargoappname"
+          },
+          "releaseArgoAppName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Releaseargoappname"
+          },
+          "gitopsPath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitopspath"
+          },
+          "expectedGitopsPath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expectedgitopspath"
+          },
+          "monitoringSelector": {
+            "$ref": "#/components/schemas/ServiceIdentityMonitoringSelectorResponse"
+          },
+          "violations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Violations"
+          }
+        },
+        "type": "object",
+        "required": [
+          "serviceId",
+          "env",
+          "catalogLinked",
+          "namespace",
+          "appLabel",
+          "monitoringSelector",
+          "violations"
+        ],
+        "title": "ServiceIdentityDriftRowResponse"
+      },
+      "ServiceIdentityMonitoringSelectorResponse": {
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "title": "Namespace"
+          },
+          "appLabel": {
+            "type": "string",
+            "title": "Applabel"
+          }
+        },
+        "type": "object",
+        "required": [
+          "namespace",
+          "appLabel"
+        ],
+        "title": "ServiceIdentityMonitoringSelectorResponse"
+      },
       "ServiceMetricsSummaryResponse": {
         "properties": {
           "serviceId": {
@@ -4216,6 +4401,9 @@
           },
           "catalogJoin": {
             "$ref": "#/components/schemas/CatalogJoinDiagnosticsResponse"
+          },
+          "identityDrift": {
+            "$ref": "#/components/schemas/ServiceIdentityDiagnosticsResponse"
           }
         },
         "type": "object",
@@ -4223,7 +4411,8 @@
           "generatedAt",
           "freshness",
           "joinMismatch",
-          "catalogJoin"
+          "catalogJoin",
+          "identityDrift"
         ],
         "title": "ServiceRegistryDiagnosticsResponse"
       },

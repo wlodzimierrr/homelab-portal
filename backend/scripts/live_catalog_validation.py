@@ -94,6 +94,24 @@ def _validate_freshness(payload: object, *, endpoint_name: str) -> dict[str, Any
     }
 
 
+def _validate_identity_drift(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("identityDrift"), dict):
+        raise SystemExit("FAIL: /service-registry/diagnostics identity drift payload is invalid")
+
+    diagnostics = payload["identityDrift"]
+    drift_count = int(diagnostics.get("driftCount") or 0)
+    drift_keys = diagnostics.get("driftKeys") or []
+    if drift_count > 0:
+        raise SystemExit(
+            "FAIL: service identity drift detected: "
+            + ", ".join(str(key) for key in drift_keys)
+        )
+    return {
+        "driftCount": drift_count,
+        "okCount": int(diagnostics.get("okCount") or 0),
+    }
+
+
 def _validate_services(payload: object) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, Any]]:
     if not isinstance(payload, dict) or not isinstance(payload.get("services"), list):
         raise SystemExit("FAIL: /services response shape is invalid")
@@ -219,6 +237,7 @@ def build_validation_report(
     project_diagnostics: dict[str, Any],
     service_result: dict[str, Any],
     service_diagnostics: dict[str, Any],
+    identity_result: dict[str, Any],
     release_result: dict[str, Any],
     metrics_result: dict[str, Any],
     alerts_result: dict[str, Any],
@@ -238,6 +257,7 @@ def build_validation_report(
             "projectDiagnostics": project_diagnostics,
             "services": service_result,
             "serviceDiagnostics": service_diagnostics,
+            "identityDrift": identity_result,
             "releases": release_result,
             "metrics": metrics_result,
             "alerts": alerts_result,
@@ -299,6 +319,7 @@ def main() -> int:
         service_diagnostics_payload,
         endpoint_name="/service-registry/diagnostics",
     )
+    identity_result = _validate_identity_drift(service_diagnostics_payload)
 
     _, releases_payload = _request_json(
         args.api_base_url,
@@ -342,6 +363,7 @@ def main() -> int:
         project_diagnostics=project_diagnostics,
         service_result=service_result,
         service_diagnostics=service_diagnostics,
+        identity_result=identity_result,
         release_result=release_result,
         metrics_result=metrics_result,
         alerts_result=alerts_result,

@@ -651,6 +651,8 @@ def test_service_registry_diagnostics_reports_empty_registry(monkeypatch) -> Non
     assert body["joinMismatch"]["argoUnmatchedCount"] == 0
     assert body["catalogJoin"]["projectOnlyCount"] == 0
     assert body["catalogJoin"]["serviceOnlyCount"] == 0
+    assert body["identityDrift"]["driftCount"] == 0
+    assert body["identityDrift"]["okCount"] == 0
 
 
 def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
@@ -741,6 +743,8 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
     ]
     assert body["catalogJoin"]["projectOnlyCount"] == 1
     assert body["catalogJoin"]["serviceOnlyCount"] == 1
+    assert body["identityDrift"]["driftCount"] == 1
+    assert body["identityDrift"]["driftKeys"] == ["homelab-api|dev"]
 
 
 def test_service_registry_diagnostics_reports_warning_before_stale(monkeypatch) -> None:

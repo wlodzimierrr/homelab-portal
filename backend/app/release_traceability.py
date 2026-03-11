@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from typing import TypedDict
+from app.service_identity import normalize_service_id
 
 logger = logging.getLogger("homelab.backend.release_traceability")
 
@@ -57,13 +58,6 @@ class ReleaseJoinDiagnostics(TypedDict):
 
 
 UNKNOWN = "unknown"
-
-
-def _normalize_service_id(value: str) -> str:
-    normalized = value.strip().lower()
-    normalized = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in normalized)
-    normalized = "-".join(part for part in normalized.split("-") if part)
-    return normalized or "unknown-service"
 
 
 def _normalize_sync(value: str | None) -> str:
@@ -151,7 +145,7 @@ def build_release_traceability_rows(
             continue
         key = (service_id, env)
         ci_index[key] = row
-        ci_normalized_index[(_normalize_service_id(service_id), env)] = row
+        ci_normalized_index[(normalize_service_id(service_id), env)] = row
 
     for row in argo_rows:
         service_id = str(row.get("serviceId", "")).strip()
@@ -160,7 +154,7 @@ def build_release_traceability_rows(
             continue
         key = (service_id, env)
         argo_index[key] = row
-        argo_normalized_index[(_normalize_service_id(service_id), env)] = row
+        argo_normalized_index[(normalize_service_id(service_id), env)] = row
 
     for row in project_rows:
         service_id = str(row.get("service_id", "")).strip()
@@ -198,7 +192,7 @@ def build_release_traceability_rows(
                 matched_ci_keys.add(candidate)
                 break
         if not ci:
-            normalized_key = (_normalize_service_id(service_id), env)
+            normalized_key = (normalize_service_id(service_id), env)
             if normalized_key in ci_normalized_index:
                 ci = ci_normalized_index[normalized_key]
                 source_service_id = str(ci.get("serviceId", "")).strip()
@@ -215,7 +209,7 @@ def build_release_traceability_rows(
                 matched_argo_keys.add(candidate)
                 break
         if not argo:
-            normalized_key = (_normalize_service_id(service_id), env)
+            normalized_key = (normalize_service_id(service_id), env)
             if normalized_key in argo_normalized_index:
                 argo = argo_normalized_index[normalized_key]
                 source_service_id = str(argo.get("serviceId", "")).strip()
@@ -343,7 +337,7 @@ def build_release_join_diagnostics(
             continue
         key = (service_id, env)
         ci_index[key] = row
-        ci_normalized_index[(_normalize_service_id(service_id), env)] = row
+        ci_normalized_index[(normalize_service_id(service_id), env)] = row
 
     for row in argo_rows:
         service_id = str(row.get("serviceId", "")).strip()
@@ -352,7 +346,7 @@ def build_release_join_diagnostics(
             continue
         key = (service_id, env)
         argo_index[key] = row
-        argo_normalized_index[(_normalize_service_id(service_id), env)] = row
+        argo_normalized_index[(normalize_service_id(service_id), env)] = row
 
     for row in project_rows:
         service_id = str(row.get("service_id", "")).strip()
@@ -383,7 +377,7 @@ def build_release_join_diagnostics(
                 matched_ci_keys.add(candidate)
                 break
         else:
-            normalized_key = (_normalize_service_id(service_id), env)
+            normalized_key = (normalize_service_id(service_id), env)
             if normalized_key in ci_normalized_index:
                 row = ci_normalized_index[normalized_key]
                 source_service_id = str(row.get("serviceId", "")).strip()
@@ -399,7 +393,7 @@ def build_release_join_diagnostics(
                 matched_argo_keys.add(candidate)
                 break
         else:
-            normalized_key = (_normalize_service_id(service_id), env)
+            normalized_key = (normalize_service_id(service_id), env)
             if normalized_key in argo_normalized_index:
                 row = argo_normalized_index[normalized_key]
                 source_service_id = str(row.get("serviceId", "")).strip()

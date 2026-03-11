@@ -5,13 +5,13 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
-import re
 import ssl
 import time
 from urllib import request as urlrequest
 from uuid import uuid4
 
 import psycopg
+from app.service_identity import normalize_service_id
 
 logger = logging.getLogger("homelab.backend.service_registry_sync")
 
@@ -36,13 +36,6 @@ class ServiceRegistryRecord:
 
 def _utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
-
-
-def _normalize_service_id(value: str) -> str:
-    normalized = value.strip().lower()
-    normalized = re.sub(r"[^a-z0-9._-]+", "-", normalized)
-    normalized = normalized.strip("-")
-    return normalized or "unknown-service"
 
 
 def _parse_csv_env(var_name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
@@ -186,7 +179,7 @@ def _build_records_from_deployments(
             or name
         )
         app_label = str(app_label_raw)
-        service_id = _normalize_service_id(app_label)
+        service_id = normalize_service_id(app_label)
 
         argo_app_name: str | None = None
         annotation_app = annotations.get("argocd.argoproj.io/instance")
@@ -283,7 +276,7 @@ def _build_records_from_services_and_deployments(
             or name
         )
         app_label = str(app_label_raw)
-        service_id = _normalize_service_id(app_label)
+        service_id = normalize_service_id(app_label)
         deployment_match = deployment_index.get((namespace, service_id))
         argo_app_name = (
             deployment_match.argo_app_name if deployment_match else argo_by_namespace.get(namespace)
