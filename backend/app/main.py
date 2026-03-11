@@ -282,10 +282,10 @@ class ServiceDetailResponse(BaseModel):
 
 
 class DeploymentLockResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
+    service_id: str = Field(..., alias="serviceId")
     env: str
-    deployment_id: str = Field(alias="deploymentId")
-    request_key: str = Field(alias="requestKey")
+    deployment_id: str = Field(..., alias="deploymentId")
+    request_key: str = Field(..., alias="requestKey")
     action: str
     status: str
     argo_app: str | None = Field(default=None, alias="argoApp")
@@ -351,7 +351,7 @@ class DeploymentReconcileResponse(BaseModel):
 
 
 class CreateDeploymentRecordRequest(BaseModel):
-    service_id: str = Field(alias="serviceId", min_length=1)
+    service_id: str = Field(..., alias="serviceId", min_length=1)
     env: str = Field(min_length=1)
     action: Literal["deploy", "promote", "rollback", "config-change"]
     status: Literal["pending", "deploying", "live", "failed"] = "pending"

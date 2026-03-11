@@ -458,6 +458,7 @@ def test_service_detail_returns_cluster_backed_row(monkeypatch) -> None:
         "source": "cluster_services",
         "sourceRef": "kubernetes_api",
         "lastSyncedAt": None,
+        "deploymentLock": None,
     }
 
 
