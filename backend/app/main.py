@@ -73,7 +73,10 @@ from app.release_traceability import (
     load_ci_metadata_rows,
 )
 from app.service_identity import is_canonical_service_id
-from app.service_observability import normalize_observability_mode
+from app.service_observability import (
+    build_service_metrics_observability_diagnostics,
+    normalize_observability_mode,
+)
 from app.service_identity_validation import build_service_identity_diagnostics
 from app.service_registry_sync import _kube_get_json, sync_service_registry_from_cluster
 from app.observability_cache import TTLCache
@@ -601,6 +604,9 @@ class ServiceMetricsSummaryResponse(BaseModel):
     generated_at: str = Field(alias="generatedAt")
     no_data: dict[str, bool] = Field(alias="noData")
     provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
+    observability_diagnostics: "ServiceMetricsObservabilityDiagnosticsResponse" = Field(
+        alias="observabilityDiagnostics"
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -633,6 +639,22 @@ class ServiceMetricsTrendsResponse(BaseModel):
     provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
     p95_latency_ms: ServiceMetricTrendSeriesResponse = Field(alias="p95LatencyMs")
     error_rate_pct: ServiceMetricTrendSeriesResponse = Field(alias="errorRatePct")
+    observability_diagnostics: "ServiceMetricsObservabilityDiagnosticsResponse" = Field(
+        alias="observabilityDiagnostics"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceMetricsObservabilityDiagnosticsResponse(BaseModel):
+    mode: Literal["app-native", "ingress-derived", "no-http"] | None = None
+    authority: Literal["app", "ingress", "none"] | None = None
+    status: Literal["ok", "unsupported", "no_retained_data", "misconfigured", "unknown"]
+    reason: str
+    message: str
+    missing_metrics: list[str] = Field(alias="missingMetrics")
+    source_available: bool | None = Field(default=None, alias="sourceAvailable")
+    service_series_available: bool | None = Field(default=None, alias="serviceSeriesAvailable")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -1220,18 +1242,134 @@ def _load_service_catalog_rows(
     return _load_service_rows(env=env, service_id=service_id)
 
 
-def _resolve_service_monitoring_metadata(service_id: str) -> tuple[str, str]:
+def _resolve_service_monitoring_context(
+    service_id: str,
+) -> tuple[str, str, str | None]:
     preferred_env = os.getenv("PORTAL_ENV", "dev")
     rows = _load_service_rows(service_id=service_id, env=preferred_env)
     if not rows:
         rows = _load_service_rows(service_id=service_id)
     if not rows:
-        return "default", service_id
+        project_rows = _load_project_catalog_rows(project_id=service_id)
+        observability_mode = (
+            normalize_observability_mode(project_rows[0].get("observability_mode"))
+            if project_rows
+            else None
+        )
+        return "default", service_id, observability_mode
 
     selected = _select_preferred_service_row(service_id, rows, preferred_env) or rows[0]
     namespace = str(selected.get("namespace") or "").strip() or "default"
     app_label = str(selected.get("app_label") or "").strip() or service_id
+    selected_env = str(selected.get("env") or "").strip() or preferred_env
+    project_rows = _load_project_catalog_rows(env=selected_env, project_id=service_id)
+    if not project_rows:
+        project_rows = _load_project_catalog_rows(project_id=service_id)
+    observability_mode = (
+        normalize_observability_mode(project_rows[0].get("observability_mode"))
+        if project_rows
+        else None
+    )
+    return namespace, app_label, observability_mode
+
+
+def _resolve_service_monitoring_metadata(service_id: str) -> tuple[str, str]:
+    namespace, app_label, _ = _resolve_service_monitoring_context(service_id)
     return namespace, app_label
+
+
+def _build_service_metrics_probe_queries(
+    *,
+    namespace: str,
+    app_label: str,
+) -> dict[str, str]:
+    ingress_service_pattern = f".*{escape_promql_regex_literal(app_label)}.*"
+    return {
+        "app_request_series": (
+            f'count(http_requests_total{{namespace="{namespace}", app="{app_label}"}}) or vector(0)'
+        ),
+        "app_latency_series": (
+            f'count(http_request_duration_seconds_bucket{{namespace="{namespace}", app="{app_label}"}}) or vector(0)'
+        ),
+        "ingress_request_source": "count(traefik_service_requests_total) or vector(0)",
+        "ingress_latency_source": "count(traefik_service_request_duration_seconds_bucket) or vector(0)",
+        "ingress_request_series": (
+            f'count(traefik_service_requests_total{{service=~"{ingress_service_pattern}"}}) or vector(0)'
+        ),
+        "ingress_latency_series": (
+            f'count(traefik_service_request_duration_seconds_bucket{{service=~"{ingress_service_pattern}"}}) or vector(0)'
+        ),
+    }
+
+
+def _query_prometheus_series_present(
+    query: str,
+    label: str,
+    *,
+    correlation_id: str,
+) -> bool:
+    value = _query_prometheus_scalar(query, label, correlation_id=correlation_id)
+    return bool(value and value > 0)
+
+
+def _build_metrics_observability_diagnostics(
+    *,
+    service_id: str,
+    namespace: str,
+    app_label: str,
+    observability_mode: str | None,
+    missing_metrics: list[str],
+    correlation_id: str,
+) -> ServiceMetricsObservabilityDiagnosticsResponse:
+    probe_queries = _build_service_metrics_probe_queries(namespace=namespace, app_label=app_label)
+    normalized_mode = normalize_observability_mode(observability_mode)
+
+    source_available: bool | None = None
+    service_series_available: bool | None = None
+    if normalized_mode == "app-native":
+        request_series = _query_prometheus_series_present(
+            probe_queries["app_request_series"],
+            f"{service_id}_app_request_series",
+            correlation_id=correlation_id,
+        )
+        latency_series = _query_prometheus_series_present(
+            probe_queries["app_latency_series"],
+            f"{service_id}_app_latency_series",
+            correlation_id=correlation_id,
+        )
+        source_available = request_series or latency_series
+        service_series_available = request_series and latency_series
+    elif normalized_mode == "ingress-derived":
+        request_source = _query_prometheus_series_present(
+            probe_queries["ingress_request_source"],
+            f"{service_id}_ingress_request_source",
+            correlation_id=correlation_id,
+        )
+        latency_source = _query_prometheus_series_present(
+            probe_queries["ingress_latency_source"],
+            f"{service_id}_ingress_latency_source",
+            correlation_id=correlation_id,
+        )
+        request_series = _query_prometheus_series_present(
+            probe_queries["ingress_request_series"],
+            f"{service_id}_ingress_request_series",
+            correlation_id=correlation_id,
+        )
+        latency_series = _query_prometheus_series_present(
+            probe_queries["ingress_latency_series"],
+            f"{service_id}_ingress_latency_series",
+            correlation_id=correlation_id,
+        )
+        source_available = request_source and latency_source
+        service_series_available = request_series and latency_series
+
+    diagnostics = build_service_metrics_observability_diagnostics(
+        mode=observability_mode,
+        missing_metrics=missing_metrics,
+        source_available=source_available,
+        service_series_available=service_series_available,
+    )
+    return ServiceMetricsObservabilityDiagnosticsResponse(**diagnostics)
 
 
 def _extract_version_from_image_ref(image_ref: str | None) -> str | None:
@@ -2467,28 +2605,46 @@ def _build_metric_trend_series(
     )
 
 
-def _build_health_timeline_queries(*, namespace: str, app_label: str, config) -> dict[str, str]:
+def _build_health_timeline_queries(
+    *,
+    namespace: str,
+    app_label: str,
+    config,
+) -> dict[str, tuple[str, ...]]:
     deployment_name = app_label
+    ingress_service_pattern = f".*{escape_promql_regex_literal(app_label)}.*"
     values = {
         "namespace": namespace,
         "app_label": app_label,
         "deployment_name": deployment_name,
+        "ingress_service_pattern": ingress_service_pattern,
     }
     return {
-        "availability": render_query_template(
-            config.timeline_query_availability_template,
-            values,
-            "timeline.availability",
+        "availability": (
+            render_query_template(
+                config.timeline_query_availability_template,
+                values,
+                "timeline.availability",
+            ),
         ),
-        "errorRatePct": render_query_template(
-            config.timeline_query_error_rate_template,
-            values,
-            "timeline.error_rate",
+        "errorRatePct": (
+            render_query_template(
+                config.timeline_query_error_rate_template,
+                values,
+                "timeline.error_rate",
+            ),
+            render_query_template(
+                config.timeline_query_error_rate_fallback_template,
+                values,
+                "timeline.error_rate_fallback",
+            ),
         ),
-        "readiness": render_query_template(
-            config.timeline_query_readiness_template,
-            values,
-            "timeline.readiness",
+        "readiness": (
+            render_query_template(
+                config.timeline_query_readiness_template,
+                values,
+                "timeline.readiness",
+            ),
         ),
     }
 
@@ -3657,7 +3813,7 @@ def get_service_metrics_summary(
         allowed_ranges=config.metrics_allowed_ranges,
         field_name="range",
     )
-    namespace, app_label = _resolve_service_monitoring_metadata(service_id)
+    namespace, app_label, observability_mode = _resolve_service_monitoring_context(service_id)
 
     def _load_summary() -> ServiceMetricsSummaryResponse:
         now = datetime.now(tz=timezone.utc)
@@ -3690,6 +3846,19 @@ def get_service_metrics_summary(
             values[field_name] = value
             no_data[field_name] = value is None
 
+        observability_diagnostics = _build_metrics_observability_diagnostics(
+            service_id=service_id,
+            namespace=namespace,
+            app_label=app_label,
+            observability_mode=observability_mode,
+            missing_metrics=[
+                field_name
+                for field_name in ("p95LatencyMs", "errorRatePct")
+                if no_data.get(field_name, False)
+            ],
+            correlation_id=correlation_id,
+        )
+
         return ServiceMetricsSummaryResponse(
             serviceId=service_id,
             uptimePct=values["uptimePct"],
@@ -3710,6 +3879,7 @@ def get_service_metrics_summary(
                     correlation_id=correlation_id,
                 )
             ),
+            observabilityDiagnostics=observability_diagnostics,
         )
 
     return metrics_summary_cache.get_or_set(
@@ -3739,7 +3909,7 @@ def get_service_metrics_trends(
         allowed_ranges=config.metrics_allowed_ranges,
         field_name="range",
     )
-    namespace, app_label = _resolve_service_monitoring_metadata(service_id)
+    namespace, app_label, observability_mode = _resolve_service_monitoring_context(service_id)
 
     def _load_trends() -> ServiceMetricsTrendsResponse:
         now = datetime.now(tz=timezone.utc)
@@ -3758,6 +3928,38 @@ def get_service_metrics_trends(
             config=config,
         )
 
+        p95_latency = _build_metric_trend_series(
+            field_name="p95LatencyMs",
+            query_candidates=queries["p95LatencyMs"],
+            start=window_start,
+            end=now,
+            step_seconds=step_seconds,
+            correlation_id=correlation_id,
+        )
+        error_rate = _build_metric_trend_series(
+            field_name="errorRatePct",
+            query_candidates=queries["errorRatePct"],
+            start=window_start,
+            end=now,
+            step_seconds=step_seconds,
+            correlation_id=correlation_id,
+        )
+        observability_diagnostics = _build_metrics_observability_diagnostics(
+            service_id=service_id,
+            namespace=namespace,
+            app_label=app_label,
+            observability_mode=observability_mode,
+            missing_metrics=[
+                field_name
+                for field_name, series in (
+                    ("p95LatencyMs", p95_latency),
+                    ("errorRatePct", error_rate),
+                )
+                if series.query_status == "no_data"
+            ],
+            correlation_id=correlation_id,
+        )
+
         return ServiceMetricsTrendsResponse(
             serviceId=service_id,
             range=safe_range,
@@ -3774,22 +3976,9 @@ def get_service_metrics_trends(
                     correlation_id=correlation_id,
                 )
             ),
-            p95LatencyMs=_build_metric_trend_series(
-                field_name="p95LatencyMs",
-                query_candidates=queries["p95LatencyMs"],
-                start=window_start,
-                end=now,
-                step_seconds=step_seconds,
-                correlation_id=correlation_id,
-            ),
-            errorRatePct=_build_metric_trend_series(
-                field_name="errorRatePct",
-                query_candidates=queries["errorRatePct"],
-                start=window_start,
-                end=now,
-                step_seconds=step_seconds,
-                correlation_id=correlation_id,
-            ),
+            p95LatencyMs=p95_latency,
+            errorRatePct=error_rate,
+            observabilityDiagnostics=observability_diagnostics,
         )
 
     return metrics_summary_cache.get_or_set(
@@ -3849,7 +4038,7 @@ def get_service_health_timeline(
         start = end - window
         correlation_id = str(uuid4())
 
-        namespace, app_label = _resolve_service_monitoring_metadata(service_id)
+        namespace, app_label, observability_mode = _resolve_service_monitoring_context(service_id)
         queries = _build_health_timeline_queries(
             namespace=namespace,
             app_label=app_label,
@@ -3857,23 +4046,27 @@ def get_service_health_timeline(
         )
 
         availability_points = _query_prometheus_range(
-            queries["availability"],
+            queries["availability"][0],
             "availability",
             start=start,
             end=end,
             step_seconds=step_seconds,
             correlation_id=correlation_id,
         )
-        error_points = _query_prometheus_range(
-            queries["errorRatePct"],
-            "errorRatePct",
-            start=start,
-            end=end,
-            step_seconds=step_seconds,
-            correlation_id=correlation_id,
-        )
+        error_points: dict[int, float] = {}
+        for index, query in enumerate(queries["errorRatePct"]):
+            error_points = _query_prometheus_range(
+                query,
+                f"errorRatePct_{index}",
+                start=start,
+                end=end,
+                step_seconds=step_seconds,
+                correlation_id=correlation_id,
+            )
+            if error_points:
+                break
         readiness_points = _query_prometheus_range(
-            queries["readiness"],
+            queries["readiness"][0],
             "readiness",
             start=start,
             end=end,
@@ -3890,9 +4083,12 @@ def get_service_health_timeline(
         thresholds = load_timeline_thresholds()
         points: list[TimelinePoint] = []
         for ts in all_timestamps:
+            error_rate_value = error_points.get(ts)
+            if normalize_observability_mode(observability_mode) == "no-http" and error_rate_value is None:
+                error_rate_value = 0.0
             status_label, reason = classify_timeline_status(
                 availability=availability_points.get(ts),
-                error_rate_pct=error_points.get(ts),
+                error_rate_pct=error_rate_value,
                 readiness=readiness_points.get(ts),
                 thresholds=thresholds,
             )

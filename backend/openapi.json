@@ -5352,6 +5352,98 @@
         ],
         "title": "ServiceMetricTrendSeriesResponse"
       },
+      "ServiceMetricsObservabilityDiagnosticsResponse": {
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "app-native",
+                  "ingress-derived",
+                  "no-http"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "authority": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "app",
+                  "ingress",
+                  "none"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authority"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "unsupported",
+              "no_retained_data",
+              "misconfigured",
+              "unknown"
+            ],
+            "title": "Status"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "missingMetrics": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missingmetrics"
+          },
+          "sourceAvailable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourceavailable"
+          },
+          "serviceSeriesAvailable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Serviceseriesavailable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "reason",
+          "message",
+          "missingMetrics"
+        ],
+        "title": "ServiceMetricsObservabilityDiagnosticsResponse"
+      },
       "ServiceMetricsSummaryResponse": {
         "properties": {
           "serviceId": {
@@ -5423,6 +5515,9 @@
           },
           "providerStatus": {
             "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
+          },
+          "observabilityDiagnostics": {
+            "$ref": "#/components/schemas/ServiceMetricsObservabilityDiagnosticsResponse"
           }
         },
         "type": "object",
@@ -5432,7 +5527,8 @@
           "windowEnd",
           "generatedAt",
           "noData",
-          "providerStatus"
+          "providerStatus",
+          "observabilityDiagnostics"
         ],
         "title": "ServiceMetricsSummaryResponse"
       },
@@ -5466,6 +5562,9 @@
           },
           "errorRatePct": {
             "$ref": "#/components/schemas/ServiceMetricTrendSeriesResponse"
+          },
+          "observabilityDiagnostics": {
+            "$ref": "#/components/schemas/ServiceMetricsObservabilityDiagnosticsResponse"
           }
         },
         "type": "object",
@@ -5477,7 +5576,8 @@
           "generatedAt",
           "providerStatus",
           "p95LatencyMs",
-          "errorRatePct"
+          "errorRatePct",
+          "observabilityDiagnostics"
         ],
         "title": "ServiceMetricsTrendsResponse"
       },

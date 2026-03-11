@@ -32,6 +32,7 @@ class ObservabilityConfig:
     metrics_query_restart_count_template: str
     timeline_query_availability_template: str
     timeline_query_error_rate_template: str
+    timeline_query_error_rate_fallback_template: str
     timeline_query_readiness_template: str
 
 
@@ -137,6 +138,10 @@ def load_observability_config() -> ObservabilityConfig:
         timeline_query_error_rate_template=os.getenv(
             "OBS_QUERY_TIMELINE_ERROR_RATE",
             '100 * ((sum(rate(http_requests_total{namespace="{namespace}", app="{app_label}", status=~"5.."}[5m])) or vector(0)) / clamp_min(sum(rate(http_requests_total{namespace="{namespace}", app="{app_label}"}[5m])), 0.000001))',
+        ),
+        timeline_query_error_rate_fallback_template=os.getenv(
+            "OBS_QUERY_TIMELINE_ERROR_RATE_FALLBACK",
+            '100 * ((sum(rate(traefik_service_requests_total{service=~"{ingress_service_pattern}", code=~"5.."}[5m])) or vector(0)) / clamp_min(sum(rate(traefik_service_requests_total{service=~"{ingress_service_pattern}"}[5m])), 0.000001))',
         ),
         timeline_query_readiness_template=os.getenv(
             "OBS_QUERY_TIMELINE_READINESS",

@@ -23,6 +23,18 @@ export interface ServiceMetricsSummary {
   generatedAt?: string
   noData: ServiceMetricsNoData
   providerStatus?: MonitoringProviderStatus
+  observabilityDiagnostics?: ServiceMetricsObservabilityDiagnostics
+}
+
+export interface ServiceMetricsObservabilityDiagnostics {
+  mode?: 'app-native' | 'ingress-derived' | 'no-http'
+  authority?: 'app' | 'ingress' | 'none'
+  status?: 'ok' | 'unsupported' | 'no_retained_data' | 'misconfigured' | 'unknown'
+  reason?: string
+  message?: string
+  missingMetrics: string[]
+  sourceAvailable?: boolean
+  serviceSeriesAvailable?: boolean
 }
 
 export interface ServiceMetricTrendPoint {
@@ -49,6 +61,7 @@ export interface ServiceMetricsTrends {
   providerStatus?: MonitoringProviderStatus
   p95LatencyMs: ServiceMetricTrendSeries
   errorRatePct: ServiceMetricTrendSeries
+  observabilityDiagnostics?: ServiceMetricsObservabilityDiagnostics
 }
 
 interface ServiceMetricsSummaryResponse {
@@ -62,6 +75,7 @@ interface ServiceMetricsSummaryResponse {
   generatedAt?: string
   noData?: Partial<ServiceMetricsNoData>
   providerStatus?: MonitoringProviderStatus
+  observabilityDiagnostics?: Partial<ServiceMetricsObservabilityDiagnostics>
 }
 
 interface ServiceMetricTrendSeriesResponse {
@@ -85,6 +99,7 @@ interface ServiceMetricsTrendsResponse {
   providerStatus?: MonitoringProviderStatus
   p95LatencyMs?: ServiceMetricTrendSeriesResponse
   errorRatePct?: ServiceMetricTrendSeriesResponse
+  observabilityDiagnostics?: Partial<ServiceMetricsObservabilityDiagnostics>
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -144,6 +159,7 @@ function adaptSummary(
     generatedAt: typeof payload.generatedAt === 'string' ? payload.generatedAt : undefined,
     noData: normalizeNoData(payload),
     providerStatus: payload.providerStatus,
+    observabilityDiagnostics: adaptObservabilityDiagnostics(payload.observabilityDiagnostics),
   }
 }
 
@@ -209,6 +225,41 @@ function adaptTrends(
     providerStatus: payload.providerStatus,
     p95LatencyMs: adaptTrendSeries(payload.p95LatencyMs),
     errorRatePct: adaptTrendSeries(payload.errorRatePct),
+    observabilityDiagnostics: adaptObservabilityDiagnostics(payload.observabilityDiagnostics),
+  }
+}
+
+function adaptObservabilityDiagnostics(
+  input: Partial<ServiceMetricsObservabilityDiagnostics> | undefined,
+): ServiceMetricsObservabilityDiagnostics | undefined {
+  if (!input) {
+    return undefined
+  }
+
+  return {
+    mode:
+      input.mode === 'app-native' || input.mode === 'ingress-derived' || input.mode === 'no-http'
+        ? input.mode
+        : undefined,
+    authority: input.authority === 'app' || input.authority === 'ingress' || input.authority === 'none'
+      ? input.authority
+      : undefined,
+    status:
+      input.status === 'ok' ||
+      input.status === 'unsupported' ||
+      input.status === 'no_retained_data' ||
+      input.status === 'misconfigured' ||
+      input.status === 'unknown'
+        ? input.status
+        : undefined,
+    reason: typeof input.reason === 'string' ? input.reason : undefined,
+    message: typeof input.message === 'string' ? input.message : undefined,
+    missingMetrics: Array.isArray(input.missingMetrics)
+      ? input.missingMetrics.filter((item): item is string => typeof item === 'string')
+      : [],
+    sourceAvailable: typeof input.sourceAvailable === 'boolean' ? input.sourceAvailable : undefined,
+    serviceSeriesAvailable:
+      typeof input.serviceSeriesAvailable === 'boolean' ? input.serviceSeriesAvailable : undefined,
   }
 }
 
@@ -237,6 +288,9 @@ export function createEmptyServiceMetricsSummary(
     identity,
     range,
     noData: emptyNoData(),
+    observabilityDiagnostics: {
+      missingMetrics: [],
+    },
   }
 }
 
@@ -251,6 +305,9 @@ export function createEmptyServiceMetricsTrends(
     range,
     p95LatencyMs: emptyTrendSeries(),
     errorRatePct: emptyTrendSeries(),
+    observabilityDiagnostics: {
+      missingMetrics: [],
+    },
   }
 }
 

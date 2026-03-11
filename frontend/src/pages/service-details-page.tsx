@@ -536,6 +536,10 @@ function MonitoringPanelNotice({
 }
 
 function buildMetricsCoverageMessage(metrics: ServiceMetricsSummary) {
+  if (metrics.observabilityDiagnostics?.status && metrics.observabilityDiagnostics.status !== 'ok') {
+    return metrics.observabilityDiagnostics.message ?? ''
+  }
+
   const missingLabels = [
     metrics.noData.p95LatencyMs ? 'P95 latency' : null,
     metrics.noData.errorRatePct ? 'error rate' : null,
@@ -550,6 +554,13 @@ function buildMetricsCoverageMessage(metrics: ServiceMetricsSummary) {
   }
 
   return `${missingLabels.join(' and ')} require service-level HTTP instrumentation. Prometheus is healthy, but this service is not emitting matching request metrics yet.`
+}
+
+function buildMetricTrendsCoverageMessage(metrics: ServiceMetricsTrends) {
+  if (metrics.observabilityDiagnostics?.status && metrics.observabilityDiagnostics.status !== 'ok') {
+    return metrics.observabilityDiagnostics.message ?? ''
+  }
+  return ''
 }
 
 function formatTrendSource(source?: 'app_metrics' | 'traefik_fallback') {
@@ -931,8 +942,13 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     [metrics],
   )
   const metricsPanelState = useMemo(
-    () => normalizeProviderPanelState(metrics.providerStatus, metricsError, metricsAllNoData),
-    [metrics.providerStatus, metricsAllNoData, metricsError],
+    () =>
+      normalizeProviderPanelState(
+        metrics.providerStatus,
+        metricsError,
+        metricsAllNoData && !metrics.observabilityDiagnostics?.message,
+      ),
+    [metrics.providerStatus, metricsAllNoData, metrics.observabilityDiagnostics?.message, metricsError],
   )
   const metricsCoverageMessage = useMemo(
     () => buildMetricsCoverageMessage(metrics),
@@ -947,9 +963,18 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       normalizeProviderPanelState(
         metricTrends.providerStatus,
         metricTrendsError,
-        metricTrendsAllNoData,
+        metricTrendsAllNoData && !metricTrends.observabilityDiagnostics?.message,
       ),
-    [metricTrends.providerStatus, metricTrendsAllNoData, metricTrendsError],
+    [
+      metricTrends.providerStatus,
+      metricTrendsAllNoData,
+      metricTrends.observabilityDiagnostics?.message,
+      metricTrendsError,
+    ],
+  )
+  const metricTrendsCoverageMessage = useMemo(
+    () => buildMetricTrendsCoverageMessage(metricTrends),
+    [metricTrends],
   )
   const logsPanelState = useMemo(
     () =>
@@ -1212,6 +1237,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               ) : null}
               {!metricTrendsLoading ? (
                 <MonitoringPanelNotice provider="Prometheus" state={metricTrendsPanelState} />
+              ) : null}
+              {!metricTrendsLoading && !metricTrendsError && metricTrendsCoverageMessage ? (
+                <div className="rounded-md border border-slate-500/40 bg-slate-500/10 p-3">
+                  <p className="text-xs text-slate-900 dark:text-slate-200">{metricTrendsCoverageMessage}</p>
+                </div>
               ) : null}
               <div className="grid gap-3 xl:grid-cols-2">
                 <article className="space-y-4 rounded-md border border-border bg-background p-4">
