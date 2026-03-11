@@ -26,7 +26,7 @@ export function PortalLayout({
 }: PortalLayoutProps) {
   return (
     <div className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto flex max-w-screen-2xl">
+      <div className="flex min-h-screen w-full">
         <PortalSidebar pathname={pathname} theme={theme} onThemeToggle={onThemeToggle} />
         <div className="flex min-h-screen flex-1 flex-col">
           <Topbar
