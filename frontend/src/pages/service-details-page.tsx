@@ -18,6 +18,7 @@ import {
   type ReleaseTraceabilityRow,
   type ServiceDetails,
   type ServiceDeployment,
+  type ServiceDeploymentLock,
   type ServiceEndpoint,
 } from '@/lib/api'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
@@ -69,6 +70,7 @@ interface ServiceOverviewData {
   endpoints: ServiceEndpoint[]
   endpointState: 'available' | 'no_routed_endpoint' | 'metadata_missing'
   deployments: ServiceDeployment[]
+  deploymentLock?: ServiceDeploymentLock | null
 }
 
 interface QuickLinkCardProps {
@@ -206,6 +208,7 @@ function buildFromProjects(serviceId: string, projects: Project[]): ServiceOverv
     endpointState:
       endpointMap.size > 0 ? 'available' : matches.length > 0 ? 'no_routed_endpoint' : 'metadata_missing',
     deployments: [],
+    deploymentLock: null,
   }
 }
 
@@ -565,6 +568,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               ),
               endpointState: 'no_routed_endpoint',
               deployments: releaseFallback.deployments ?? [],
+              deploymentLock: serviceResult.value.deploymentLock ?? null,
             }
           : fallback
 
@@ -822,6 +826,35 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 <p className="text-xs text-amber-700/90 dark:text-amber-200">
                   Latest deployments triggered alert rules. Service status is highlighted as degraded.
                 </p>
+              </div>
+            ) : null}
+
+            {overview.deploymentLock ? (
+              <div className="rounded-md border border-sky-500/50 bg-sky-500/10 p-3">
+                <p className="text-sm font-medium text-sky-900 dark:text-sky-200">
+                  Active deployment lock for {overview.deploymentLock.action}
+                </p>
+                <p className="mt-1 text-xs text-sky-900 dark:text-sky-200">
+                  Overlapping portal mutations for this service/environment should be treated as blocked until the
+                  active request finishes or the stale lock expires.
+                </p>
+                <div className="mt-2 space-y-1 text-xs text-sky-900 dark:text-sky-200">
+                  <p>Requested: {formatDate(overview.deploymentLock.requestedAt)}</p>
+                  <p>Expires: {formatDate(overview.deploymentLock.expiresAt)}</p>
+                  {overview.deploymentLock.deployReason ? (
+                    <p>Reason: {overview.deploymentLock.deployReason}</p>
+                  ) : null}
+                  {overview.deploymentLock.gitPrUrl ? (
+                    <a
+                      href={overview.deploymentLock.gitPrUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex font-medium text-sky-900 underline underline-offset-2 dark:text-sky-200"
+                    >
+                      GitOps PR #{overview.deploymentLock.gitPrNumber ?? 'link'}
+                    </a>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 

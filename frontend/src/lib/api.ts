@@ -148,6 +148,25 @@ export interface ServiceDeployment {
   metadata?: Record<string, unknown>
 }
 
+export interface ServiceDeploymentLock {
+  serviceId: string
+  env: string
+  deploymentId: string
+  requestKey: string
+  action: string
+  status: string
+  argoApp?: string
+  requestedBy?: string
+  requestedAt?: string
+  gitPrUrl?: string
+  gitPrNumber?: number
+  gitRef?: string
+  deployReason?: string
+  lockedAt?: string
+  expiresAt?: string
+  metadata?: Record<string, unknown>
+}
+
 export interface ReleaseTraceabilityArgoState {
   appName?: string | null
   syncStatus?: string | null
@@ -186,6 +205,7 @@ export interface ServiceDetails {
   internalUrls?: string[]
   endpoints?: ServiceEndpoint[]
   deployments?: ServiceDeployment[]
+  deploymentLock?: ServiceDeploymentLock | null
 }
 
 export interface ServiceRegistryApiRow {

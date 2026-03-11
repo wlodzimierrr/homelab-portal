@@ -16,6 +16,7 @@ from app.deployment_records import (
     get_latest_deployment_record_for_service,
     upsert_deployment_record,
 )
+from app.deployment_locks import sync_deployment_lock_for_deployment_row
 
 
 logger = logging.getLogger("homelab.backend.deployment_reconciler")
@@ -627,6 +628,7 @@ def reconcile_recent_gitops_deployments(
     )
     status_counts = {status: 0 for status in ("pending", "deploying", "live", "failed")}
     records_upserted = 0
+    lock_managed_pairs: set[tuple[str, str]] = set()
 
     for event in events:
         existing_record = get_deployment_record_by_request_key(conn, event.request_key)
@@ -659,6 +661,16 @@ def reconcile_recent_gitops_deployments(
         )
         row = upsert_deployment_record(conn, **payload)
         records_upserted += 1
+        pair = (event.service_id, event.env)
+        if pair not in lock_managed_pairs:
+            sync_deployment_lock_for_deployment_row(
+                conn,
+                row,
+                enforce_conflict=False,
+                release_any_terminal=True,
+                now=current_time,
+            )
+            lock_managed_pairs.add(pair)
         status = row.get("status")
         if isinstance(status, str) and status in status_counts:
             status_counts[status] += 1

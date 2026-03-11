@@ -536,6 +536,108 @@
         }
       }
     },
+    "/deployments/reconcile": {
+      "post": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Reconcile Deployments",
+        "operationId": "reconcile_deployments_deployments_reconcile_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "serviceId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Serviceid"
+            }
+          },
+          {
+            "name": "env",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Env"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentReconcileResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/deployments/{deployment_id}": {
       "get": {
         "tags": [
@@ -678,108 +780,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DeploymentRecordResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/deployments/reconcile": {
-      "post": {
-        "tags": [
-          "metadata"
-        ],
-        "summary": "Reconcile Deployments",
-        "operationId": "reconcile_deployments_deployments_reconcile_post",
-        "security": [
-          {
-            "HTTPBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "serviceId",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Serviceid"
-            }
-          },
-          {
-            "name": "env",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Env"
-            }
-          },
-          {
-            "name": "X-Auth-Request-User",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Auth-Request-User"
-            }
-          },
-          {
-            "name": "X-Auth-Request-Groups",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Auth-Request-Groups"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeploymentReconcileResponse"
                 }
               }
             }
@@ -2758,6 +2758,155 @@
         ],
         "title": "CreateProjectRequest"
       },
+      "DeploymentLockResponse": {
+        "properties": {
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "env": {
+            "type": "string",
+            "title": "Env"
+          },
+          "deploymentId": {
+            "type": "string",
+            "title": "Deploymentid"
+          },
+          "requestKey": {
+            "type": "string",
+            "title": "Requestkey"
+          },
+          "action": {
+            "type": "string",
+            "title": "Action"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "argoApp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Argoapp"
+          },
+          "requestedBy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestedby"
+          },
+          "requestedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestedat"
+          },
+          "gitPrUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprurl"
+          },
+          "gitPrNumber": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprnumber"
+          },
+          "gitRef": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitref"
+          },
+          "deployReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployreason"
+          },
+          "lockedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lockedat"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          }
+        },
+        "type": "object",
+        "required": [
+          "serviceId",
+          "env",
+          "deploymentId",
+          "requestKey",
+          "action",
+          "status"
+        ],
+        "title": "DeploymentLockResponse"
+      },
       "DeploymentReconcileResponse": {
         "properties": {
           "pullRequestsScanned": {
@@ -3901,6 +4050,16 @@
               }
             ],
             "title": "Lastsyncedat"
+          },
+          "deploymentLock": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeploymentLockResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",

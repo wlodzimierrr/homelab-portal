@@ -25,6 +25,13 @@ from app.deployment_records import (
     list_deployment_records_for_service,
     upsert_deployment_record,
 )
+from app.deployment_locks import (
+    DeploymentLockConflictError,
+    DeploymentLockRow,
+    cleanup_stale_deployment_locks,
+    get_deployment_lock,
+    sync_deployment_lock_for_deployment_row,
+)
 from app.deployment_reconciler import reconcile_recent_gitops_deployments
 from app.health_timeline import (
     TimelinePoint,
@@ -269,6 +276,28 @@ class ServiceDetailResponse(BaseModel):
     source: str
     source_ref: str | None = Field(default=None, alias="sourceRef")
     last_synced_at: str | None = Field(default=None, alias="lastSyncedAt")
+    deployment_lock: "DeploymentLockResponse | None" = Field(default=None, alias="deploymentLock")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DeploymentLockResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    env: str
+    deployment_id: str = Field(alias="deploymentId")
+    request_key: str = Field(alias="requestKey")
+    action: str
+    status: str
+    argo_app: str | None = Field(default=None, alias="argoApp")
+    requested_by: str | None = Field(default=None, alias="requestedBy")
+    requested_at: str | None = Field(default=None, alias="requestedAt")
+    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
+    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
+    git_ref: str | None = Field(default=None, alias="gitRef")
+    deploy_reason: str | None = Field(default=None, alias="deployReason")
+    locked_at: str | None = Field(default=None, alias="lockedAt")
+    expires_at: str | None = Field(default=None, alias="expiresAt")
+    metadata: dict[str, Any] | None = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -649,6 +678,10 @@ def _with_connection() -> psycopg.Connection:
     return psycopg.connect(get_psycopg_database_url())
 
 
+def _deployment_lock_stale_timeout_seconds() -> int:
+    return max(60, int(os.getenv("DEPLOYMENT_LOCK_STALE_TIMEOUT_SECONDS", "1800")))
+
+
 def _list_deployment_records_for_service(
     service_id: str,
     env: str | None = None,
@@ -666,6 +699,15 @@ def _list_deployment_records_for_service(
 def _get_deployment_record_by_id(deployment_id: str) -> dict[str, object] | None:
     with _with_connection() as conn:
         return get_deployment_record(conn, deployment_id)
+
+
+def _get_active_deployment_lock(
+    service_id: str,
+    env: str,
+) -> DeploymentLockRow | None:
+    with _with_connection() as conn:
+        cleanup_stale_deployment_locks(conn, service_id=service_id, env=env)
+        return get_deployment_lock(conn, service_id=service_id, env=env)
 
 
 def _upsert_deployment_record_row(
@@ -686,6 +728,11 @@ def _upsert_deployment_record_row(
     )
 
     with _with_connection() as conn:
+        cleanup_stale_deployment_locks(
+            conn,
+            service_id=payload.service_id,
+            env=payload.env,
+        )
         row = upsert_deployment_record(
             conn,
             service_id=payload.service_id,
@@ -711,6 +758,12 @@ def _upsert_deployment_record_row(
             git_ref=payload.git_ref,
             request_key=payload.request_key,
             metadata=payload.metadata,
+        )
+        sync_deployment_lock_for_deployment_row(
+            conn,
+            row,
+            stale_after_seconds=_deployment_lock_stale_timeout_seconds(),
+            enforce_conflict=True,
         )
     deployment_history_cache.clear()
     deployment_reconcile_cache.clear()
@@ -750,6 +803,7 @@ def _reconcile_recent_deployment_activity(
     env: str | None = None,
 ) -> DeploymentReconcileResponse:
     with _with_connection() as conn:
+        cleanup_stale_deployment_locks(conn)
         result = reconcile_recent_gitops_deployments(
             conn,
             load_service_rows=_load_service_rows,
@@ -1717,6 +1771,49 @@ def _build_deployment_record_response(
     )
 
 
+def _build_deployment_lock_response(lock_row: DeploymentLockRow | None) -> DeploymentLockResponse | None:
+    if lock_row is None:
+        return None
+    return DeploymentLockResponse(
+        serviceId=str(lock_row.get("serviceId") or ""),
+        env=str(lock_row.get("env") or ""),
+        deploymentId=str(lock_row.get("deploymentId") or ""),
+        requestKey=str(lock_row.get("requestKey") or ""),
+        action=str(lock_row.get("action") or ""),
+        status=str(lock_row.get("status") or ""),
+        argoApp=lock_row.get("argoApp") if isinstance(lock_row.get("argoApp"), str) else None,
+        requestedBy=(
+            lock_row.get("requestedBy")
+            if isinstance(lock_row.get("requestedBy"), str)
+            else None
+        ),
+        requestedAt=(
+            lock_row.get("requestedAt")
+            if isinstance(lock_row.get("requestedAt"), str)
+            else None
+        ),
+        gitPrUrl=lock_row.get("prUrl") if isinstance(lock_row.get("prUrl"), str) else None,
+        gitPrNumber=(
+            lock_row.get("prNumber")
+            if isinstance(lock_row.get("prNumber"), int)
+            else None
+        ),
+        gitRef=lock_row.get("gitRef") if isinstance(lock_row.get("gitRef"), str) else None,
+        deployReason=(
+            lock_row.get("deployReason")
+            if isinstance(lock_row.get("deployReason"), str)
+            else None
+        ),
+        lockedAt=lock_row.get("lockedAt") if isinstance(lock_row.get("lockedAt"), str) else None,
+        expiresAt=(
+            lock_row.get("expiresAt")
+            if isinstance(lock_row.get("expiresAt"), str)
+            else None
+        ),
+        metadata=lock_row.get("metadata") if isinstance(lock_row.get("metadata"), dict) else None,
+    )
+
+
 def _query_prometheus_scalar(
     query: str,
     metric_name: str,
@@ -2292,6 +2389,8 @@ def get_service(
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceDetailResponse:
+    preferred_env = env or os.getenv("PORTAL_ENV", "dev")
+    _maybe_reconcile_recent_deployments(service_id=service_id, env=preferred_env)
     rows = _load_service_rows(service_id=service_id, env=env)
     if not rows:
         raise HTTPException(
@@ -2299,7 +2398,6 @@ def get_service(
             detail="Service not found",
         )
 
-    preferred_env = env or os.getenv("PORTAL_ENV", "dev")
     selected = _select_preferred_service_row(service_id, rows, preferred_env) or rows[0]
     release_rows = _sort_release_rows_by_deployed_at(_load_release_rows_for_service(service_id, env))
     release = next((row for row in release_rows if _release_row_has_meaningful_metadata(row)), {})
@@ -2314,6 +2412,7 @@ def get_service(
         if isinstance(live_release.get("imageRef"), str)
         else None
     )
+    active_lock = _get_active_deployment_lock(str(selected["service_id"]), str(selected["env"]))
 
     return ServiceDetailResponse(
         id=str(selected["service_id"]),
@@ -2328,6 +2427,7 @@ def get_service(
         source=str(selected["source"]),
         sourceRef=selected["source_ref"] if isinstance(selected["source_ref"], str) else None,
         lastSyncedAt=selected["last_synced_at"] if isinstance(selected["last_synced_at"], str) else None,
+        deploymentLock=_build_deployment_lock_response(active_lock),
     )
 
 
@@ -2384,7 +2484,19 @@ def create_deployment_record(
     payload: CreateDeploymentRecordRequest,
     admin_user: str = Depends(require_admin),
 ) -> DeploymentRecordResponse:
-    record = _upsert_deployment_record_row(payload, requested_by=admin_user)
+    try:
+        record = _upsert_deployment_record_row(payload, requested_by=admin_user)
+    except DeploymentLockConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    f"Active deployment lock already exists for {payload.service_id}/{payload.env}. "
+                    "Wait for the in-flight mutation to finish or clear its stale lock."
+                ),
+                "activeLock": _build_deployment_lock_response(exc.active_lock).model_dump(by_alias=True),
+            },
+        ) from exc
     service_rows = _load_service_rows(service_id=payload.service_id, env=payload.env)
     selected = _select_preferred_service_row(payload.service_id, service_rows, payload.env)
     return _build_deployment_record_response(record, selected)
