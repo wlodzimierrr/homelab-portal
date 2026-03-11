@@ -1060,7 +1060,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "default": "errors",
+              "default": "all",
               "title": "Logspreset"
             }
           },
@@ -2366,7 +2366,7 @@
             "required": false,
             "schema": {
               "type": "string",
-              "default": "errors",
+              "default": "all",
               "title": "Preset"
             }
           },

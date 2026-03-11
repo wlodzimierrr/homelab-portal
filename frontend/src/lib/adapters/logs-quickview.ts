@@ -1,7 +1,7 @@
 import { request, type MonitoringProviderStatus } from '@/lib/api'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
-export type LogsQuickViewPreset = 'errors' | 'restarts' | 'warnings'
+export type LogsQuickViewPreset = 'all' | 'errors' | 'restarts' | 'warnings'
 export type LogsQuickViewRange = '15m' | '1h' | '6h' | '24h'
 
 export interface LogsQuickViewLine {
@@ -63,7 +63,9 @@ function hasResolvedMonitoringScope(identity: ServiceIdentity) {
 }
 
 function normalizePreset(value: unknown, fallback: LogsQuickViewPreset): LogsQuickViewPreset {
-  return value === 'errors' || value === 'restarts' || value === 'warnings' ? value : fallback
+  return value === 'all' || value === 'errors' || value === 'restarts' || value === 'warnings'
+    ? value
+    : fallback
 }
 
 function normalizeRange(value: unknown, fallback: LogsQuickViewRange): LogsQuickViewRange {

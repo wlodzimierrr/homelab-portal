@@ -8,6 +8,7 @@ from threading import Lock
 
 
 APPROVED_LOG_PRESETS: dict[str, str] = {
+    "all": "",
     "errors": ' |~ "(?i)(error| 5[0-9][0-9])"',
     "restarts": ' |~ "(?i)(restart|CrashLoopBackOff)"',
     "warnings": ' |~ "(?i)(warn|timeout)"',

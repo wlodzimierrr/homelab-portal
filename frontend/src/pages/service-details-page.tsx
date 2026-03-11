@@ -581,6 +581,12 @@ function IncidentServiceBadge({ alert }: { alert: ServiceIncidentBadge }) {
 
 const logsPresets: LogsPreset[] = [
   {
+    id: 'all',
+    label: 'All logs',
+    description: 'Recent logs without severity filtering',
+    queryTemplate: '{namespace="{{namespace}}", app="{{app_label}}"}',
+  },
+  {
     id: 'errors',
     label: 'Errors',
     description: 'HTTP 5xx or error-level logs',
@@ -636,7 +642,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [timelineLoading, setTimelineLoading] = useState(true)
   const [timelineError, setTimelineError] = useState('')
   const [logsDrawerOpen, setLogsDrawerOpen] = useState(false)
-  const [activeLogsPreset, setActiveLogsPreset] = useState<LogsQuickViewPreset>('errors')
+  const [activeLogsPreset, setActiveLogsPreset] = useState<LogsQuickViewPreset>('all')
   const [logsRange, setLogsRange] = useState<LogsQuickViewRange>('1h')
   const [logsSearch, setLogsSearch] = useState('')
   const [logsResult, setLogsResult] = useState<ServiceLogsQuickView | null>(null)

@@ -3354,7 +3354,7 @@ def get_service_deployment_observability(
     deployment_id: str | None = Query(default=None, alias="deploymentId"),
     window_start: str | None = Query(default=None, alias="windowStart"),
     window_end: str | None = Query(default=None, alias="windowEnd"),
-    logs_preset: str = Query(default="errors", alias="logsPreset"),
+    logs_preset: str = Query(default="all", alias="logsPreset"),
     logs_limit: int = Query(default=50, alias="logsLimit", ge=1, le=200),
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> DeploymentObservabilityResponse:
@@ -4090,7 +4090,7 @@ def get_release_dashboard_compat(
 )
 def get_service_logs_quickview(
     service_id: str,
-    preset: str = Query(default="errors"),
+    preset: str = Query(default="all"),
     selected_range: str = Query(default="1h", alias="range"),
     limit: int = Query(default=100, ge=1, le=200),
     cursor: str | None = Query(default=None),
