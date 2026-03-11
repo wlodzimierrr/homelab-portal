@@ -328,3 +328,106 @@ def test_reconciler_only_updates_lock_for_latest_service_event(monkeypatch) -> N
 
     assert len(captured_rows) == 1
     assert captured_rows[0]["requestKey"] == "gitops-pr:46:homelab-api:dev:deploy"
+
+
+def test_reconciler_does_not_force_release_unrelated_manual_lock(monkeypatch) -> None:
+    captured_kwargs: list[dict[str, object]] = []
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 46,
+                "title": f"chore(dev): bump portal images to sha-{'a' * 40}",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/46",
+                "state": "closed",
+                "created_at": "2026-03-10T17:10:11Z",
+                "closed_at": "2026-03-10T17:12:30Z",
+                "merged_at": "2026-03-10T17:12:30Z",
+                "merge_commit_sha": "merge-sha-46",
+                "body": f"- backend -> `ghcr.io/wlodzimierrr/homelab-api:sha-{'a' * 40}`",
+                "user": {"login": "github-actions[bot]"},
+                "head": {"ref": f"automation/dev-image-bump-{'a' * 40}"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "upsert_deployment_record",
+        lambda _conn, **kwargs: {
+            "deploymentId": "dep-46",
+            "serviceId": kwargs["service_id"],
+            "env": kwargs["env"],
+            "action": kwargs["action"],
+            "status": kwargs["status"],
+            "requestedBy": kwargs["requested_by"],
+            "requestedAt": kwargs["requested_at"].astimezone(timezone.utc).isoformat()
+            if isinstance(kwargs["requested_at"], datetime)
+            else kwargs["requested_at"],
+            "prUrl": kwargs["pr_url"],
+            "prNumber": kwargs["pr_number"],
+            "mergeSha": kwargs["merge_sha"],
+            "targetImage": kwargs["target_image"],
+            "previousImage": kwargs["previous_image"],
+            "argoApp": kwargs["argo_app"],
+            "syncStatus": kwargs["sync_status"],
+            "healthStatus": kwargs["health_status"],
+            "startedAt": kwargs["started_at"],
+            "finishedAt": kwargs["finished_at"],
+            "deployWindowStart": kwargs["deploy_window_start"],
+            "deployWindowEnd": kwargs["deploy_window_end"],
+            "deployReason": kwargs["deploy_reason"],
+            "compareUrl": kwargs["compare_url"],
+            "gitRef": kwargs["git_ref"],
+            "requestKey": kwargs["request_key"],
+            "metadata": kwargs["metadata"],
+        },
+    )
+
+    def _fake_sync(_conn, _row, **kwargs):
+        captured_kwargs.append(kwargs)
+        return None
+
+    monkeypatch.setattr(deployment_reconciler, "sync_deployment_lock_for_deployment_row", _fake_sync)
+
+    deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-10T17:00:00Z",
+            }
+        ],
+        select_preferred_service_row=lambda _service_id, rows, _env: rows[0],
+        load_live_argo_status=lambda _row: {
+            "syncStatus": "synced",
+            "healthStatus": "healthy",
+            "revision": "merge-sha-46",
+            "deployedAt": "2026-03-10T17:14:31Z",
+        },
+        list_live_deployments=lambda _row: [{"kind": "Deployment"}],
+        extract_live_image_ref=lambda _deployment: f"ghcr.io/wlodzimierrr/homelab-api:sha-{'a' * 40}",
+        service_id="homelab-api",
+        github_fetch_json=_fake_fetch,
+        now=datetime(2026, 3, 10, 17, 15, tzinfo=timezone.utc),
+    )
+
+    assert len(captured_kwargs) == 1
+    assert captured_kwargs[0]["enforce_conflict"] is False
+    assert "release_any_terminal" not in captured_kwargs[0]

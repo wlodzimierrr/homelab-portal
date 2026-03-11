@@ -667,7 +667,6 @@ def reconcile_recent_gitops_deployments(
                 conn,
                 row,
                 enforce_conflict=False,
-                release_any_terminal=True,
                 now=current_time,
             )
             lock_managed_pairs.add(pair)
