@@ -984,6 +984,155 @@
         }
       }
     },
+    "/services/{service_id}/observability/window": {
+      "get": {
+        "tags": [
+          "monitoring"
+        ],
+        "summary": "Get Service Deployment Observability",
+        "operationId": "get_service_deployment_observability_services__service_id__observability_window_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "deploymentId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Deploymentid"
+            }
+          },
+          {
+            "name": "windowStart",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Windowstart"
+            }
+          },
+          {
+            "name": "windowEnd",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Windowend"
+            }
+          },
+          {
+            "name": "logsPreset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "errors",
+              "title": "Logspreset"
+            }
+          },
+          {
+            "name": "logsLimit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Logslimit"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentObservabilityResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/catalog/reconciliation": {
       "get": {
         "tags": [
@@ -2986,6 +3135,526 @@
           "status"
         ],
         "title": "DeploymentLockResponse"
+      },
+      "DeploymentObservabilityContextResponse": {
+        "properties": {
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "env": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Env"
+          },
+          "deploymentId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deploymentid"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "windowStart": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Windowstart"
+          },
+          "windowEnd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Windowend"
+          },
+          "windowSource": {
+            "type": "string",
+            "enum": [
+              "deployment_record",
+              "explicit_window"
+            ],
+            "title": "Windowsource"
+          },
+          "evidenceStatus": {
+            "type": "string",
+            "enum": [
+              "resolved",
+              "missing"
+            ],
+            "title": "Evidencestatus"
+          },
+          "evidenceMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidencemessage"
+          },
+          "compareUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compareurl"
+          },
+          "gitPrUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprurl"
+          },
+          "gitPrNumber": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprnumber"
+          },
+          "deployReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployreason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "serviceId",
+          "windowSource",
+          "evidenceStatus"
+        ],
+        "title": "DeploymentObservabilityContextResponse"
+      },
+      "DeploymentObservabilityLogsResponse": {
+        "properties": {
+          "queryStatus": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "no_data",
+              "no_deployment_window"
+            ],
+            "title": "Querystatus"
+          },
+          "queryMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Querymessage"
+          },
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "preset": {
+            "type": "string",
+            "title": "Preset"
+          },
+          "generatedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generatedat"
+          },
+          "windowStart": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Windowstart"
+          },
+          "windowEnd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Windowend"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "returned": {
+            "type": "integer",
+            "title": "Returned"
+          },
+          "moreAvailable": {
+            "type": "boolean",
+            "title": "Moreavailable"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/QuickViewLogLineResponse"
+            },
+            "type": "array",
+            "title": "Lines"
+          },
+          "providerStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "queryStatus",
+          "serviceId",
+          "preset",
+          "limit",
+          "returned",
+          "moreAvailable",
+          "lines"
+        ],
+        "title": "DeploymentObservabilityLogsResponse"
+      },
+      "DeploymentObservabilityMetricSnapshotResponse": {
+        "properties": {
+          "before": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before"
+          },
+          "after": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After"
+          },
+          "delta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta"
+          }
+        },
+        "type": "object",
+        "title": "DeploymentObservabilityMetricSnapshotResponse"
+      },
+      "DeploymentObservabilityMetricsResponse": {
+        "properties": {
+          "queryStatus": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "no_data",
+              "no_deployment_window"
+            ],
+            "title": "Querystatus"
+          },
+          "queryMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Querymessage"
+          },
+          "windowStart": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Windowstart"
+          },
+          "windowEnd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Windowend"
+          },
+          "generatedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generatedat"
+          },
+          "errorRatePct": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeploymentObservabilityMetricSnapshotResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "p95LatencyMs": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeploymentObservabilityMetricSnapshotResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "availabilityPct": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeploymentObservabilityMetricSnapshotResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "noData": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "type": "object",
+            "title": "Nodata"
+          },
+          "providerStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "queryStatus",
+          "noData"
+        ],
+        "title": "DeploymentObservabilityMetricsResponse"
+      },
+      "DeploymentObservabilityResponse": {
+        "properties": {
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "context": {
+            "$ref": "#/components/schemas/DeploymentObservabilityContextResponse"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/DeploymentObservabilityMetricsResponse"
+          },
+          "healthTimeline": {
+            "$ref": "#/components/schemas/DeploymentObservabilityTimelineResponse"
+          },
+          "logsQuickView": {
+            "$ref": "#/components/schemas/DeploymentObservabilityLogsResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "serviceId",
+          "context",
+          "metrics",
+          "healthTimeline",
+          "logsQuickView"
+        ],
+        "title": "DeploymentObservabilityResponse"
+      },
+      "DeploymentObservabilityTimelineResponse": {
+        "properties": {
+          "queryStatus": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "no_data",
+              "no_deployment_window"
+            ],
+            "title": "Querystatus"
+          },
+          "queryMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Querymessage"
+          },
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "windowStart": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Windowstart"
+          },
+          "windowEnd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Windowend"
+          },
+          "generatedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generatedat"
+          },
+          "providerStatus": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceHealthTimelineSegmentResponse"
+            },
+            "type": "array",
+            "title": "Segments"
+          }
+        },
+        "type": "object",
+        "required": [
+          "queryStatus",
+          "serviceId",
+          "segments"
+        ],
+        "title": "DeploymentObservabilityTimelineResponse"
       },
       "DeploymentReconcileResponse": {
         "properties": {

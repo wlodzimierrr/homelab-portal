@@ -628,6 +628,95 @@ class LogsQuickViewResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class DeploymentObservabilityContextResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    env: str | None = None
+    deployment_id: str | None = Field(default=None, alias="deploymentId")
+    action: str | None = None
+    status: str | None = None
+    window_start: str | None = Field(default=None, alias="windowStart")
+    window_end: str | None = Field(default=None, alias="windowEnd")
+    window_source: Literal["deployment_record", "explicit_window"] = Field(alias="windowSource")
+    evidence_status: Literal["resolved", "missing"] = Field(alias="evidenceStatus")
+    evidence_message: str | None = Field(default=None, alias="evidenceMessage")
+    compare_url: str | None = Field(default=None, alias="compareUrl")
+    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
+    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
+    deploy_reason: str | None = Field(default=None, alias="deployReason")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DeploymentObservabilityMetricSnapshotResponse(BaseModel):
+    before: float | None = None
+    after: float | None = None
+    delta: float | None = None
+
+
+class DeploymentObservabilityMetricsResponse(BaseModel):
+    query_status: Literal["ok", "no_data", "no_deployment_window"] = Field(alias="queryStatus")
+    query_message: str | None = Field(default=None, alias="queryMessage")
+    window_start: str | None = Field(default=None, alias="windowStart")
+    window_end: str | None = Field(default=None, alias="windowEnd")
+    generated_at: str | None = Field(default=None, alias="generatedAt")
+    error_rate_pct: DeploymentObservabilityMetricSnapshotResponse | None = Field(
+        default=None,
+        alias="errorRatePct",
+    )
+    p95_latency_ms: DeploymentObservabilityMetricSnapshotResponse | None = Field(
+        default=None,
+        alias="p95LatencyMs",
+    )
+    availability_pct: DeploymentObservabilityMetricSnapshotResponse | None = Field(
+        default=None,
+        alias="availabilityPct",
+    )
+    no_data: dict[str, bool] = Field(alias="noData")
+    provider_status: MonitoringProviderStatusResponse | None = Field(default=None, alias="providerStatus")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DeploymentObservabilityTimelineResponse(BaseModel):
+    query_status: Literal["ok", "no_data", "no_deployment_window"] = Field(alias="queryStatus")
+    query_message: str | None = Field(default=None, alias="queryMessage")
+    service_id: str = Field(alias="serviceId")
+    window_start: str | None = Field(default=None, alias="windowStart")
+    window_end: str | None = Field(default=None, alias="windowEnd")
+    generated_at: str | None = Field(default=None, alias="generatedAt")
+    provider_status: MonitoringProviderStatusResponse | None = Field(default=None, alias="providerStatus")
+    segments: list[ServiceHealthTimelineSegmentResponse]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DeploymentObservabilityLogsResponse(BaseModel):
+    query_status: Literal["ok", "no_data", "no_deployment_window"] = Field(alias="queryStatus")
+    query_message: str | None = Field(default=None, alias="queryMessage")
+    service_id: str = Field(alias="serviceId")
+    preset: str
+    generated_at: str | None = Field(default=None, alias="generatedAt")
+    window_start: str | None = Field(default=None, alias="windowStart")
+    window_end: str | None = Field(default=None, alias="windowEnd")
+    limit: int
+    returned: int
+    more_available: bool = Field(alias="moreAvailable")
+    lines: list[QuickViewLogLineResponse]
+    provider_status: MonitoringProviderStatusResponse | None = Field(default=None, alias="providerStatus")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DeploymentObservabilityResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    context: DeploymentObservabilityContextResponse
+    metrics: DeploymentObservabilityMetricsResponse
+    health_timeline: DeploymentObservabilityTimelineResponse = Field(alias="healthTimeline")
+    logs_quick_view: DeploymentObservabilityLogsResponse = Field(alias="logsQuickView")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ActiveAlertResponse(BaseModel):
     id: str
     severity: str
@@ -1666,6 +1755,41 @@ def _build_metric_snapshot(before: float | None, after: float | None) -> dict[st
     return snapshot or None
 
 
+def _format_duration_token(value: timedelta) -> str:
+    total_seconds = max(int(math.ceil(value.total_seconds())), 60)
+    if total_seconds % 86_400 == 0:
+        return f"{max(1, total_seconds // 86_400)}d"
+    if total_seconds % 3_600 == 0:
+        return f"{max(1, total_seconds // 3_600)}h"
+    return f"{max(1, math.ceil(total_seconds / 60))}m"
+
+
+def _resolve_window_end(start: datetime, end: datetime | None) -> datetime:
+    effective_end = end or now_utc()
+    if effective_end > now_utc():
+        effective_end = now_utc()
+    if effective_end <= start:
+        effective_end = start + timedelta(minutes=1)
+    return effective_end
+
+
+def _resolve_record_window(
+    record: dict[str, object],
+) -> tuple[datetime | None, datetime | None]:
+    start = (
+        _parse_iso_datetime(record.get("deployWindowStart"))
+        or _parse_iso_datetime(record.get("startedAt"))
+        or _parse_iso_datetime(record.get("requestedAt"))
+    )
+    end = (
+        _parse_iso_datetime(record.get("deployWindowEnd"))
+        or _parse_iso_datetime(record.get("finishedAt"))
+    )
+    if start is None:
+        return None, None
+    return start, _resolve_window_end(start, end)
+
+
 def _query_prometheus_comparison_snapshot(
     *,
     queries: tuple[str, ...],
@@ -1708,9 +1832,11 @@ def _query_prometheus_comparison_snapshot(
     return None
 
 
-def _load_deployment_metric_snapshots(
+def _load_metric_snapshots_for_window(
     service_row: dict[str, str | None] | None,
-    release_row: dict[str, object],
+    *,
+    window_start: datetime,
+    window_end: datetime,
 ) -> dict[str, dict[str, float]]:
     if not service_row:
         return {}
@@ -1719,15 +1845,13 @@ def _load_deployment_metric_snapshots(
     app_label = str(service_row.get("app_label") or "").strip()
     service_id = str(service_row.get("service_id") or "").strip()
     env = str(service_row.get("env") or "").strip()
-    deployed_at = _parse_iso_datetime(release_row.get("deployedAt"))
-    if not namespace or not app_label or not service_id or deployed_at is None:
+    if not namespace or not app_label or not service_id:
         return {}
 
-    comparison_window_token = _deployment_comparison_window_token()
-    comparison_window = parse_duration_token(comparison_window_token)
-    comparison_end = deployed_at + comparison_window
-    if comparison_end > now_utc():
+    comparison_window = window_end - window_start
+    if comparison_window <= timedelta(0):
         return {}
+    comparison_window_token = _format_duration_token(comparison_window)
 
     cache_key = (
         "service_deployment_metrics",
@@ -1735,8 +1859,8 @@ def _load_deployment_metric_snapshots(
         env,
         namespace,
         app_label,
-        deployed_at.isoformat(),
-        comparison_window_token,
+        window_start.isoformat(),
+        window_end.isoformat(),
     )
 
     def _load() -> dict[str, dict[str, float]]:
@@ -1748,29 +1872,29 @@ def _load_deployment_metric_snapshots(
             config=config,
         )
         correlation_id = str(uuid4())
-        step_seconds = int(comparison_window.total_seconds())
+        step_seconds = max(60, int(comparison_window.total_seconds()))
         snapshots = {
             "errorRatePct": _query_prometheus_comparison_snapshot(
                 queries=queries["errorRatePct"],
                 metric_name="deployment_error_rate_pct",
-                start=deployed_at,
-                end=comparison_end,
+                start=window_start,
+                end=window_end,
                 step_seconds=step_seconds,
                 correlation_id=correlation_id,
             ),
             "p95LatencyMs": _query_prometheus_comparison_snapshot(
                 queries=queries["p95LatencyMs"],
                 metric_name="deployment_p95_latency_ms",
-                start=deployed_at,
-                end=comparison_end,
+                start=window_start,
+                end=window_end,
                 step_seconds=step_seconds,
                 correlation_id=correlation_id,
             ),
             "availabilityPct": _query_prometheus_comparison_snapshot(
                 queries=queries["uptimePct"],
                 metric_name="deployment_availability_pct",
-                start=deployed_at,
-                end=comparison_end,
+                start=window_start,
+                end=window_end,
                 step_seconds=step_seconds,
                 correlation_id=correlation_id,
             ),
@@ -1788,6 +1912,20 @@ def _load_deployment_metric_snapshots(
     )
 
 
+def _load_deployment_metric_snapshots(
+    service_row: dict[str, str | None] | None,
+    release_row: dict[str, object],
+) -> dict[str, dict[str, float]]:
+    window_start, window_end = _resolve_record_window(release_row)
+    if window_start is None or window_end is None:
+        return {}
+    return _load_metric_snapshots_for_window(
+        service_row,
+        window_start=window_start,
+        window_end=window_end,
+    )
+
+
 def _deployment_record_sort_timestamp(record: dict[str, object]) -> str | None:
     for key in ("finishedAt", "deployWindowStart", "startedAt", "requestedAt"):
         value = record.get(key)
@@ -1801,11 +1939,7 @@ def _build_deployment_record_response(
     service_row: dict[str, str | None] | None,
 ) -> DeploymentRecordResponse:
     observed_at = _deployment_record_sort_timestamp(record)
-    metric_snapshots = (
-        _load_deployment_metric_snapshots(service_row, {"deployedAt": observed_at})
-        if observed_at
-        else {}
-    )
+    metric_snapshots = _load_deployment_metric_snapshots(service_row, record)
     image_ref = record.get("targetImage") if isinstance(record.get("targetImage"), str) else None
     metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else None
     failure_reason = (
@@ -2282,6 +2416,461 @@ def _validate_step_for_range(*, range_value: str, step_value: str) -> int:
     return int(step_delta.total_seconds())
 
 
+def _serialize_metric_snapshot(
+    snapshot: dict[str, float] | None,
+) -> DeploymentObservabilityMetricSnapshotResponse | None:
+    if not snapshot:
+        return None
+    return DeploymentObservabilityMetricSnapshotResponse(
+        before=snapshot.get("before"),
+        after=snapshot.get("after"),
+        delta=snapshot.get("delta"),
+    )
+
+
+def _select_timeline_step_seconds(window: timedelta, config) -> int:
+    minimum = int(config.timeline_step_min.total_seconds())
+    maximum = int(config.timeline_step_max.total_seconds())
+    target = max(1, math.ceil(window.total_seconds() / max(1, config.timeline_max_points // 2)))
+    return max(minimum, min(maximum, target))
+
+
+def _resolve_deployment_observability_context(
+    *,
+    service_id: str,
+    deployment_id: str | None,
+    window_start_value: str | None,
+    window_end_value: str | None,
+) -> tuple[
+    DeploymentObservabilityContextResponse,
+    dict[str, str | None] | None,
+    datetime | None,
+    datetime | None,
+]:
+    if deployment_id and (window_start_value or window_end_value):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Use either deploymentId or windowStart/windowEnd, not both.",
+        )
+
+    if not deployment_id and not (window_start_value and window_end_value):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="deploymentId or both windowStart and windowEnd are required.",
+        )
+
+    if deployment_id:
+        record = _get_deployment_record_by_id(deployment_id)
+        if record is None or str(record.get("serviceId") or "") != service_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Deployment record not found for this service.",
+            )
+        record_env = str(record.get("env") or "").strip() or os.getenv("PORTAL_ENV", "dev")
+        service_rows = _load_service_rows(service_id=service_id, env=record_env)
+        selected = _select_preferred_service_row(service_id, service_rows, record_env)
+        window_start, window_end = _resolve_record_window(record)
+        evidence_status: Literal["resolved", "missing"] = "resolved" if window_start and window_end else "missing"
+        evidence_message = None
+        if evidence_status == "missing":
+            evidence_message = "Deployment record does not have a usable deploy window yet."
+        return (
+            DeploymentObservabilityContextResponse(
+                serviceId=service_id,
+                env=record_env,
+                deploymentId=deployment_id,
+                action=record.get("action") if isinstance(record.get("action"), str) else None,
+                status=record.get("status") if isinstance(record.get("status"), str) else None,
+                windowStart=window_start.isoformat() if window_start else None,
+                windowEnd=window_end.isoformat() if window_end else None,
+                windowSource="deployment_record",
+                evidenceStatus=evidence_status,
+                evidenceMessage=evidence_message,
+                compareUrl=record.get("compareUrl") if isinstance(record.get("compareUrl"), str) else None,
+                gitPrUrl=record.get("prUrl") if isinstance(record.get("prUrl"), str) else None,
+                gitPrNumber=record.get("prNumber") if isinstance(record.get("prNumber"), int) else None,
+                deployReason=record.get("deployReason") if isinstance(record.get("deployReason"), str) else None,
+            ),
+            selected,
+            window_start,
+            window_end,
+        )
+
+    explicit_start = _parse_iso_datetime(window_start_value)
+    explicit_end = _parse_iso_datetime(window_end_value)
+    if explicit_start is None or explicit_end is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="windowStart and windowEnd must be valid ISO timestamps.",
+        )
+    if explicit_end <= explicit_start:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="windowEnd must be after windowStart.",
+        )
+    preferred_env = os.getenv("PORTAL_ENV", "dev")
+    service_rows = _load_service_rows(service_id=service_id, env=preferred_env)
+    selected = _select_preferred_service_row(service_id, service_rows, preferred_env)
+    return (
+        DeploymentObservabilityContextResponse(
+            serviceId=service_id,
+            env=preferred_env,
+            deploymentId=None,
+            action=None,
+            status=None,
+            windowStart=explicit_start.isoformat(),
+            windowEnd=explicit_end.isoformat(),
+            windowSource="explicit_window",
+            evidenceStatus="resolved",
+            evidenceMessage=None,
+            compareUrl=None,
+            gitPrUrl=None,
+            gitPrNumber=None,
+            deployReason=None,
+        ),
+        selected,
+        explicit_start,
+        explicit_end,
+    )
+
+
+def _build_no_window_metrics_response(
+    *,
+    message: str,
+    window_start: datetime | None,
+    window_end: datetime | None,
+) -> DeploymentObservabilityMetricsResponse:
+    return DeploymentObservabilityMetricsResponse(
+        queryStatus="no_deployment_window",
+        queryMessage=message,
+        windowStart=window_start.isoformat() if window_start else None,
+        windowEnd=window_end.isoformat() if window_end else None,
+        generatedAt=now_utc().isoformat(),
+        errorRatePct=None,
+        p95LatencyMs=None,
+        availabilityPct=None,
+        noData={
+            "errorRatePct": True,
+            "p95LatencyMs": True,
+            "availabilityPct": True,
+        },
+        providerStatus=None,
+    )
+
+
+def _build_no_window_timeline_response(
+    *,
+    service_id: str,
+    message: str,
+    window_start: datetime | None,
+    window_end: datetime | None,
+) -> DeploymentObservabilityTimelineResponse:
+    return DeploymentObservabilityTimelineResponse(
+        queryStatus="no_deployment_window",
+        queryMessage=message,
+        serviceId=service_id,
+        windowStart=window_start.isoformat() if window_start else None,
+        windowEnd=window_end.isoformat() if window_end else None,
+        generatedAt=now_utc().isoformat(),
+        providerStatus=None,
+        segments=[],
+    )
+
+
+def _build_no_window_logs_response(
+    *,
+    service_id: str,
+    preset: str,
+    limit: int,
+    message: str,
+    window_start: datetime | None,
+    window_end: datetime | None,
+) -> DeploymentObservabilityLogsResponse:
+    return DeploymentObservabilityLogsResponse(
+        queryStatus="no_deployment_window",
+        queryMessage=message,
+        serviceId=service_id,
+        preset=preset,
+        generatedAt=now_utc().isoformat(),
+        windowStart=window_start.isoformat() if window_start else None,
+        windowEnd=window_end.isoformat() if window_end else None,
+        limit=limit,
+        returned=0,
+        moreAvailable=False,
+        lines=[],
+        providerStatus=None,
+    )
+
+
+def _build_deployment_metrics_response(
+    *,
+    service_id: str,
+    service_row: dict[str, str | None] | None,
+    window_start: datetime,
+    window_end: datetime,
+) -> DeploymentObservabilityMetricsResponse:
+    now = datetime.now(tz=timezone.utc)
+    snapshots = _load_metric_snapshots_for_window(
+        service_row,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    no_data = {
+        "errorRatePct": "errorRatePct" not in snapshots,
+        "p95LatencyMs": "p95LatencyMs" not in snapshots,
+        "availabilityPct": "availabilityPct" not in snapshots,
+    }
+    query_status: Literal["ok", "no_data", "no_deployment_window"] = (
+        "no_data" if all(no_data.values()) else "ok"
+    )
+    query_message = (
+        "Prometheus returned no retained samples for this deployment window."
+        if query_status == "no_data"
+        else None
+    )
+    return DeploymentObservabilityMetricsResponse(
+        queryStatus=query_status,
+        queryMessage=query_message,
+        windowStart=window_start.isoformat(),
+        windowEnd=window_end.isoformat(),
+        generatedAt=now.isoformat(),
+        errorRatePct=_serialize_metric_snapshot(snapshots.get("errorRatePct")),
+        p95LatencyMs=_serialize_metric_snapshot(snapshots.get("p95LatencyMs")),
+        availabilityPct=_serialize_metric_snapshot(snapshots.get("availabilityPct")),
+        noData=no_data,
+        providerStatus=MonitoringProviderStatusResponse(
+            **build_provider_status(
+                provider="prometheus",
+                base_url=get_prometheus_base_url(),
+                status_value="healthy",
+                reachable=True,
+                checked_at=now.isoformat(),
+                correlation_id=str(uuid4()),
+            )
+        ),
+    )
+
+
+def _build_deployment_timeline_response(
+    *,
+    service_id: str,
+    service_row: dict[str, str | None] | None,
+    window_start: datetime,
+    window_end: datetime,
+) -> DeploymentObservabilityTimelineResponse:
+    now = datetime.now(tz=timezone.utc)
+    correlation_id = str(uuid4())
+    namespace = (
+        str(service_row.get("namespace") or "").strip()
+        if service_row
+        else _resolve_service_monitoring_metadata(service_id)[0]
+    )
+    app_label = (
+        str(service_row.get("app_label") or "").strip()
+        if service_row
+        else _resolve_service_monitoring_metadata(service_id)[1]
+    )
+    if not namespace or not app_label:
+        namespace, app_label = _resolve_service_monitoring_metadata(service_id)
+    config = load_observability_config()
+    step_seconds = _select_timeline_step_seconds(window_end - window_start, config)
+    cache_key = (
+        "deployment-observability-timeline",
+        service_id,
+        namespace,
+        app_label,
+        window_start.isoformat(),
+        window_end.isoformat(),
+        step_seconds,
+    )
+
+    def _load_segments() -> list[ServiceHealthTimelineSegmentResponse]:
+        queries = _build_health_timeline_queries(
+            namespace=namespace,
+            app_label=app_label,
+            config=config,
+        )
+        availability_points = _query_prometheus_range(
+            queries["availability"],
+            "deployment_availability",
+            start=window_start,
+            end=window_end,
+            step_seconds=step_seconds,
+            correlation_id=correlation_id,
+        )
+        error_points = _query_prometheus_range(
+            queries["errorRatePct"],
+            "deployment_error_rate",
+            start=window_start,
+            end=window_end,
+            step_seconds=step_seconds,
+            correlation_id=correlation_id,
+        )
+        readiness_points = _query_prometheus_range(
+            queries["readiness"],
+            "deployment_readiness",
+            start=window_start,
+            end=window_end,
+            step_seconds=step_seconds,
+            correlation_id=correlation_id,
+        )
+        all_timestamps = sorted(
+            set(availability_points.keys())
+            .union(error_points.keys())
+            .union(readiness_points.keys())
+        )
+        thresholds = load_timeline_thresholds()
+        points: list[TimelinePoint] = []
+        for ts in all_timestamps:
+            status_label, reason = classify_timeline_status(
+                availability=availability_points.get(ts),
+                error_rate_pct=error_points.get(ts),
+                readiness=readiness_points.get(ts),
+                thresholds=thresholds,
+            )
+            points.append(
+                TimelinePoint(
+                    timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
+                    status=status_label,
+                    reason=reason,
+                )
+            )
+        segments = compact_timeline_points(
+            points,
+            window_start=window_start,
+            window_end=window_end,
+            step=timedelta(seconds=step_seconds),
+        )
+        return [
+            ServiceHealthTimelineSegmentResponse(
+                start=segment.start.isoformat(),
+                end=segment.end.isoformat(),
+                status=segment.status,
+                reason=segment.reason,
+            )
+            for segment in segments
+        ]
+
+    segments = timeline_cache.get_or_set(
+        key=cache_key,
+        ttl_seconds=config.timeline_cache_ttl_seconds,
+        loader=_load_segments,
+    )
+    query_status: Literal["ok", "no_data", "no_deployment_window"] = "ok" if segments else "no_data"
+    query_message = (
+        None if segments else "Prometheus returned no retained health timeline data for this deployment window."
+    )
+    return DeploymentObservabilityTimelineResponse(
+        queryStatus=query_status,
+        queryMessage=query_message,
+        serviceId=service_id,
+        windowStart=window_start.isoformat(),
+        windowEnd=window_end.isoformat(),
+        generatedAt=now.isoformat(),
+        providerStatus=MonitoringProviderStatusResponse(
+            **build_provider_status(
+                provider="prometheus",
+                base_url=get_prometheus_base_url(),
+                status_value="healthy",
+                reachable=True,
+                checked_at=now.isoformat(),
+                correlation_id=correlation_id,
+            )
+        ),
+        segments=segments,
+    )
+
+
+def _build_deployment_logs_response(
+    *,
+    service_id: str,
+    service_row: dict[str, str | None] | None,
+    preset: str,
+    limit: int,
+    window_start: datetime,
+    window_end: datetime,
+    identity_key: str,
+) -> DeploymentObservabilityLogsResponse:
+    now = datetime.now(tz=timezone.utc)
+    enforce_logs_rate_limit(identity_key=identity_key, now=now)
+    safe_preset = validate_preset(preset)
+    config = load_observability_config()
+    safe_limit = _effective_limit(limit, config.logs_max_lines)
+    namespace = (
+        str(service_row.get("namespace") or "").strip()
+        if service_row
+        else _resolve_service_monitoring_metadata(service_id)[0]
+    )
+    app_label = (
+        str(service_row.get("app_label") or "").strip()
+        if service_row
+        else _resolve_service_monitoring_metadata(service_id)[1]
+    )
+    if not namespace or not app_label:
+        namespace, app_label = _resolve_service_monitoring_metadata(service_id)
+    query = build_preset_query(
+        app_label=app_label,
+        namespace=namespace or get_logs_default_namespace(),
+        preset=safe_preset,
+    )
+    correlation_id = str(uuid4())
+    cache_key = (
+        "deployment-observability-logs",
+        service_id,
+        namespace,
+        app_label,
+        safe_preset,
+        window_start.isoformat(),
+        window_end.isoformat(),
+        safe_limit,
+    )
+    lines = logs_quickview_cache.get_or_set(
+        key=cache_key,
+        ttl_seconds=config.logs_cache_ttl_seconds,
+        loader=lambda: _query_loki_range(
+            query=query,
+            start=window_start,
+            end=window_end,
+            limit=safe_limit,
+            correlation_id=correlation_id,
+        ),
+    )
+    query_status: Literal["ok", "no_data", "no_deployment_window"] = "ok" if lines else "no_data"
+    query_message = (
+        None if lines else "Loki returned no retained log lines for this deployment window and preset."
+    )
+    return DeploymentObservabilityLogsResponse(
+        queryStatus=query_status,
+        queryMessage=query_message,
+        serviceId=service_id,
+        preset=safe_preset,
+        generatedAt=now.isoformat(),
+        windowStart=window_start.isoformat(),
+        windowEnd=window_end.isoformat(),
+        limit=safe_limit,
+        returned=len(lines),
+        moreAvailable=False,
+        lines=[
+            QuickViewLogLineResponse(
+                timestamp=datetime.fromtimestamp(item[0] / 1_000_000_000, tz=timezone.utc).isoformat(),
+                message=item[1],
+                labels=item[2],
+            )
+            for item in lines
+        ],
+        providerStatus=MonitoringProviderStatusResponse(
+            **build_provider_status(
+                provider="loki",
+                base_url=get_loki_base_url(),
+                status_value="healthy",
+                reachable=True,
+                checked_at=now.isoformat(),
+                correlation_id=correlation_id,
+            )
+        ),
+    )
+
+
 @app.get(
     "/health",
     response_model=HealthResponse,
@@ -2663,6 +3252,93 @@ def get_service_deployments(
     deployments = [_build_deployment_record_response(row, selected) for row in rows]
 
     return ServiceDeploymentsResponse(deployments=deployments)
+
+
+@app.get(
+    "/services/{service_id}/observability/window",
+    response_model=DeploymentObservabilityResponse,
+    tags=["monitoring"],
+)
+def get_service_deployment_observability(
+    service_id: str,
+    deployment_id: str | None = Query(default=None, alias="deploymentId"),
+    window_start: str | None = Query(default=None, alias="windowStart"),
+    window_end: str | None = Query(default=None, alias="windowEnd"),
+    logs_preset: str = Query(default="errors", alias="logsPreset"),
+    logs_limit: int = Query(default=50, alias="logsLimit", ge=1, le=200),
+    identity: tuple[str, set[str]] = Depends(get_current_user),
+) -> DeploymentObservabilityResponse:
+    user, _groups = identity
+    context, service_row, resolved_start, resolved_end = _resolve_deployment_observability_context(
+        service_id=service_id,
+        deployment_id=deployment_id,
+        window_start_value=window_start,
+        window_end_value=window_end,
+    )
+    if context.evidence_status != "resolved" or resolved_start is None or resolved_end is None:
+        message = context.evidence_message or "No deployment window was available for this deployment record."
+        return DeploymentObservabilityResponse(
+            serviceId=service_id,
+            context=context,
+            metrics=_build_no_window_metrics_response(
+                message=message,
+                window_start=resolved_start,
+                window_end=resolved_end,
+            ),
+            healthTimeline=_build_no_window_timeline_response(
+                service_id=service_id,
+                message=message,
+                window_start=resolved_start,
+                window_end=resolved_end,
+            ),
+            logsQuickView=_build_no_window_logs_response(
+                service_id=service_id,
+                preset=logs_preset,
+                limit=logs_limit,
+                message=message,
+                window_start=resolved_start,
+                window_end=resolved_end,
+            ),
+        )
+
+    metrics = _build_deployment_metrics_response(
+        service_id=service_id,
+        service_row=service_row,
+        window_start=resolved_start,
+        window_end=resolved_end,
+    )
+    timeline = _build_deployment_timeline_response(
+        service_id=service_id,
+        service_row=service_row,
+        window_start=resolved_start,
+        window_end=resolved_end,
+    )
+    try:
+        logs = _build_deployment_logs_response(
+            service_id=service_id,
+            service_row=service_row,
+            preset=logs_preset,
+            limit=logs_limit,
+            window_start=resolved_start,
+            window_end=resolved_end,
+            identity_key=user,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = (
+            status.HTTP_429_TOO_MANY_REQUESTS
+            if "rate limit" in detail.lower()
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+    return DeploymentObservabilityResponse(
+        serviceId=service_id,
+        context=context,
+        metrics=metrics,
+        healthTimeline=timeline,
+        logsQuickView=logs,
+    )
 
 
 @app.get("/catalog/reconciliation", response_model=CatalogJoinResponse, tags=["metadata"])

@@ -6,6 +6,7 @@ from urllib.error import HTTPError
 import pytest
 from fastapi.testclient import TestClient
 
+import app.main as app_main
 from app.github_workflows import GitHubWorkflowDispatchError, GitHubWorkflowDispatchResult
 from app.main import app, clear_observability_caches_for_tests
 from app.logs_quickview import clear_rate_limit_state_for_tests
@@ -1472,6 +1473,260 @@ def test_service_deployments_endpoint_includes_observability_snapshots(monkeypat
     assert body["deployments"][0]["errorRatePct"] == {"before": 0.1, "after": 0.3, "delta": 0.2}
     assert body["deployments"][0]["p95LatencyMs"] == {"before": 110.0, "after": 140.0, "delta": 30.0}
     assert body["deployments"][0]["availabilityPct"] == {"before": 99.9, "after": 99.4, "delta": -0.5}
+
+
+def test_load_deployment_metric_snapshots_uses_record_window(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_load_window(_service_row, *, window_start, window_end):
+        captured["window_start"] = window_start.isoformat()
+        captured["window_end"] = window_end.isoformat()
+        return {
+            "errorRatePct": {"before": 0.1, "after": 0.3, "delta": 0.2},
+        }
+
+    monkeypatch.setattr("app.main._load_metric_snapshots_for_window", _fake_load_window)
+
+    result = app_main._load_deployment_metric_snapshots(
+        {
+            "service_id": "homelab-api",
+            "env": "dev",
+            "namespace": "homelab-api",
+            "app_label": "homelab-api",
+        },
+        {
+            "deployWindowStart": "2026-03-10T16:35:09+00:00",
+            "deployWindowEnd": "2026-03-10T16:37:20+00:00",
+            "finishedAt": "2026-03-10T16:37:20+00:00",
+        },
+    )
+
+    assert captured == {
+        "window_start": "2026-03-10T16:35:09+00:00",
+        "window_end": "2026-03-10T16:37:20+00:00",
+    }
+    assert result["errorRatePct"]["delta"] == 0.2
+
+
+def test_service_deployment_observability_returns_window_scoped_sections(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._get_deployment_record_by_id",
+        lambda _deployment_id: {
+            "deploymentId": "dep-123",
+            "serviceId": "homelab-api",
+            "env": "dev",
+            "action": "deploy",
+            "status": "live",
+            "deployWindowStart": "2026-03-10T16:35:09+00:00",
+            "deployWindowEnd": "2026-03-10T16:37:20+00:00",
+            "compareUrl": "https://github.com/example/homelab-portal/compare/a...b",
+            "prUrl": "https://github.com/example/homelab-workloads/pull/46",
+            "prNumber": 46,
+            "deployReason": "Ship observability fix",
+        },
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-11T00:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_metric_snapshots_for_window",
+        lambda *_args, **_kwargs: {
+            "errorRatePct": {"before": 0.1, "after": 0.2, "delta": 0.1},
+            "p95LatencyMs": {"before": 120.0, "after": 160.0, "delta": 40.0},
+            "availabilityPct": {"before": 99.9, "after": 99.7, "delta": -0.2},
+        },
+    )
+    monkeypatch.setattr(
+        "app.main._build_deployment_timeline_response",
+        lambda **_kwargs: {
+            "queryStatus": "ok",
+            "queryMessage": None,
+            "serviceId": "homelab-api",
+            "windowStart": "2026-03-10T16:35:09+00:00",
+            "windowEnd": "2026-03-10T16:37:20+00:00",
+            "generatedAt": "2026-03-11T12:00:00+00:00",
+            "providerStatus": {
+                "provider": "prometheus",
+                "baseUrl": "http://prometheus.local",
+                "status": "healthy",
+                "reachable": True,
+                "checkedAt": "2026-03-11T12:00:00+00:00",
+            },
+            "segments": [
+                {
+                    "start": "2026-03-10T16:35:09+00:00",
+                    "end": "2026-03-10T16:37:20+00:00",
+                    "status": "healthy",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "app.main._build_deployment_logs_response",
+        lambda **_kwargs: {
+            "queryStatus": "ok",
+            "queryMessage": None,
+            "serviceId": "homelab-api",
+            "preset": "errors",
+            "generatedAt": "2026-03-11T12:00:00+00:00",
+            "windowStart": "2026-03-10T16:35:09+00:00",
+            "windowEnd": "2026-03-10T16:37:20+00:00",
+            "limit": 50,
+            "returned": 1,
+            "moreAvailable": False,
+            "lines": [
+                {
+                    "timestamp": "2026-03-10T16:36:00+00:00",
+                    "message": "line-1",
+                    "labels": {"app": "homelab-api"},
+                }
+            ],
+            "providerStatus": {
+                "provider": "loki",
+                "baseUrl": "http://loki.local",
+                "status": "healthy",
+                "reachable": True,
+                "checkedAt": "2026-03-11T12:00:00+00:00",
+            },
+        },
+    )
+
+    response = client.get(
+        "/services/homelab-api/observability/window?deploymentId=dep-123&logsPreset=errors&logsLimit=50",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["context"]["deploymentId"] == "dep-123"
+    assert body["context"]["windowSource"] == "deployment_record"
+    assert body["metrics"]["queryStatus"] == "ok"
+    assert body["metrics"]["errorRatePct"]["delta"] == 0.1
+    assert body["healthTimeline"]["queryStatus"] == "ok"
+    assert body["logsQuickView"]["queryStatus"] == "ok"
+    assert body["logsQuickView"]["returned"] == 1
+
+
+def test_service_deployment_observability_reports_missing_deploy_window(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._get_deployment_record_by_id",
+        lambda _deployment_id: {
+            "deploymentId": "dep-missing",
+            "serviceId": "homelab-api",
+            "env": "dev",
+            "action": "deploy",
+            "status": "pending",
+            "requestedAt": None,
+            "startedAt": None,
+            "deployWindowStart": None,
+            "deployWindowEnd": None,
+        },
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-11T00:00:00+00:00",
+            }
+        ],
+    )
+
+    response = client.get(
+        "/services/homelab-api/observability/window?deploymentId=dep-missing",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["context"]["evidenceStatus"] == "missing"
+    assert body["metrics"]["queryStatus"] == "no_deployment_window"
+    assert body["healthTimeline"]["queryStatus"] == "no_deployment_window"
+    assert body["logsQuickView"]["queryStatus"] == "no_deployment_window"
+
+
+def test_service_deployment_observability_supports_explicit_window(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-11T00:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_metric_snapshots_for_window",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.main._build_deployment_timeline_response",
+        lambda **_kwargs: {
+            "queryStatus": "no_data",
+            "queryMessage": "No health data.",
+            "serviceId": "homelab-api",
+            "windowStart": "2026-03-11T10:00:00+00:00",
+            "windowEnd": "2026-03-11T10:10:00+00:00",
+            "generatedAt": "2026-03-11T12:00:00+00:00",
+            "providerStatus": None,
+            "segments": [],
+        },
+    )
+    monkeypatch.setattr(
+        "app.main._build_deployment_logs_response",
+        lambda **_kwargs: {
+            "queryStatus": "no_data",
+            "queryMessage": "No logs retained.",
+            "serviceId": "homelab-api",
+            "preset": "errors",
+            "generatedAt": "2026-03-11T12:00:00+00:00",
+            "windowStart": "2026-03-11T10:00:00+00:00",
+            "windowEnd": "2026-03-11T10:10:00+00:00",
+            "limit": 50,
+            "returned": 0,
+            "moreAvailable": False,
+            "lines": [],
+            "providerStatus": None,
+        },
+    )
+
+    response = client.get(
+        "/services/homelab-api/observability/window?windowStart=2026-03-11T10:00:00%2B00:00&windowEnd=2026-03-11T10:10:00%2B00:00",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["context"]["windowSource"] == "explicit_window"
+    assert body["context"]["deploymentId"] is None
+    assert body["metrics"]["queryStatus"] == "no_data"
 
 
 def test_create_deployment_record_endpoint_returns_record(monkeypatch) -> None:

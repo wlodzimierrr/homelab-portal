@@ -4,7 +4,14 @@ import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
+import { ServiceHealthTimeline } from '@/components/service-health-timeline'
+import {
+  getDeploymentObservability,
+  type DeploymentObservability,
+  type DeploymentObservabilityMetricSnapshot,
+} from '@/lib/adapters/deployment-observability'
 import { getDeploymentHistory, type DeploymentHistoryItem } from '@/lib/adapters/deployments'
+import type { LogsQuickViewPreset } from '@/lib/adapters/logs-quickview'
 import { evaluateDeploymentHistoryItem } from '@/lib/deployment-alerts'
 import { createServiceIdentity } from '@/lib/service-identity'
 import { cn } from '@/lib/utils'
@@ -15,6 +22,13 @@ interface ServiceDeploymentsPageProps {
 
 type FilterMode = 'all' | 'regressions' | 'missing'
 type SortMode = 'newest' | 'worst_impact'
+type DeploymentLogsPreset = LogsQuickViewPreset
+
+const deploymentLogsPresetOptions: Array<{ value: DeploymentLogsPreset; label: string }> = [
+  { value: 'errors', label: 'Errors' },
+  { value: 'warnings', label: 'Warnings' },
+  { value: 'restarts', label: 'Restarts' },
+]
 
 function formatTimestamp(value?: string) {
   if (!value) {
@@ -90,6 +104,47 @@ function formatBeforeAfter(unit: 'pct' | 'ms', before?: number, after?: number) 
   return `${before.toFixed(2)}% -> ${after.toFixed(2)}%`
 }
 
+function formatWindowRange(start?: string, end?: string) {
+  if (!start || !end) {
+    return 'Window unavailable'
+  }
+  return `${formatTimestamp(start)} -> ${formatTimestamp(end)}`
+}
+
+function ObservabilityStatusBadge({
+  status,
+}: {
+  status: 'ok' | 'no_data' | 'no_deployment_window'
+}) {
+  const tone =
+    status === 'ok'
+      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+      : status === 'no_data'
+        ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+        : 'bg-slate-500/10 text-slate-700 dark:text-slate-300'
+  const label =
+    status === 'ok' ? 'Window scoped' : status === 'no_data' ? 'No telemetry retained' : 'No deploy window'
+  return <span className={cn('inline-flex items-center rounded-full px-2 py-1 text-xs font-medium', tone)}>{label}</span>
+}
+
+function DeploymentMetricWindowCard({
+  label,
+  snapshot,
+}: {
+  label: string
+  snapshot?: DeploymentObservabilityMetricSnapshot
+}) {
+  return (
+    <div className="rounded-md border border-border bg-background p-3">
+      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="mt-2 text-sm">{formatBeforeAfter(label.includes('Latency') ? 'ms' : 'pct', snapshot?.before, snapshot?.after)}</p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        delta: {formatDelta(label.includes('Latency') ? 'ms' : 'pct', snapshot?.delta)}
+      </p>
+    </div>
+  )
+}
+
 function ImpactBadge({ item }: { item: DeploymentHistoryItem }) {
   const alert = evaluateDeploymentHistoryItem(item)
 
@@ -120,6 +175,11 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
   const [error, setError] = useState('')
   const [filterMode, setFilterMode] = useState<FilterMode>('all')
   const [sortMode, setSortMode] = useState<SortMode>('newest')
+  const [selectedDeploymentId, setSelectedDeploymentId] = useState<string | null>(null)
+  const [observability, setObservability] = useState<DeploymentObservability | null>(null)
+  const [observabilityLoading, setObservabilityLoading] = useState(false)
+  const [observabilityError, setObservabilityError] = useState('')
+  const [logsPreset, setLogsPreset] = useState<DeploymentLogsPreset>('errors')
 
   const loadDeployments = useCallback(async () => {
     setIsLoading(true)
@@ -178,6 +238,60 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
     () => deployments.some((item) => item.hasComparisonWindow),
     [deployments],
   )
+
+  const selectedDeployment = useMemo(() => {
+    if (!selectedDeploymentId) {
+      return visibleDeployments[0] ?? null
+    }
+    return (
+      visibleDeployments.find((item) => item.id === selectedDeploymentId) ??
+      deployments.find((item) => item.id === selectedDeploymentId) ??
+      visibleDeployments[0] ??
+      null
+    )
+  }, [deployments, selectedDeploymentId, visibleDeployments])
+
+  useEffect(() => {
+    if (!selectedDeploymentId && visibleDeployments.length > 0) {
+      setSelectedDeploymentId(visibleDeployments[0].id)
+      return
+    }
+    if (selectedDeploymentId && !deployments.some((item) => item.id === selectedDeploymentId) && visibleDeployments.length > 0) {
+      setSelectedDeploymentId(visibleDeployments[0].id)
+    }
+  }, [deployments, selectedDeploymentId, visibleDeployments])
+
+  const loadDeploymentObservability = useCallback(async () => {
+    if (!selectedDeployment) {
+      setObservability(null)
+      setObservabilityError('')
+      return
+    }
+    setObservabilityLoading(true)
+    setObservabilityError('')
+    try {
+      const identity = createServiceIdentity({ serviceId: normalizedServiceId })
+      const response = await getDeploymentObservability(identity, {
+        deploymentId: selectedDeployment.id,
+        logsPreset,
+        logsLimit: 50,
+      })
+      setObservability(response)
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error
+          ? requestError.message
+          : 'Failed to load deployment-scoped observability.'
+      setObservabilityError(message)
+      setObservability(null)
+    } finally {
+      setObservabilityLoading(false)
+    }
+  }, [logsPreset, normalizedServiceId, selectedDeployment])
+
+  useEffect(() => {
+    void loadDeploymentObservability()
+  }, [loadDeploymentObservability])
 
   return (
     <PageShell
@@ -262,7 +376,13 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
               </thead>
               <tbody>
                 {visibleDeployments.map((item) => (
-                  <tr key={item.id} className="border-b border-border/70">
+                  <tr
+                    key={item.id}
+                    className={cn(
+                      'border-b border-border/70',
+                      selectedDeployment?.id === item.id ? 'bg-primary/5' : undefined,
+                    )}
+                  >
                     <td className="px-3 py-2">
                       <p className="text-muted-foreground">{formatTimestamp(item.requestedAt)}</p>
                       <p className="text-xs text-muted-foreground">completed: {formatTimestamp(item.deployedAt)}</p>
@@ -270,6 +390,13 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
                     <td className="px-3 py-2">
                       <p className="font-medium">{formatAction(item.action)}</p>
                       <p>{item.version}</p>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedDeploymentId(item.id)}
+                        className="mt-1 text-xs font-medium text-primary hover:underline"
+                      >
+                        {selectedDeployment?.id === item.id ? 'Inspecting deploy window' : 'Inspect deploy window'}
+                      </button>
                       {item.argoApp ? <p className="text-xs text-muted-foreground">Argo: {item.argoApp}</p> : null}
                     </td>
                     <td className="px-3 py-2">
@@ -339,6 +466,146 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
               </tbody>
             </table>
           </div>
+        ) : null}
+
+        {!isLoading && !error && deployments.length > 0 ? (
+          <section className="space-y-3 rounded-md border border-border bg-background p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-semibold">Deploy Window Observability</h2>
+                <p className="text-xs text-muted-foreground">
+                  Logs, metrics, and health timeline anchored to the selected deployment record.
+                </p>
+              </div>
+              <div className="text-right text-xs text-muted-foreground">
+                <p>{selectedDeployment ? `${formatAction(selectedDeployment.action)} ${selectedDeployment.version}` : 'No deployment selected'}</p>
+                <p>{observability?.context ? formatWindowRange(observability.context.windowStart, observability.context.windowEnd) : 'Select a deployment row to inspect.'}</p>
+              </div>
+            </div>
+
+            {selectedDeployment ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <OutcomeBadge outcome={selectedDeployment.outcome} />
+                {observability ? <ObservabilityStatusBadge status={observability.metrics.queryStatus} /> : null}
+                {observability?.context.deployReason ? (
+                  <span className="text-muted-foreground">{observability.context.deployReason}</span>
+                ) : null}
+              </div>
+            ) : null}
+
+            {observabilityLoading ? <LoadingState label="Loading deploy-window observability..." rows={4} /> : null}
+            {!observabilityLoading && observabilityError ? (
+              <ErrorState message={observabilityError} onRetry={() => void loadDeploymentObservability()} />
+            ) : null}
+
+            {!observabilityLoading && !observabilityError && observability ? (
+              <div className="space-y-4">
+                {observability.context.evidenceStatus === 'missing' ? (
+                  <div className="rounded-md border border-slate-500/40 bg-slate-500/10 p-3">
+                    <p className="text-sm font-medium text-slate-900 dark:text-slate-200">
+                      Deployment window evidence is missing for this record.
+                    </p>
+                    <p className="mt-1 text-xs text-slate-900 dark:text-slate-200">
+                      {observability.context.evidenceMessage ?? 'This deployment record does not expose a usable deploy window yet.'}
+                    </p>
+                  </div>
+                ) : null}
+
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-sm font-semibold">Anchored Metrics</h3>
+                    <ObservabilityStatusBadge status={observability.metrics.queryStatus} />
+                  </div>
+                  {observability.metrics.queryMessage ? (
+                    <p className="text-xs text-muted-foreground">{observability.metrics.queryMessage}</p>
+                  ) : null}
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <DeploymentMetricWindowCard
+                      label="Error Rate"
+                      snapshot={observability.metrics.errorRatePct}
+                    />
+                    <DeploymentMetricWindowCard
+                      label="P95 Latency"
+                      snapshot={observability.metrics.p95LatencyMs}
+                    />
+                    <DeploymentMetricWindowCard
+                      label="Availability"
+                      snapshot={observability.metrics.availabilityPct}
+                    />
+                  </div>
+                </section>
+
+                <section className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-sm font-semibold">Deploy Health Timeline</h3>
+                    <ObservabilityStatusBadge status={observability.healthTimeline.queryStatus} />
+                  </div>
+                  {observability.healthTimeline.queryMessage ? (
+                    <p className="text-xs text-muted-foreground">{observability.healthTimeline.queryMessage}</p>
+                  ) : null}
+                  <ServiceHealthTimeline
+                    segments={observability.healthTimeline.segments}
+                    lastRefreshedAt={observability.healthTimeline.generatedAt}
+                    isLoading={false}
+                  />
+                </section>
+
+                <section className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <h3 className="text-sm font-semibold">Deploy Logs Quick View</h3>
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      Preset
+                      <select
+                        value={logsPreset}
+                        onChange={(event) => setLogsPreset(event.target.value as DeploymentLogsPreset)}
+                        className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+                      >
+                        {deploymentLogsPresetOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <ObservabilityStatusBadge status={observability.logsQuickView.queryStatus} />
+                    {observability.logsQuickView.queryMessage ? (
+                      <p className="text-xs text-muted-foreground">{observability.logsQuickView.queryMessage}</p>
+                    ) : null}
+                  </div>
+                  {observability.logsQuickView.lines.length > 0 ? (
+                    <div className="overflow-hidden rounded-md border border-border">
+                      <div className="max-h-80 overflow-auto">
+                        <table className="min-w-full text-left text-sm">
+                          <thead>
+                            <tr className="border-b border-border bg-muted/30">
+                              <th className="px-3 py-2 font-medium text-muted-foreground">Timestamp</th>
+                              <th className="px-3 py-2 font-medium text-muted-foreground">Message</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {observability.logsQuickView.lines.map((line) => (
+                              <tr key={`${line.timestamp}-${line.message}`} className="border-b border-border/50 align-top">
+                                <td className="px-3 py-2 text-xs text-muted-foreground">{formatTimestamp(line.timestamp)}</td>
+                                <td className="px-3 py-2">
+                                  <pre className="whitespace-pre-wrap break-words font-mono text-xs">{line.message}</pre>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-md border border-dashed border-border bg-muted/10 p-3 text-sm text-muted-foreground">
+                      No log lines were retained for this deployment window and preset.
+                    </div>
+                  )}
+                </section>
+              </div>
+            ) : null}
+          </section>
         ) : null}
       </div>
     </PageShell>
