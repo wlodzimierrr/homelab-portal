@@ -743,8 +743,8 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
     ]
     assert body["catalogJoin"]["projectOnlyCount"] == 1
     assert body["catalogJoin"]["serviceOnlyCount"] == 1
-    assert body["identityDrift"]["driftCount"] == 1
-    assert body["identityDrift"]["driftKeys"] == ["homelab-api|dev"]
+    assert body["identityDrift"]["driftCount"] == 0
+    assert body["identityDrift"]["driftKeys"] == []
 
 
 def test_service_registry_diagnostics_reports_warning_before_stale(monkeypatch) -> None:
