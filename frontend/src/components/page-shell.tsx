@@ -8,7 +8,7 @@ interface PageShellProps {
 
 export function PageShell({ title, description, children }: PageShellProps) {
   return (
-    <section className="space-y-4">
+    <section className="w-full max-w-[1600px] space-y-4">
       <header>
         <h1 className="text-2xl font-semibold">{title}</h1>
         <p className="text-sm text-muted-foreground">{description}</p>
