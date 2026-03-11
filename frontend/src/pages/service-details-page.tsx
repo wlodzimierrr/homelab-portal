@@ -1086,260 +1086,6 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               </div>
             ) : null}
 
-            <section className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-sm font-semibold">Logs Console</h2>
-                  <p className="text-xs text-muted-foreground">
-                    Live Loki quick-view lines scoped to this service. Full logs still open in Grafana/Loki.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    Range
-                    <select
-                      value={logsRange}
-                      onChange={(event) => setLogsRange(event.target.value as LogsQuickViewRange)}
-                      className="rounded-md border border-border bg-background px-2 py-1 text-xs"
-                    >
-                      {logsRangeOptions.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  {activePreset?.link.href ? (
-                    <Button asChild size="sm" variant="outline">
-                      <a href={activePreset.link.href} target="_blank" rel="noreferrer">
-                        Open full logs
-                      </a>
-                    </Button>
-                  ) : (
-                    <Button type="button" size="sm" variant="outline" disabled>
-                      Open full logs
-                    </Button>
-                  )}
-                </div>
-              </div>
-              {!logsLoading ? <MonitoringPanelNotice provider="Loki" state={logsPanelState} /> : null}
-              <div className="rounded-md border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-sm">
-                <div className="grid gap-2 border-b border-zinc-800 px-4 py-3 xl:grid-cols-[160px_minmax(0,1fr)_160px_auto_auto]">
-                  <select
-                    value={activeLogsPreset}
-                    onChange={(event) => setActiveLogsPreset(event.target.value as LogsQuickViewPreset)}
-                    className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
-                  >
-                    {presetLinks.map((preset) => (
-                      <option key={preset.id} value={preset.id}>
-                        {preset.label}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    value={logsSearch}
-                    onChange={(event) => setLogsSearch(event.target.value)}
-                    placeholder="Search current console lines"
-                    className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500"
-                  />
-                  <select
-                    value={logsRange}
-                    onChange={(event) => setLogsRange(event.target.value as LogsQuickViewRange)}
-                    className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
-                  >
-                    {logsRangeOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        Last {option.label}
-                      </option>
-                    ))}
-                  </select>
-                  <div className="flex items-center justify-center rounded-md border border-zinc-700 px-3 py-2 text-xs text-zinc-300">
-                    {consoleTimezone}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="border-zinc-700 text-zinc-100 hover:bg-zinc-800"
-                      onClick={() => void loadQuickViewLogs()}
-                    >
-                      Refresh
-                    </Button>
-                    {activePreset?.link.href ? (
-                      <Button asChild size="sm" variant="outline" className="border-zinc-700 text-zinc-100 hover:bg-zinc-800">
-                        <a href={activePreset.link.href} target="_blank" rel="noreferrer">
-                          Open full logs
-                        </a>
-                      </Button>
-                    ) : (
-                      <Button type="button" size="sm" variant="outline" className="border-zinc-700 text-zinc-100" disabled>
-                        Open full logs
-                      </Button>
-                    )}
-                  </div>
-                </div>
-                <div className="border-b border-zinc-800 px-4 py-2 font-mono text-[11px] text-zinc-400">
-                  $ scope={serviceIdentity.namespace}/{serviceIdentity.appLabel} env={serviceIdentity.env} preset=
-                  {activePreset?.id ?? activeLogsPreset} range={logsRange} provider=loki
-                </div>
-                {!activePreset?.link.href ? (
-                  <div className="border-b border-zinc-800 px-4 py-3 text-xs text-zinc-400">
-                    {formatLogsLinkUnavailable(activePreset?.link.reason ?? null)}
-                  </div>
-                ) : null}
-                {logsLoading ? (
-                  <div className="px-4 py-6">
-                    <LoadingState label="Loading logs..." rows={3} />
-                  </div>
-                ) : null}
-                {!logsLoading && logsError ? (
-                  <div className="px-4 py-4">
-                    <div className="rounded-md border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-200">
-                      <p>{logsError}</p>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="mt-3 border-zinc-700 text-zinc-100 hover:bg-zinc-800"
-                        onClick={() => void loadQuickViewLogs()}
-                      >
-                        Retry logs
-                      </Button>
-                    </div>
-                  </div>
-                ) : null}
-                {!logsLoading && !logsError ? (
-                  <div className="max-h-[28rem] overflow-y-auto font-mono text-xs">
-                    {filteredConsoleLines.length === 0 ? (
-                      <div className="px-4 py-6 text-zinc-400">
-                        <p>[no_data] No logs found for this preset, range, and search.</p>
-                      </div>
-                    ) : (
-                      <div className="divide-y divide-zinc-900/80">
-                        {filteredConsoleLines.map((line) => {
-                          const level = detectConsoleLogLevel(line.message)
-                          const tone = getConsoleLogTone(level)
-                          const source = formatConsoleLogSource(line.labels, serviceIdentity)
-                          const segments = line.message.split('\n').filter((segment) => segment.trim().length > 0)
-                          const [head, ...rest] = segments.length > 0 ? segments : [line.message]
-
-                          return (
-                            <article
-                              key={`${line.timestamp}-${line.message.slice(0, 40)}`}
-                              className={`border-l-2 px-4 py-2 ${tone.row} ${tone.text}`}
-                            >
-                              <div className="grid gap-x-3 gap-y-1 md:grid-cols-[92px_150px_74px_minmax(0,1fr)]">
-                                <span className="text-zinc-400">{formatConsoleTimestamp(line.timestamp)}</span>
-                                <span className="text-zinc-500">{source}</span>
-                                <span className={`inline-flex w-fit items-center rounded px-2 py-0.5 text-[10px] uppercase tracking-wide ${tone.badge}`}>
-                                  {level}
-                                </span>
-                                <span className="break-words whitespace-pre-wrap">{head}</span>
-                                {rest.map((segment, index) => (
-                                  <div key={index} className="contents">
-                                    <span />
-                                    <span />
-                                    <span />
-                                    <span className="break-words whitespace-pre-wrap text-zinc-300">{segment}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </article>
-                          )
-                        })}
-                      </div>
-                    )}
-                  </div>
-                ) : null}
-                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 px-4 py-3 text-[11px] text-zinc-400">
-                  <p>
-                    Showing {filteredConsoleLines.length} of {logsResult?.returned ?? 0} line(s)
-                    {logsResult?.moreAvailable ? '; more logs are available.' : '.'}
-                  </p>
-                  <p>Last refreshed: {formatDate(logsResult?.generatedAt)}</p>
-                </div>
-              </div>
-            </section>
-
-            {rollbackSupported ? (
-              <section className="space-y-3 rounded-md border border-border bg-card p-4">
-                <div className="space-y-1">
-                  <h2 className="text-sm font-semibold">Portal Rollback</h2>
-                  <p className="text-xs text-muted-foreground">
-                    Request a coordinated prod rollback through the Git-backed promotion workflow. This action writes
-                    rollback deployment records for both portal services and the reconciler updates their outcome.
-                  </p>
-                </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <label className="space-y-1">
-                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">API tag</span>
-                    <input
-                      value={rollbackApiTag}
-                      onChange={(event) => setRollbackApiTag(event.target.value)}
-                      placeholder="sha-<commit> or semver"
-                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                    />
-                  </label>
-                  <label className="space-y-1">
-                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Web tag</span>
-                    <input
-                      value={rollbackWebTag}
-                      onChange={(event) => setRollbackWebTag(event.target.value)}
-                      placeholder="sha-<commit> or semver"
-                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                    />
-                  </label>
-                </div>
-                <label className="space-y-1">
-                  <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Reason</span>
-                  <textarea
-                    value={rollbackReason}
-                    onChange={(event) => setRollbackReason(event.target.value)}
-                    rows={3}
-                    placeholder="Why this rollback is needed and what known-good version you are restoring."
-                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                  />
-                </label>
-                {rollbackError ? (
-                  <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
-                    <p className="text-xs text-destructive">{rollbackError}</p>
-                  </div>
-                ) : null}
-                {rollbackResult ? (
-                  <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
-                    <p className="font-medium">Rollback request accepted for prod.</p>
-                    <p className="mt-1">Workflow: <code>{rollbackResult.workflowFile}</code></p>
-                    <a
-                      href={rollbackResult.workflowUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-2 inline-flex font-medium underline underline-offset-2"
-                    >
-                      Open workflow runs
-                    </a>
-                  </div>
-                ) : null}
-                <div className="flex flex-wrap items-center gap-3">
-                  <Button
-                    type="button"
-                    onClick={() => void submitRollbackRequest()}
-                    disabled={
-                      rollbackSubmitting ||
-                      rollbackApiTag.trim().length === 0 ||
-                      rollbackWebTag.trim().length === 0 ||
-                      rollbackReason.trim().length < 5
-                    }
-                  >
-                    {rollbackSubmitting ? 'Requesting rollback...' : 'Request prod rollback'}
-                  </Button>
-                  <p className="text-xs text-muted-foreground">
-                    Existing rollback records remain visible in the deployment history view for operator audit.
-                  </p>
-                </div>
-              </section>
-            ) : null}
-
             {import.meta.env.DEV ? (
               <section className="space-y-3">
                 <h2 className="text-sm font-semibold">Status Visual Checks</h2>
@@ -1573,6 +1319,182 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
 
             <section className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold">Logs Console</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Live Loki quick-view lines scoped to this service. Full logs still open in Grafana/Loki.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    Range
+                    <select
+                      value={logsRange}
+                      onChange={(event) => setLogsRange(event.target.value as LogsQuickViewRange)}
+                      className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+                    >
+                      {logsRangeOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {activePreset?.link.href ? (
+                    <Button asChild size="sm" variant="outline">
+                      <a href={activePreset.link.href} target="_blank" rel="noreferrer">
+                        Open full logs
+                      </a>
+                    </Button>
+                  ) : (
+                    <Button type="button" size="sm" variant="outline" disabled>
+                      Open full logs
+                    </Button>
+                  )}
+                </div>
+              </div>
+              {!logsLoading ? <MonitoringPanelNotice provider="Loki" state={logsPanelState} /> : null}
+              <div className="rounded-md border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-sm">
+                <div className="grid gap-2 border-b border-zinc-800 px-4 py-3 xl:grid-cols-[160px_minmax(0,1fr)_160px_auto_auto]">
+                  <select
+                    value={activeLogsPreset}
+                    onChange={(event) => setActiveLogsPreset(event.target.value as LogsQuickViewPreset)}
+                    className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                  >
+                    {presetLinks.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    value={logsSearch}
+                    onChange={(event) => setLogsSearch(event.target.value)}
+                    placeholder="Search current console lines"
+                    className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500"
+                  />
+                  <select
+                    value={logsRange}
+                    onChange={(event) => setLogsRange(event.target.value as LogsQuickViewRange)}
+                    className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                  >
+                    {logsRangeOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        Last {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="flex items-center justify-center rounded-md border border-zinc-700 px-3 py-2 text-xs text-zinc-300">
+                    {consoleTimezone}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="border-zinc-700 text-zinc-100 hover:bg-zinc-800"
+                      onClick={() => void loadQuickViewLogs()}
+                    >
+                      Refresh
+                    </Button>
+                    {activePreset?.link.href ? (
+                      <Button asChild size="sm" variant="outline" className="border-zinc-700 text-zinc-100 hover:bg-zinc-800">
+                        <a href={activePreset.link.href} target="_blank" rel="noreferrer">
+                          Open full logs
+                        </a>
+                      </Button>
+                    ) : (
+                      <Button type="button" size="sm" variant="outline" className="border-zinc-700 text-zinc-100" disabled>
+                        Open full logs
+                      </Button>
+                    )}
+                  </div>
+                </div>
+                <div className="border-b border-zinc-800 px-4 py-2 font-mono text-[11px] text-zinc-400">
+                  $ scope={serviceIdentity.namespace}/{serviceIdentity.appLabel} env={serviceIdentity.env} preset=
+                  {activePreset?.id ?? activeLogsPreset} range={logsRange} provider=loki
+                </div>
+                {!activePreset?.link.href ? (
+                  <div className="border-b border-zinc-800 px-4 py-3 text-xs text-zinc-400">
+                    {formatLogsLinkUnavailable(activePreset?.link.reason ?? null)}
+                  </div>
+                ) : null}
+                {logsLoading ? (
+                  <div className="px-4 py-6">
+                    <LoadingState label="Loading logs..." rows={3} />
+                  </div>
+                ) : null}
+                {!logsLoading && logsError ? (
+                  <div className="px-4 py-4">
+                    <div className="rounded-md border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-200">
+                      <p>{logsError}</p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="mt-3 border-zinc-700 text-zinc-100 hover:bg-zinc-800"
+                        onClick={() => void loadQuickViewLogs()}
+                      >
+                        Retry logs
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                {!logsLoading && !logsError ? (
+                  <div className="max-h-[28rem] overflow-y-auto font-mono text-xs">
+                    {filteredConsoleLines.length === 0 ? (
+                      <div className="px-4 py-6 text-zinc-400">
+                        <p>[no_data] No logs found for this preset, range, and search.</p>
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-zinc-900/80">
+                        {filteredConsoleLines.map((line) => {
+                          const level = detectConsoleLogLevel(line.message)
+                          const tone = getConsoleLogTone(level)
+                          const source = formatConsoleLogSource(line.labels, serviceIdentity)
+                          const segments = line.message.split('\n').filter((segment) => segment.trim().length > 0)
+                          const [head, ...rest] = segments.length > 0 ? segments : [line.message]
+
+                          return (
+                            <article
+                              key={`${line.timestamp}-${line.message.slice(0, 40)}`}
+                              className={`border-l-2 px-4 py-2 ${tone.row} ${tone.text}`}
+                            >
+                              <div className="grid gap-x-3 gap-y-1 md:grid-cols-[92px_150px_74px_minmax(0,1fr)]">
+                                <span className="text-zinc-400">{formatConsoleTimestamp(line.timestamp)}</span>
+                                <span className="text-zinc-500">{source}</span>
+                                <span className={`inline-flex w-fit items-center rounded px-2 py-0.5 text-[10px] uppercase tracking-wide ${tone.badge}`}>
+                                  {level}
+                                </span>
+                                <span className="break-words whitespace-pre-wrap">{head}</span>
+                                {rest.map((segment, index) => (
+                                  <div key={index} className="contents">
+                                    <span />
+                                    <span />
+                                    <span />
+                                    <span className="break-words whitespace-pre-wrap text-zinc-300">{segment}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </article>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 px-4 py-3 text-[11px] text-zinc-400">
+                  <p>
+                    Showing {filteredConsoleLines.length} of {logsResult?.returned ?? 0} line(s)
+                    {logsResult?.moreAvailable ? '; more logs are available.' : '.'}
+                  </p>
+                  <p>Last refreshed: {formatDate(logsResult?.generatedAt)}</p>
+                </div>
+              </div>
+            </section>
+
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold">Service Health Timeline</h2>
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
                   Window
@@ -1783,6 +1705,84 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 </div>
               )}
             </section>
+
+            {rollbackSupported ? (
+              <section className="space-y-3 rounded-md border border-border bg-card p-4">
+                <div className="space-y-1">
+                  <h2 className="text-sm font-semibold">Portal Rollback</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Request a coordinated prod rollback through the Git-backed promotion workflow. This action writes
+                    rollback deployment records for both portal services and the reconciler updates their outcome.
+                  </p>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="space-y-1">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">API tag</span>
+                    <input
+                      value={rollbackApiTag}
+                      onChange={(event) => setRollbackApiTag(event.target.value)}
+                      placeholder="sha-<commit> or semver"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Web tag</span>
+                    <input
+                      value={rollbackWebTag}
+                      onChange={(event) => setRollbackWebTag(event.target.value)}
+                      placeholder="sha-<commit> or semver"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                </div>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Reason</span>
+                  <textarea
+                    value={rollbackReason}
+                    onChange={(event) => setRollbackReason(event.target.value)}
+                    rows={3}
+                    placeholder="Why this rollback is needed and what known-good version you are restoring."
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                  />
+                </label>
+                {rollbackError ? (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                    <p className="text-xs text-destructive">{rollbackError}</p>
+                  </div>
+                ) : null}
+                {rollbackResult ? (
+                  <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
+                    <p className="font-medium">Rollback request accepted for prod.</p>
+                    <p className="mt-1">Workflow: <code>{rollbackResult.workflowFile}</code></p>
+                    <a
+                      href={rollbackResult.workflowUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-flex font-medium underline underline-offset-2"
+                    >
+                      Open workflow runs
+                    </a>
+                  </div>
+                ) : null}
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button
+                    type="button"
+                    onClick={() => void submitRollbackRequest()}
+                    disabled={
+                      rollbackSubmitting ||
+                      rollbackApiTag.trim().length === 0 ||
+                      rollbackWebTag.trim().length === 0 ||
+                      rollbackReason.trim().length < 5
+                    }
+                  >
+                    {rollbackSubmitting ? 'Requesting rollback...' : 'Request prod rollback'}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    Existing rollback records remain visible in the deployment history view for operator audit.
+                  </p>
+                </div>
+              </section>
+            ) : null}
 
             <section className="space-y-3">
               <div className="flex items-center justify-between gap-2">
