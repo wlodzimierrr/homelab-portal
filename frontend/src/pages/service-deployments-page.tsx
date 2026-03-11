@@ -20,7 +20,7 @@ interface ServiceDeploymentsPageProps {
   serviceId: string
 }
 
-type FilterMode = 'all' | 'regressions' | 'missing'
+type ImpactFilterMode = 'all' | 'regressions' | 'missing'
 type SortMode = 'newest' | 'worst_impact'
 type DeploymentLogsPreset = LogsQuickViewPreset
 
@@ -170,10 +170,16 @@ function ImpactBadge({ item }: { item: DeploymentHistoryItem }) {
 
 export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProps) {
   const normalizedServiceId = useMemo(() => normalizeServiceId(serviceId), [serviceId])
+  const serviceIdentity = useMemo(
+    () => createServiceIdentity({ serviceId: normalizedServiceId }),
+    [normalizedServiceId],
+  )
   const [deployments, setDeployments] = useState<DeploymentHistoryItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
-  const [filterMode, setFilterMode] = useState<FilterMode>('all')
+  const [impactFilterMode, setImpactFilterMode] = useState<ImpactFilterMode>('all')
+  const [actionFilter, setActionFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
   const [sortMode, setSortMode] = useState<SortMode>('newest')
   const [selectedDeploymentId, setSelectedDeploymentId] = useState<string | null>(null)
   const [observability, setObservability] = useState<DeploymentObservability | null>(null)
@@ -185,8 +191,7 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
     setIsLoading(true)
     setError('')
     try {
-      const identity = createServiceIdentity({ serviceId: normalizedServiceId })
-      const history = await getDeploymentHistory(identity, { limit: 20 })
+      const history = await getDeploymentHistory(serviceIdentity, { limit: 20 })
       setDeployments(history)
     } catch (requestError) {
       const message =
@@ -196,20 +201,38 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
     } finally {
       setIsLoading(false)
     }
-  }, [normalizedServiceId])
+  }, [serviceIdentity])
 
   useEffect(() => {
     void loadDeployments()
   }, [loadDeployments])
 
+  const availableActions = useMemo(() => {
+    return [...new Set(deployments.map((item) => item.action).filter(Boolean))].sort((left, right) =>
+      left.localeCompare(right),
+    )
+  }, [deployments])
+
+  const availableStatuses = useMemo(() => {
+    return [...new Set(deployments.map((item) => item.outcome).filter(Boolean))].sort((left, right) =>
+      left.localeCompare(right),
+    )
+  }, [deployments])
+
   const visibleDeployments = useMemo(() => {
     const filtered = deployments.filter((item) => {
       const alert = evaluateDeploymentHistoryItem(item)
 
-      if (filterMode === 'regressions') {
+      if (actionFilter !== 'all' && item.action !== actionFilter) {
+        return false
+      }
+      if (statusFilter !== 'all' && item.outcome !== statusFilter) {
+        return false
+      }
+      if (impactFilterMode === 'regressions') {
         return alert.suspicious
       }
-      if (filterMode === 'missing') {
+      if (impactFilterMode === 'missing') {
         return !item.hasComparisonWindow && !alert.suspicious
       }
       return true
@@ -232,7 +255,7 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
       const right = b.deployedAt ? new Date(b.deployedAt).getTime() : 0
       return right - left
     })
-  }, [deployments, filterMode, sortMode])
+  }, [actionFilter, deployments, impactFilterMode, sortMode, statusFilter])
 
   const hasAnyComparisonWindow = useMemo(
     () => deployments.some((item) => item.hasComparisonWindow),
@@ -240,26 +263,29 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
   )
 
   const selectedDeployment = useMemo(() => {
-    if (!selectedDeploymentId) {
+    if (!selectedDeploymentId || visibleDeployments.length === 0) {
       return visibleDeployments[0] ?? null
     }
-    return (
-      visibleDeployments.find((item) => item.id === selectedDeploymentId) ??
-      deployments.find((item) => item.id === selectedDeploymentId) ??
-      visibleDeployments[0] ??
-      null
-    )
-  }, [deployments, selectedDeploymentId, visibleDeployments])
+    return visibleDeployments.find((item) => item.id === selectedDeploymentId) ?? visibleDeployments[0] ?? null
+  }, [selectedDeploymentId, visibleDeployments])
 
   useEffect(() => {
-    if (!selectedDeploymentId && visibleDeployments.length > 0) {
+    if (visibleDeployments.length === 0) {
+      if (selectedDeploymentId !== null) {
+        setSelectedDeploymentId(null)
+      }
+      return
+    }
+
+    if (!selectedDeploymentId) {
       setSelectedDeploymentId(visibleDeployments[0].id)
       return
     }
-    if (selectedDeploymentId && !deployments.some((item) => item.id === selectedDeploymentId) && visibleDeployments.length > 0) {
+
+    if (!visibleDeployments.some((item) => item.id === selectedDeploymentId)) {
       setSelectedDeploymentId(visibleDeployments[0].id)
     }
-  }, [deployments, selectedDeploymentId, visibleDeployments])
+  }, [selectedDeploymentId, visibleDeployments])
 
   const loadDeploymentObservability = useCallback(async () => {
     if (!selectedDeployment) {
@@ -270,8 +296,7 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
     setObservabilityLoading(true)
     setObservabilityError('')
     try {
-      const identity = createServiceIdentity({ serviceId: normalizedServiceId })
-      const response = await getDeploymentObservability(identity, {
+      const response = await getDeploymentObservability(serviceIdentity, {
         deploymentId: selectedDeployment.id,
         logsPreset,
         logsLimit: 50,
@@ -287,7 +312,7 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
     } finally {
       setObservabilityLoading(false)
     }
-  }, [logsPreset, normalizedServiceId, selectedDeployment])
+  }, [logsPreset, selectedDeployment, serviceIdentity])
 
   useEffect(() => {
     void loadDeploymentObservability()
@@ -303,6 +328,12 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
           <p className="text-sm text-muted-foreground">
             Showing up to 20 recent deployment records with lifecycle state, Git linkage, and observability deltas.
           </p>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span className="rounded-full border border-border px-2 py-1">
+              Service: {serviceIdentity.serviceId}
+            </span>
+            <span className="rounded-full border border-border px-2 py-1">Env: {serviceIdentity.env}</span>
+          </div>
           <AppLink
             to={`/services/${encodeURIComponent(normalizedServiceId)}`}
             className="text-sm font-medium text-primary hover:underline"
@@ -311,12 +342,42 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
           </AppLink>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-4">
           <label className="space-y-1">
-            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Filter</span>
+            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Action</span>
             <select
-              value={filterMode}
-              onChange={(event) => setFilterMode(event.target.value as FilterMode)}
+              value={actionFilter}
+              onChange={(event) => setActionFilter(event.target.value)}
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+            >
+              <option value="all">All actions</option>
+              {availableActions.map((action) => (
+                <option key={action} value={action}>
+                  {formatAction(action)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Status</span>
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+            >
+              <option value="all">All statuses</option>
+              {availableStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {formatAction(status)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Impact</span>
+            <select
+              value={impactFilterMode}
+              onChange={(event) => setImpactFilterMode(event.target.value as ImpactFilterMode)}
               className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
             >
               <option value="all">All deployments</option>
@@ -345,7 +406,7 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
         {!isLoading && !error && deployments.length > 0 && visibleDeployments.length === 0 ? (
           <EmptyState
             title="No deployments match current filters."
-            description="Try switching filter settings to include more history."
+            description="Try broadening the action, status, or impact filters to include more history."
           />
         ) : null}
         {!isLoading && !error && deployments.length > 0 && !hasAnyComparisonWindow ? (
