@@ -787,7 +787,7 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
     assert body["catalogJoin"]["serviceOnlyCount"] == 1
     assert body["identityDrift"]["driftCount"] == 0
     assert body["identityDrift"]["driftKeys"] == []
-    assert body["identityDrift"]["rows"][0]["observabilityMode"] == "app-native"
+    assert body["identityDrift"]["rows"][0]["observabilityMode"] is None
 
 
 def test_service_registry_diagnostics_reports_warning_before_stale(monkeypatch) -> None:
@@ -1266,6 +1266,7 @@ def test_service_health_timeline_uses_service_registry_metadata_for_queries(monk
     requested_urls: list[str] = []
     payloads = iter(
         [
+            {"status": "success", "data": {"result": []}},
             {"status": "success", "data": {"result": []}},
             {"status": "success", "data": {"result": []}},
             {"status": "success", "data": {"result": []}},
