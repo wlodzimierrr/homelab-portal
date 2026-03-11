@@ -26,6 +26,10 @@ on:
         description: "Required when action_mode=rollback (example: sha-<commit>)"
         required: false
         type: string
+      operator_reason:
+        description: "Optional operator-provided reason recorded in rollback deployment records and PR body"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -71,6 +75,7 @@ jobs:
           ACTION_MODE: ${{ inputs.action_mode }}
           ROLLBACK_API_TAG: ${{ inputs.rollback_api_tag }}
           ROLLBACK_WEB_TAG: ${{ inputs.rollback_web_tag }}
+          OPERATOR_REASON: ${{ inputs.operator_reason }}
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
@@ -165,6 +170,7 @@ jobs:
           - Target: ${TARGET_ENV}
           - API image: ghcr.io/${OWNER}/homelab-api:${api_tag}
           - Web image: ghcr.io/${OWNER}/homelab-web:${web_tag}
+          $( [ -n "${OPERATOR_REASON:-}" ] && printf '%s\n' "- Reason: ${OPERATOR_REASON}" )
           - Triggered by: ${GITHUB_ACTOR}
           - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           BODY
@@ -303,6 +309,7 @@ jobs:
           ACTION_MODE: ${{ needs.prepare.outputs.action_mode }}
           API_TAG: ${{ needs.prepare.outputs.api_tag }}
           WEB_TAG: ${{ needs.prepare.outputs.web_tag }}
+          OPERATOR_REASON: ${{ inputs.operator_reason }}
           BRANCH_NAME: ${{ needs.prepare.outputs.branch_name }}
           PR_URL: ${{ steps.create_pr.outputs.pull-request-url }}
           PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
@@ -334,13 +341,14 @@ jobs:
             "imageRef": "${image_ref}",
             "argoApp": "${argo_app}",
             "gitRef": "${BRANCH_NAME}",
-            "deployReason": "GitHub gated ${ACTION_MODE} request",
+            "deployReason": "${OPERATOR_REASON:-GitHub gated ${ACTION_MODE} request}",
             "requestKey": "${request_key}",
             "metadata": {
               "source": "gated-promotion.yml",
               "workflowRunId": "${GITHUB_RUN_ID}",
               "workflowRunUrl": "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
-              "gitopsRepo": "${GITOPS_REPO}"
+              "gitopsRepo": "${GITOPS_REPO}",
+              "operatorReason": "${OPERATOR_REASON}"
             }
           EOF
 

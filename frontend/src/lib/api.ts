@@ -167,6 +167,28 @@ export interface ServiceDeploymentLock {
   metadata?: Record<string, unknown>
 }
 
+export interface PortalRollbackRequest {
+  targetEnvironment?: 'prod'
+  rollbackApiTag: string
+  rollbackWebTag: string
+  reason: string
+}
+
+export interface PortalRollbackResponse {
+  status: 'accepted'
+  action: 'rollback'
+  targetEnvironment: string
+  rollbackApiTag: string
+  rollbackWebTag: string
+  reason: string
+  requestedBy: string
+  repository: string
+  workflowFile: string
+  workflowRef: string
+  workflowUrl: string
+  initiatedAt: string
+}
+
 export interface ReleaseTraceabilityArgoState {
   appName?: string | null
   syncStatus?: string | null
@@ -524,6 +546,18 @@ export function getServiceDeployments(serviceId: string) {
   return requestServiceEndpoint<{ deployments: ServiceDeployment[] }>(
     `/services/${encodeURIComponent(serviceId)}/deployments`,
   )
+}
+
+export function requestPortalRollback(payload: PortalRollbackRequest) {
+  return request<PortalRollbackResponse>('/rollbacks', {
+    method: 'POST',
+    body: JSON.stringify({
+      targetEnvironment: payload.targetEnvironment ?? 'prod',
+      rollbackApiTag: payload.rollbackApiTag,
+      rollbackWebTag: payload.rollbackWebTag,
+      reason: payload.reason,
+    }),
+  })
 }
 
 export function getReleaseTraceability(params?: {

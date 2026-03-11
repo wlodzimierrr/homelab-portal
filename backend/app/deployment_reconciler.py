@@ -39,6 +39,7 @@ CONFIG_CHANGE_TITLE_RE = re.compile(
     r"^chore\(([a-z0-9-]+)\): set (homelab-api|homelab-web) replicas to ([0-9]+)$"
 )
 IMAGE_REF_RE = re.compile(r"(ghcr\.io/[^/\s]+/(homelab-api|homelab-web):([^\s`]+))")
+REASON_LINE_RE = re.compile(r"^\s*-\s+Reason:\s+(.+?)\s*$", re.MULTILINE)
 
 
 class DeploymentReconcileSummary(TypedDict):
@@ -131,6 +132,16 @@ def _extract_images_from_body(body: object) -> dict[str, str]:
         image_name = match.group(2)
         images[image_name] = full_ref
     return images
+
+
+def _extract_requested_reason_from_body(body: object) -> str | None:
+    if not isinstance(body, str):
+        return None
+    match = REASON_LINE_RE.search(body)
+    if match is None:
+        return None
+    reason = match.group(1).strip()
+    return reason or None
 
 
 def _action_context_from_pull_request(pr: dict[str, object]) -> tuple[str, str, str | None] | None:
@@ -253,6 +264,7 @@ def load_recent_gitops_deployment_events(
         head = pr.get("head")
         git_ref = head.get("ref") if isinstance(head, dict) and isinstance(head.get("ref"), str) else None
         merge_sha = pr.get("merge_commit_sha") if isinstance(pr.get("merge_commit_sha"), str) else None
+        requested_reason = _extract_requested_reason_from_body(pr.get("body"))
 
         for current_service_id, image_ref in (
             ("homelab-api", images.get("homelab-api")),
@@ -291,6 +303,7 @@ def load_recent_gitops_deployment_events(
                         "pullRequestMergedAt": _serialize_datetime(merged_at),
                         "pullRequestClosedAt": _serialize_datetime(closed_at),
                         "sourceCommitSha": source_commit_sha,
+                        "operatorReason": requested_reason,
                     },
                 )
             )
@@ -489,6 +502,8 @@ def _build_reconciled_record(
             "deploy_reason": (
                 existing_record.get("deployReason")
                 if existing_record and isinstance(existing_record.get("deployReason"), str)
+                else metadata.get("operatorReason")
+                if isinstance(metadata.get("operatorReason"), str)
                 else f"GitOps {event.action} via PR #{event.pr_number}"
             ),
             "compare_url": (
@@ -596,6 +611,8 @@ def _build_reconciled_record(
         "deploy_reason": (
             existing_record.get("deployReason")
             if existing_record and isinstance(existing_record.get("deployReason"), str)
+            else metadata.get("operatorReason")
+            if isinstance(metadata.get("operatorReason"), str)
             else f"GitOps {event.action} via PR #{event.pr_number}"
         ),
         "compare_url": _build_compare_url(event=event, previous_record=previous_record),

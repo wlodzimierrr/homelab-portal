@@ -13,7 +13,9 @@ import {
   getProjects,
   getReleaseTraceability,
   getService,
+  requestPortalRollback,
   type MonitoringProviderStatus,
+  type PortalRollbackResponse,
   type Project,
   type ReleaseTraceabilityRow,
   type ServiceDetails,
@@ -60,6 +62,10 @@ interface ServiceDetailsPageProps {
 
 type HealthStatus = 'healthy' | 'degraded' | 'unknown'
 type SyncStatus = 'synced' | 'out_of_sync' | 'unknown'
+
+function supportsPortalRollback(serviceId: string) {
+  return serviceId === 'homelab-api' || serviceId === 'homelab-web'
+}
 
 interface ServiceOverviewData {
   id: string
@@ -514,6 +520,12 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [logsError, setLogsError] = useState('')
   const [deploymentHistoryUnavailable, setDeploymentHistoryUnavailable] = useState(false)
   const [deploymentHistoryError, setDeploymentHistoryError] = useState('')
+  const [rollbackApiTag, setRollbackApiTag] = useState('')
+  const [rollbackWebTag, setRollbackWebTag] = useState('')
+  const [rollbackReason, setRollbackReason] = useState('')
+  const [rollbackSubmitting, setRollbackSubmitting] = useState(false)
+  const [rollbackError, setRollbackError] = useState('')
+  const [rollbackResult, setRollbackResult] = useState<PortalRollbackResponse | null>(null)
 
   const loadOverview = useCallback(async () => {
     setIsLoading(true)
@@ -752,6 +764,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       ),
     [logsError, logsLoading, logsResult],
   )
+  const rollbackSupported = useMemo(() => supportsPortalRollback(decodedServiceId), [decodedServiceId])
 
   const loadQuickViewLogs = useCallback(async () => {
     setLogsLoading(true)
@@ -771,6 +784,28 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       setLogsLoading(false)
     }
   }, [activeLogsPreset, logsRange, serviceIdentity])
+
+  const submitRollbackRequest = useCallback(async () => {
+    setRollbackSubmitting(true)
+    setRollbackError('')
+    setRollbackResult(null)
+
+    try {
+      const response = await requestPortalRollback({
+        targetEnvironment: 'prod',
+        rollbackApiTag,
+        rollbackWebTag,
+        reason: rollbackReason,
+      })
+      setRollbackResult(response)
+      setRollbackReason('')
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : 'Failed to request portal rollback.'
+      setRollbackError(message)
+    } finally {
+      setRollbackSubmitting(false)
+    }
+  }, [rollbackApiTag, rollbackReason, rollbackWebTag])
 
   useEffect(() => {
     if (!logsDrawerOpen) {
@@ -856,6 +891,84 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                   ) : null}
                 </div>
               </div>
+            ) : null}
+
+            {rollbackSupported ? (
+              <section className="space-y-3 rounded-md border border-border bg-card p-4">
+                <div className="space-y-1">
+                  <h2 className="text-sm font-semibold">Portal Rollback</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Request a coordinated prod rollback through the Git-backed promotion workflow. This action writes
+                    rollback deployment records for both portal services and the reconciler updates their outcome.
+                  </p>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="space-y-1">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">API tag</span>
+                    <input
+                      value={rollbackApiTag}
+                      onChange={(event) => setRollbackApiTag(event.target.value)}
+                      placeholder="sha-<commit> or semver"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Web tag</span>
+                    <input
+                      value={rollbackWebTag}
+                      onChange={(event) => setRollbackWebTag(event.target.value)}
+                      placeholder="sha-<commit> or semver"
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                </div>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Reason</span>
+                  <textarea
+                    value={rollbackReason}
+                    onChange={(event) => setRollbackReason(event.target.value)}
+                    rows={3}
+                    placeholder="Why this rollback is needed and what known-good version you are restoring."
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                  />
+                </label>
+                {rollbackError ? (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                    <p className="text-xs text-destructive">{rollbackError}</p>
+                  </div>
+                ) : null}
+                {rollbackResult ? (
+                  <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
+                    <p className="font-medium">Rollback request accepted for prod.</p>
+                    <p className="mt-1">Workflow: <code>{rollbackResult.workflowFile}</code></p>
+                    <a
+                      href={rollbackResult.workflowUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-flex font-medium underline underline-offset-2"
+                    >
+                      Open workflow runs
+                    </a>
+                  </div>
+                ) : null}
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button
+                    type="button"
+                    onClick={() => void submitRollbackRequest()}
+                    disabled={
+                      rollbackSubmitting ||
+                      rollbackApiTag.trim().length === 0 ||
+                      rollbackWebTag.trim().length === 0 ||
+                      rollbackReason.trim().length < 5
+                    }
+                  >
+                    {rollbackSubmitting ? 'Requesting rollback...' : 'Request prod rollback'}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    Existing rollback records remain visible in the deployment history view for operator audit.
+                  </p>
+                </div>
+              </section>
             ) : null}
 
             {import.meta.env.DEV ? (

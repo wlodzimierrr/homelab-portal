@@ -82,6 +82,47 @@ def test_load_recent_gitops_deployment_events_parses_config_change_pull_request(
     assert event.request_key == "gitops-pr:41:homelab-api:dev:config-change"
 
 
+def test_load_recent_gitops_deployment_events_extracts_rollback_reason_from_pull_request() -> None:
+    reason = "Restore known-good prod tags after auth regression."
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 42,
+                "title": "chore(prod): rollback portal images to requested tags",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/42",
+                "state": "open",
+                "created_at": "2026-03-10T16:22:12Z",
+                "closed_at": None,
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "body": "\n".join(
+                    [
+                        "Automated gated rollback request.",
+                        "- API image: `ghcr.io/wlodzimierrr/homelab-api:sha-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`",
+                        "- Web image: `ghcr.io/wlodzimierrr/homelab-web:sha-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`",
+                        f"- Reason: {reason}",
+                    ]
+                ),
+                "user": {"login": "wlodzimierrr"},
+                "head": {"ref": "automation/prod-rollback-image-update-22912496498"},
+            }
+        ]
+
+    events = deployment_reconciler.load_recent_gitops_deployment_events(
+        github_fetch_json=_fake_fetch,
+    )
+
+    assert len(events) == 2
+    api_event = next(event for event in events if event.service_id == "homelab-api")
+    web_event = next(event for event in events if event.service_id == "homelab-web")
+
+    assert api_event.action == "rollback"
+    assert api_event.metadata["operatorReason"] == reason
+    assert api_event.request_key == "gitops-pr:42:homelab-api:prod:rollback"
+    assert web_event.metadata["operatorReason"] == reason
+
+
 def test_reconcile_recent_gitops_deployments_marks_merged_pull_request_live(monkeypatch) -> None:
     source_sha = "b" * 40
     target_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}"
@@ -225,6 +266,69 @@ def test_reconcile_recent_gitops_deployments_marks_closed_unmerged_pull_request_
     assert summary["statusCounts"]["failed"] == 1
     assert captured[0]["status"] == "failed"
     assert captured[0]["metadata"]["failureReason"] == "GitOps pull request was closed without merge."
+
+
+def test_reconcile_recent_gitops_deployments_uses_operator_reason_for_rollback_records(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+    reason = "Restore known-good prod tags after auth regression."
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 42,
+                "title": "chore(prod): rollback portal images to requested tags",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/42",
+                "state": "open",
+                "created_at": "2026-03-10T16:22:12Z",
+                "closed_at": None,
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "body": "\n".join(
+                    [
+                        "Automated gated rollback request.",
+                        "- API image: `ghcr.io/wlodzimierrr/homelab-api:sha-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`",
+                        "- Web image: `ghcr.io/wlodzimierrr/homelab-web:sha-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`",
+                        f"- Reason: {reason}",
+                    ]
+                ),
+                "user": {"login": "wlodzimierrr"},
+                "head": {"ref": "automation/prod-rollback-image-update-22912496498"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        captured.append(kwargs)
+        return {"status": kwargs["status"]}
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+
+    summary = deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [],
+        select_preferred_service_row=lambda *_args, **_kwargs: None,
+        load_live_argo_status=lambda _row: {},
+        list_live_deployments=lambda _row: [],
+        extract_live_image_ref=lambda _deployment: None,
+        service_id="homelab-api",
+        github_fetch_json=_fake_fetch,
+        now=datetime(2026, 3, 10, 16, 24, tzinfo=timezone.utc),
+    )
+
+    assert summary["statusCounts"]["pending"] == 1
+    assert captured[0]["status"] == "pending"
+    assert captured[0]["deploy_reason"] == reason
+    assert captured[0]["metadata"]["operatorReason"] == reason
 
 
 def test_reconcile_config_change_requires_argo_revision_match(monkeypatch) -> None:

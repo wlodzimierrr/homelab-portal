@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import math
 import os
+import re
 from threading import Event, Thread
 import time
 from typing import Any, Literal
@@ -60,6 +61,10 @@ from app.monitoring_providers import (
     raise_provider_bad_payload_error,
 )
 from app.gitops_project_sync import sync_project_registry_from_gitops
+from app.github_workflows import (
+    GitHubWorkflowDispatchError,
+    dispatch_portal_rollback_workflow,
+)
 from app.release_traceability import (
     build_release_join_diagnostics,
     build_release_traceability_rows,
@@ -385,6 +390,51 @@ class CreateDeploymentRecordRequest(BaseModel):
         if not is_canonical_service_id(value):
             raise ValueError("serviceId must use canonical lowercase-hyphen identity")
         return value
+
+
+ROLLBACK_TAG_RE = re.compile(r"^(sha-[0-9a-f]{40}|v?[0-9]+(\.[0-9]+){2}([.-][0-9A-Za-z.-]+)?)$")
+
+
+class PortalRollbackRequest(BaseModel):
+    target_environment: Literal["prod"] = Field(default="prod", alias="targetEnvironment")
+    rollback_api_tag: str = Field(..., alias="rollbackApiTag", min_length=1)
+    rollback_web_tag: str = Field(..., alias="rollbackWebTag", min_length=1)
+    reason: str = Field(..., min_length=5, max_length=500)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("rollback_api_tag", "rollback_web_tag")
+    @classmethod
+    def validate_rollback_tag(cls, value: str) -> str:
+        normalized = value.strip()
+        if not ROLLBACK_TAG_RE.fullmatch(normalized):
+            raise ValueError("rollback tags must use sha-<40 hex> or semver format")
+        return normalized
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 5:
+            raise ValueError("reason must be at least 5 characters long")
+        return normalized
+
+
+class PortalRollbackResponse(BaseModel):
+    status: Literal["accepted"]
+    action: Literal["rollback"]
+    target_environment: str = Field(alias="targetEnvironment")
+    rollback_api_tag: str = Field(alias="rollbackApiTag")
+    rollback_web_tag: str = Field(alias="rollbackWebTag")
+    reason: str
+    requested_by: str = Field(alias="requestedBy")
+    repository: str
+    workflow_file: str = Field(alias="workflowFile")
+    workflow_ref: str = Field(alias="workflowRef")
+    workflow_url: str = Field(alias="workflowUrl")
+    initiated_at: str = Field(alias="initiatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ServiceRegistrySyncFailure(BaseModel):
@@ -2547,6 +2597,47 @@ def create_deployment_record(
     service_rows = _load_service_rows(service_id=payload.service_id, env=payload.env)
     selected = _select_preferred_service_row(payload.service_id, service_rows, payload.env)
     return _build_deployment_record_response(record, selected)
+
+
+@app.post(
+    "/rollbacks",
+    response_model=PortalRollbackResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["metadata"],
+)
+def request_portal_rollback(
+    payload: PortalRollbackRequest,
+    admin_user: str = Depends(require_admin),
+) -> PortalRollbackResponse:
+    try:
+        result = dispatch_portal_rollback_workflow(
+            rollback_api_tag=payload.rollback_api_tag,
+            rollback_web_tag=payload.rollback_web_tag,
+            operator_reason=payload.reason,
+            target_environment=payload.target_environment,
+        )
+    except GitHubWorkflowDispatchError as exc:
+        status_code = (
+            status.HTTP_503_SERVICE_UNAVAILABLE
+            if exc.status_code is None or exc.status_code >= 500
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    return PortalRollbackResponse(
+        status="accepted",
+        action="rollback",
+        targetEnvironment=payload.target_environment,
+        rollbackApiTag=payload.rollback_api_tag,
+        rollbackWebTag=payload.rollback_web_tag,
+        reason=payload.reason,
+        requestedBy=admin_user,
+        repository=result.repository,
+        workflowFile=result.workflow_file,
+        workflowRef=result.workflow_ref,
+        workflowUrl=result.workflow_url,
+        initiatedAt=datetime.now(tz=timezone.utc).isoformat(),
+    )
 
 
 @app.get(

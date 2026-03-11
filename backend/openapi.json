@@ -797,6 +797,86 @@
         }
       }
     },
+    "/rollbacks": {
+      "post": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Request Portal Rollback",
+        "operationId": "request_portal_rollback_rollbacks_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortalRollbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortalRollbackResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/services/{service_id}/deployments": {
       "get": {
         "tags": [
@@ -3597,6 +3677,109 @@
           "providers"
         ],
         "title": "MonitoringProvidersDiagnosticsResponse"
+      },
+      "PortalRollbackRequest": {
+        "properties": {
+          "targetEnvironment": {
+            "type": "string",
+            "const": "prod",
+            "title": "Targetenvironment",
+            "default": "prod"
+          },
+          "rollbackApiTag": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Rollbackapitag"
+          },
+          "rollbackWebTag": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Rollbackwebtag"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 5,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rollbackApiTag",
+          "rollbackWebTag",
+          "reason"
+        ],
+        "title": "PortalRollbackRequest"
+      },
+      "PortalRollbackResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "accepted",
+            "title": "Status"
+          },
+          "action": {
+            "type": "string",
+            "const": "rollback",
+            "title": "Action"
+          },
+          "targetEnvironment": {
+            "type": "string",
+            "title": "Targetenvironment"
+          },
+          "rollbackApiTag": {
+            "type": "string",
+            "title": "Rollbackapitag"
+          },
+          "rollbackWebTag": {
+            "type": "string",
+            "title": "Rollbackwebtag"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "requestedBy": {
+            "type": "string",
+            "title": "Requestedby"
+          },
+          "repository": {
+            "type": "string",
+            "title": "Repository"
+          },
+          "workflowFile": {
+            "type": "string",
+            "title": "Workflowfile"
+          },
+          "workflowRef": {
+            "type": "string",
+            "title": "Workflowref"
+          },
+          "workflowUrl": {
+            "type": "string",
+            "title": "Workflowurl"
+          },
+          "initiatedAt": {
+            "type": "string",
+            "title": "Initiatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "action",
+          "targetEnvironment",
+          "rollbackApiTag",
+          "rollbackWebTag",
+          "reason",
+          "requestedBy",
+          "repository",
+          "workflowFile",
+          "workflowRef",
+          "workflowUrl",
+          "initiatedAt"
+        ],
+        "title": "PortalRollbackResponse"
       },
       "Project": {
         "properties": {

@@ -6,6 +6,7 @@ from urllib.error import HTTPError
 import pytest
 from fastapi.testclient import TestClient
 
+from app.github_workflows import GitHubWorkflowDispatchError, GitHubWorkflowDispatchResult
 from app.main import app, clear_observability_caches_for_tests
 from app.logs_quickview import clear_rate_limit_state_for_tests
 
@@ -1561,6 +1562,84 @@ def test_create_deployment_record_endpoint_returns_record(monkeypatch) -> None:
     assert body["status"] == "pending"
     assert body["gitPrUrl"] == "https://github.com/example/homelab-workloads/pull/12"
     assert body["imageRef"] == "ghcr.io/example/homelab-api:sha-abc123"
+
+
+def test_request_portal_rollback_endpoint_dispatches_workflow(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return GitHubWorkflowDispatchResult(
+            repository="wlodzimierrr/homelab-portal",
+            workflow_file="gated-promotion.yml",
+            workflow_ref="main",
+            workflow_url="https://github.com/wlodzimierrr/homelab-portal/actions/workflows/gated-promotion.yml",
+        )
+
+    monkeypatch.setattr("app.main.dispatch_portal_rollback_workflow", _fake_dispatch)
+
+    response = client.post(
+        "/rollbacks",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={
+            "targetEnvironment": "prod",
+            "rollbackApiTag": "sha-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rollbackWebTag": "sha-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "reason": "Restore known-good portal release after login regression.",
+        },
+    )
+
+    assert response.status_code == 202
+    assert captured == {
+        "rollback_api_tag": "sha-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "rollback_web_tag": "sha-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "operator_reason": "Restore known-good portal release after login regression.",
+        "target_environment": "prod",
+    }
+    body = response.json()
+    assert body["status"] == "accepted"
+    assert body["action"] == "rollback"
+    assert body["targetEnvironment"] == "prod"
+    assert body["rollbackApiTag"] == "sha-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    assert body["rollbackWebTag"] == "sha-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    assert body["requestedBy"] == "dev-static-token"
+    assert body["workflowFile"] == "gated-promotion.yml"
+
+
+def test_request_portal_rollback_endpoint_validates_tags_and_reason() -> None:
+    response = client.post(
+        "/rollbacks",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={
+            "targetEnvironment": "prod",
+            "rollbackApiTag": "latest",
+            "rollbackWebTag": "sha-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "reason": "bad",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_request_portal_rollback_endpoint_maps_dispatch_errors(monkeypatch) -> None:
+    def _fake_dispatch(**_kwargs):
+        raise GitHubWorkflowDispatchError("upstream unavailable", status_code=503)
+
+    monkeypatch.setattr("app.main.dispatch_portal_rollback_workflow", _fake_dispatch)
+
+    response = client.post(
+        "/rollbacks",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={
+            "targetEnvironment": "prod",
+            "rollbackApiTag": "sha-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "rollbackWebTag": "sha-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "reason": "Restore known-good portal release after login regression.",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "upstream unavailable"
 
 
 def test_get_deployment_endpoint_returns_record(monkeypatch) -> None:
