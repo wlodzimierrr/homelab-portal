@@ -47,12 +47,11 @@ import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
 import { createServiceIdentity, normalizeServiceId, type ServiceIdentity } from '@/lib/service-identity'
 import {
   buildArgoAppUrl,
-  buildGrafanaDashboardUrl,
-  buildGrafanaErrorPanelUrl,
-  buildGrafanaLatencyPanelUrl,
-  buildLogsUrl,
+  buildGrafanaDashboardLink,
+  buildGrafanaErrorPanelLink,
+  buildGrafanaLatencyPanelLink,
+  buildLogsLink,
   config,
-  isLogsConfigured,
 } from '@/lib/config'
 
 interface ServiceDetailsPageProps {
@@ -351,6 +350,14 @@ function QuickLinkCard({ label, description, href, unavailableMessage }: QuickLi
       <p className="text-xs text-muted-foreground">{description}</p>
     </a>
   )
+}
+
+function formatGrafanaLinkUnavailable(reason: string | null) {
+  return reason ?? 'Unavailable because the Grafana URL template could not be resolved for this service.'
+}
+
+function formatLogsLinkUnavailable(reason: string | null) {
+  return reason ?? 'Unavailable because the Grafana/Loki URL template could not be resolved for this service.'
 }
 
 function normalizeProviderPanelState(
@@ -680,19 +687,28 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     () => buildArgoAppUrl(serviceIdentity.serviceId || decodedServiceId, serviceIdentity.argoAppName),
     [decodedServiceId, serviceIdentity.argoAppName, serviceIdentity.serviceId],
   )
-  const grafanaTimeRange = '6h'
-  const grafanaUrl = useMemo(
-    () => buildGrafanaDashboardUrl(serviceIdentity.serviceId || decodedServiceId, grafanaTimeRange),
-    [decodedServiceId, serviceIdentity.serviceId],
+  const grafanaTimeRange = metricsRange
+  const grafanaScope = useMemo(
+    () => ({
+      serviceId: serviceIdentity.serviceId,
+      namespace: serviceIdentity.namespace,
+      environment: serviceIdentity.env,
+      appLabel: serviceIdentity.appLabel,
+      argoAppName: serviceIdentity.argoAppName,
+      timeRange: grafanaTimeRange,
+    }),
+    [
+      grafanaTimeRange,
+      serviceIdentity.appLabel,
+      serviceIdentity.argoAppName,
+      serviceIdentity.env,
+      serviceIdentity.namespace,
+      serviceIdentity.serviceId,
+    ],
   )
-  const latencyPanelUrl = useMemo(
-    () => buildGrafanaLatencyPanelUrl(serviceIdentity.serviceId || decodedServiceId, grafanaTimeRange),
-    [decodedServiceId, serviceIdentity.serviceId],
-  )
-  const errorPanelUrl = useMemo(
-    () => buildGrafanaErrorPanelUrl(serviceIdentity.serviceId || decodedServiceId, grafanaTimeRange),
-    [decodedServiceId, serviceIdentity.serviceId],
-  )
+  const grafanaDashboardLink = useMemo(() => buildGrafanaDashboardLink(grafanaScope), [grafanaScope])
+  const latencyPanelLink = useMemo(() => buildGrafanaLatencyPanelLink(grafanaScope), [grafanaScope])
+  const errorPanelLink = useMemo(() => buildGrafanaErrorPanelLink(grafanaScope), [grafanaScope])
   const deploymentAlert = useMemo(() => {
     const items =
       overview?.deployments.map((deployment) => ({
@@ -713,32 +729,38 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     () => incidentServiceAlerts[decodedServiceId] ?? incidentServiceAlerts[serviceId],
     [decodedServiceId, incidentServiceAlerts, serviceId],
   )
-  const fullLogsConfigured = isLogsConfigured()
-  const logsNamespace = serviceIdentity.namespace || 'default'
-  const logsAppLabel = serviceIdentity.appLabel || decodedServiceId
   const presetLinks = useMemo(() => {
     return logsPresets.map((preset) => ({
       ...preset,
       query: preset.queryTemplate
-        .replaceAll('{{namespace}}', logsNamespace)
-        .replaceAll('{{app_label}}', logsAppLabel),
-      href: buildLogsUrl({
-        serviceId: decodedServiceId,
-        namespace: logsNamespace,
-        appLabel: logsAppLabel,
+        .replaceAll('{{namespace}}', serviceIdentity.namespace)
+        .replaceAll('{{app_label}}', serviceIdentity.appLabel),
+      link: buildLogsLink({
+        serviceId: serviceIdentity.serviceId,
+        namespace: serviceIdentity.namespace,
+        environment: serviceIdentity.env,
+        appLabel: serviceIdentity.appLabel,
+        argoAppName: serviceIdentity.argoAppName,
         timeRange: logsRange,
         preset: preset.id,
         query: preset.queryTemplate
-          .replaceAll('{{namespace}}', logsNamespace)
-          .replaceAll('{{app_label}}', logsAppLabel),
+          .replaceAll('{{namespace}}', serviceIdentity.namespace)
+          .replaceAll('{{app_label}}', serviceIdentity.appLabel),
       }),
     }))
-  }, [decodedServiceId, logsAppLabel, logsNamespace, logsRange])
+  }, [
+    logsRange,
+    serviceIdentity.appLabel,
+    serviceIdentity.argoAppName,
+    serviceIdentity.env,
+    serviceIdentity.namespace,
+    serviceIdentity.serviceId,
+  ])
   const activePreset = useMemo(
     () => presetLinks.find((preset) => preset.id === activeLogsPreset) ?? presetLinks[0],
     [activeLogsPreset, presetLinks],
   )
-  const logsUrl = activePreset?.href ?? ''
+  const logsUrl = activePreset?.link.href ?? ''
   const metricsAllNoData = useMemo(
     () =>
       metrics.noData.uptimePct &&
@@ -1091,16 +1113,18 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                   key={`latency-${decodedServiceId}`}
                   title="P95 Latency Trend"
                   description="Latency trend panel for current service scope."
-                  embedUrl={latencyPanelUrl}
-                  dashboardUrl={grafanaUrl}
+                  embedUrl={latencyPanelLink.href}
+                  openUrl={latencyPanelLink.href}
+                  unavailableMessage={formatGrafanaLinkUnavailable(latencyPanelLink.reason)}
                   height={280}
                 />
                 <GrafanaEmbedPanel
                   key={`errors-${decodedServiceId}`}
                   title="Error Rate Trend"
                   description="Error-rate trend panel for current service scope."
-                  embedUrl={errorPanelUrl}
-                  dashboardUrl={grafanaUrl}
+                  embedUrl={errorPanelLink.href}
+                  openUrl={errorPanelLink.href}
+                  unavailableMessage={formatGrafanaLinkUnavailable(errorPanelLink.reason)}
                   height={280}
                 />
               </div>
@@ -1150,8 +1174,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 <QuickLinkCard
                   label="Grafana Dashboard"
                   description="Open service metrics dashboard"
-                  href={grafanaUrl}
-                  unavailableMessage="Unavailable because the Grafana base URL or dashboard path template is not configured."
+                  href={grafanaDashboardLink.href}
+                  unavailableMessage={formatGrafanaLinkUnavailable(grafanaDashboardLink.reason)}
                 />
                 <div className="rounded-md border border-border bg-background p-3">
                   <p className="text-sm font-medium">Logs</p>
@@ -1162,7 +1186,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                     <Button type="button" size="sm" variant="outline" onClick={() => setLogsDrawerOpen((open) => !open)}>
                       {logsDrawerOpen ? 'Hide logs panel' : 'View logs'}
                     </Button>
-                    {fullLogsConfigured ? (
+                    {logsUrl ? (
                       <Button asChild size="sm">
                         <a href={logsUrl} target="_blank" rel="noreferrer">
                           Open full logs
@@ -1174,9 +1198,9 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                       </Button>
                     )}
                   </div>
-                  {!fullLogsConfigured ? (
+                  {!logsUrl ? (
                     <p className="mt-2 text-xs text-muted-foreground">
-                      Quick view is available from Loki, but the Grafana logs URL is not configured for direct deep links.
+                      {formatLogsLinkUnavailable(activePreset?.link.reason ?? null)}
                     </p>
                   ) : null}
                 </div>
@@ -1225,9 +1249,9 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                       <p className="text-sm font-medium">{activePreset?.label ?? 'Preset'}</p>
                       <p className="text-xs text-muted-foreground">{activePreset?.description}</p>
                     </div>
-                    {activePreset?.href ? (
+                    {activePreset?.link.href ? (
                       <Button asChild size="sm">
-                        <a href={activePreset.href} target="_blank" rel="noreferrer">
+                        <a href={activePreset.link.href} target="_blank" rel="noreferrer">
                           Open full logs
                         </a>
                       </Button>
@@ -1237,6 +1261,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                       </Button>
                     )}
                   </div>
+                  {!activePreset?.link.href ? (
+                    <p className="mb-3 text-xs text-muted-foreground">
+                      {formatLogsLinkUnavailable(activePreset?.link.reason ?? null)}
+                    </p>
+                  ) : null}
                   {logsLoading ? <LoadingState label="Loading logs..." rows={3} /> : null}
                   {!logsLoading && logsError ? (
                     <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">

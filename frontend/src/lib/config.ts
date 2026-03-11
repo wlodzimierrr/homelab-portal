@@ -10,6 +10,12 @@ interface MonitoringUrlOptions {
   fallbackPath?: string
 }
 
+export interface MonitoringUrlResult {
+  href: string
+  reason: string | null
+  missingVariables: string[]
+}
+
 function warnTemplate(context: string, message: string) {
   if (import.meta.env.DEV) {
     console.warn(`[monitoring-url] ${context}: ${message}`)
@@ -35,7 +41,10 @@ function fillTemplate(template: string, values: Record<string, string | undefine
     warnTemplate(context, `missing template variables: ${[...missing].sort().join(', ')}`)
   }
 
-  return rendered
+  return {
+    rendered,
+    missingVariables: [...missing].sort(),
+  }
 }
 
 function joinUrl(baseUrl: string, path: string) {
@@ -115,7 +124,7 @@ export function buildMonitoringUrl({
   context,
   fallbackPath = '/',
 }: MonitoringUrlOptions) {
-  const renderedPath = fillTemplate(pathTemplate, values, context)
+  const renderedPath = fillTemplate(pathTemplate, values, context).rendered
   const safePath = normalizePath(renderedPath, context, fallbackPath)
 
   if (!baseUrl && !/^https?:\/\//i.test(safePath)) {
@@ -126,6 +135,61 @@ export function buildMonitoringUrl({
   return joinUrl(baseUrl, safePath)
 }
 
+function buildMonitoringLink({
+  baseUrl,
+  pathTemplate,
+  values,
+  context,
+  fallbackPath = '/',
+}: MonitoringUrlOptions): MonitoringUrlResult {
+  const trimmedTemplate = pathTemplate.trim()
+
+  if (!trimmedTemplate) {
+    warnTemplate(context, 'path template is empty')
+    return {
+      href: '',
+      reason: 'The URL template for this deep link is not configured.',
+      missingVariables: [],
+    }
+  }
+
+  if (!baseUrl && !/^https?:\/\//i.test(trimmedTemplate)) {
+    warnTemplate(context, 'base URL is empty; returning disabled URL')
+    return {
+      href: '',
+      reason: 'The Grafana base URL is not configured.',
+      missingVariables: [],
+    }
+  }
+
+  const rendered = fillTemplate(trimmedTemplate, values, context)
+
+  if (rendered.missingVariables.length > 0) {
+    return {
+      href: '',
+      reason: `Missing required deep-link variables: ${rendered.missingVariables.join(', ')}`,
+      missingVariables: rendered.missingVariables,
+    }
+  }
+
+  const safePath = normalizePath(rendered.rendered, context, fallbackPath)
+  const href = joinUrl(baseUrl, safePath)
+
+  if (!href) {
+    return {
+      href: '',
+      reason: 'The deep-link template rendered an unusable URL.',
+      missingVariables: [],
+    }
+  }
+
+  return {
+    href,
+    reason: null,
+    missingVariables: [],
+  }
+}
+
 export const config = {
   apiBaseUrl: env.VITE_API_BASE_URL ?? '/api',
   argoBaseUrl: env.VITE_ARGO_BASE_URL ?? inferredHomelabDefaults.argoBaseUrl,
@@ -134,16 +198,50 @@ export const config = {
   metricsStaleAfterMinutes: readPositiveNumber(env.VITE_METRICS_STALE_AFTER_MINUTES, 20),
   argoAppPathTemplate: env.VITE_ARGO_APP_PATH_TEMPLATE ?? '/applications/{argoAppName}',
   grafanaDashboardPathTemplate:
-    env.VITE_GRAFANA_DASHBOARD_PATH_TEMPLATE ?? '/d/service-overview?var-service={serviceId}',
+    env.VITE_GRAFANA_DASHBOARD_PATH_TEMPLATE ??
+    '/d/service-overview?var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&from=now-{timeRange}&to=now',
   grafanaLatencyPanelPathTemplate:
     env.VITE_GRAFANA_LATENCY_PANEL_PATH_TEMPLATE ??
-    '/d-solo/service-overview/service-overview?panelId=2&var-service={serviceId}&from=now-{timeRange}&to=now',
+    '/d-solo/service-overview/service-overview?panelId=2&var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&from=now-{timeRange}&to=now',
   grafanaErrorPanelPathTemplate:
     env.VITE_GRAFANA_ERROR_PANEL_PATH_TEMPLATE ??
-    '/d-solo/service-overview/service-overview?panelId=3&var-service={serviceId}&from=now-{timeRange}&to=now',
+    '/d-solo/service-overview/service-overview?panelId=3&var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&from=now-{timeRange}&to=now',
   lokiLogsPathTemplate:
     env.VITE_LOKI_LOGS_PATH_TEMPLATE ??
-    '/explore?var-namespace={{namespace}}&var-app={{app_label}}&from=now-{{time_range}}&to=now',
+    '/explore?var-service={serviceId}&var-namespace={{namespace}}&var-app={{app_label}}&var-env={environment}&var-argoApp={argoAppName}&from=now-{{time_range}}&to=now',
+}
+
+interface MonitoringScope {
+  serviceId: string
+  namespace?: string
+  environment?: string
+  appLabel?: string
+  argoAppName?: string
+  timeRange?: string
+}
+
+function buildMonitoringValues({
+  serviceId,
+  namespace,
+  environment,
+  appLabel,
+  argoAppName,
+  timeRange,
+}: MonitoringScope) {
+  return {
+    serviceId,
+    namespace,
+    environment,
+    env: environment,
+    appLabel,
+    app_label: appLabel,
+    argoAppName,
+    argo_app_name: argoAppName,
+    argoApp: argoAppName,
+    argo_app: argoAppName,
+    timeRange,
+    time_range: timeRange,
+  }
 }
 
 export function buildArgoAppUrl(serviceId: string, argoAppName?: string) {
@@ -158,43 +256,43 @@ export function buildArgoAppUrl(serviceId: string, argoAppName?: string) {
   })
 }
 
-export function buildGrafanaDashboardUrl(serviceId: string, timeRange = '6h') {
-  return buildMonitoringUrl({
+export function buildGrafanaDashboardLink(scope: MonitoringScope) {
+  return buildMonitoringLink({
     baseUrl: config.grafanaBaseUrl,
     pathTemplate: config.grafanaDashboardPathTemplate,
-    values: {
-      serviceId,
-      timeRange,
-      time_range: timeRange,
-    },
+    values: buildMonitoringValues(scope),
     context: 'grafana-dashboard-url',
   })
 }
 
-export function buildGrafanaLatencyPanelUrl(serviceId: string, timeRange = '6h') {
-  return buildMonitoringUrl({
+export function buildGrafanaDashboardUrl(serviceId: string, timeRange = '6h') {
+  return buildGrafanaDashboardLink({ serviceId, timeRange }).href
+}
+
+export function buildGrafanaLatencyPanelLink(scope: MonitoringScope) {
+  return buildMonitoringLink({
     baseUrl: config.grafanaBaseUrl,
     pathTemplate: config.grafanaLatencyPanelPathTemplate,
-    values: {
-      serviceId,
-      timeRange,
-      time_range: timeRange,
-    },
+    values: buildMonitoringValues(scope),
     context: 'grafana-latency-panel-url',
   })
 }
 
-export function buildGrafanaErrorPanelUrl(serviceId: string, timeRange = '6h') {
-  return buildMonitoringUrl({
+export function buildGrafanaLatencyPanelUrl(serviceId: string, timeRange = '6h') {
+  return buildGrafanaLatencyPanelLink({ serviceId, timeRange }).href
+}
+
+export function buildGrafanaErrorPanelLink(scope: MonitoringScope) {
+  return buildMonitoringLink({
     baseUrl: config.grafanaBaseUrl,
     pathTemplate: config.grafanaErrorPanelPathTemplate,
-    values: {
-      serviceId,
-      timeRange,
-      time_range: timeRange,
-    },
+    values: buildMonitoringValues(scope),
     context: 'grafana-error-panel-url',
   })
+}
+
+export function buildGrafanaErrorPanelUrl(serviceId: string, timeRange = '6h') {
+  return buildGrafanaErrorPanelLink({ serviceId, timeRange }).href
 }
 
 interface LogsUrlOptions {
@@ -208,32 +306,47 @@ interface LogsUrlOptions {
 }
 
 export function isLogsConfigured() {
-  const probe = buildLogsUrl({
+  const probe = buildLogsLink({
     serviceId: 'probe',
     namespace: 'default',
     environment: 'dev',
     appLabel: 'probe',
+    argoAppName: 'probe-dev',
     timeRange: '6h',
   })
 
-  return Boolean(probe)
+  return Boolean(probe.href)
 }
 
-export function buildLogsUrl({ serviceId, namespace, environment, appLabel, timeRange, preset, query }: LogsUrlOptions) {
-  return buildMonitoringUrl({
+export function buildLogsLink({
+  serviceId,
+  namespace,
+  environment,
+  appLabel,
+  argoAppName,
+  timeRange,
+  preset,
+  query,
+}: LogsUrlOptions & { argoAppName?: string }) {
+  return buildMonitoringLink({
     baseUrl: config.grafanaBaseUrl,
     pathTemplate: config.lokiLogsPathTemplate,
     values: {
-      serviceId,
-      namespace,
-      environment,
-      app_label: appLabel,
-      time_range: timeRange,
-      appLabel,
-      timeRange,
+      ...buildMonitoringValues({
+        serviceId,
+        namespace,
+        environment,
+        appLabel,
+        argoAppName,
+        timeRange,
+      }),
       preset,
       query,
     },
     context: 'loki-logs-url',
   })
+}
+
+export function buildLogsUrl(options: LogsUrlOptions) {
+  return buildLogsLink(options).href
 }

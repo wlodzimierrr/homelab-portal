@@ -7,7 +7,8 @@ interface GrafanaEmbedPanelProps {
   title: string
   description: string
   embedUrl: string
-  dashboardUrl: string
+  openUrl: string
+  unavailableMessage?: string
   height?: number
 }
 
@@ -15,14 +16,15 @@ export function GrafanaEmbedPanel({
   title,
   description,
   embedUrl,
-  dashboardUrl,
+  openUrl,
+  unavailableMessage,
   height = 260,
 }: GrafanaEmbedPanelProps) {
   const [state, setState] = useState<EmbedState>('loading')
   const [retryToken, setRetryToken] = useState(0)
 
   const canEmbed = embedUrl.trim().length > 0
-  const canOpen = dashboardUrl.trim().length > 0
+  const canOpen = openUrl.trim().length > 0
   const showFallback = state === 'failed' || !canEmbed
 
   useEffect(() => {
@@ -37,10 +39,10 @@ export function GrafanaEmbedPanel({
 
   const fallbackMessage = useMemo(() => {
     if (!canEmbed) {
-      return 'Grafana embed URL is not configured.'
+      return unavailableMessage ?? 'Grafana embed URL is not configured.'
     }
     return 'Panel failed to load in-app. Use the deep link to open in Grafana.'
-  }, [canEmbed])
+  }, [canEmbed, unavailableMessage])
 
   return (
     <article className="rounded-md border border-border bg-background p-4">
@@ -51,7 +53,7 @@ export function GrafanaEmbedPanel({
         </div>
         {canOpen ? (
           <Button asChild size="sm" variant="outline">
-            <a href={dashboardUrl} target="_blank" rel="noreferrer">
+            <a href={openUrl} target="_blank" rel="noreferrer">
               Open in Grafana
             </a>
           </Button>
@@ -79,7 +81,7 @@ export function GrafanaEmbedPanel({
             </Button>
             {canOpen ? (
               <Button asChild size="sm">
-                <a href={dashboardUrl} target="_blank" rel="noreferrer">
+                <a href={openUrl} target="_blank" rel="noreferrer">
                   Open in Grafana
                 </a>
               </Button>
