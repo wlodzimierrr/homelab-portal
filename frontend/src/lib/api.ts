@@ -79,6 +79,7 @@ export interface Project {
   id: string
   name: string
   environment: string
+  observabilityMode?: 'app-native' | 'ingress-derived' | 'no-http'
   owner?: string
   repoUrl?: string
   runbookUrl?: string
@@ -219,6 +220,7 @@ export interface ServiceDetails {
   env?: string
   appLabel?: string
   argoAppName?: string
+  observabilityMode?: 'app-native' | 'ingress-derived' | 'no-http'
   identity?: Partial<ServiceIdentity>
   version?: string
   health?: string
@@ -237,6 +239,7 @@ export interface ServiceRegistryApiRow {
   namespace: string
   appLabel: string
   argoAppName?: string
+  observabilityMode?: 'app-native' | 'ingress-derived' | 'no-http'
   source: string
   sourceRef?: string
   lastSyncedAt?: string

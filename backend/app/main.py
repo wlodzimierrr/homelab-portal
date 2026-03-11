@@ -73,6 +73,7 @@ from app.release_traceability import (
     load_ci_metadata_rows,
 )
 from app.service_identity import is_canonical_service_id
+from app.service_observability import normalize_observability_mode
 from app.service_identity_validation import build_service_identity_diagnostics
 from app.service_registry_sync import _kube_get_json, sync_service_registry_from_cluster
 from app.observability_cache import TTLCache
@@ -238,6 +239,7 @@ class Project(BaseModel):
     owner: str | None = None
     repo_url: str | None = Field(default=None, alias="repoUrl")
     runbook_url: str | None = Field(default=None, alias="runbookUrl")
+    observability_mode: str | None = Field(default=None, alias="observabilityMode")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -262,6 +264,7 @@ class ServiceRow(BaseModel):
     source: str
     source_ref: str | None = Field(default=None, alias="sourceRef")
     last_synced_at: str | None = Field(default=None, alias="lastSyncedAt")
+    observability_mode: str | None = Field(default=None, alias="observabilityMode")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -283,6 +286,7 @@ class ServiceDetailResponse(BaseModel):
     source: str
     source_ref: str | None = Field(default=None, alias="sourceRef")
     last_synced_at: str | None = Field(default=None, alias="lastSyncedAt")
+    observability_mode: str | None = Field(default=None, alias="observabilityMode")
     deployment_lock: "DeploymentLockResponse | None" = Field(default=None, alias="deploymentLock")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -557,6 +561,7 @@ class ServiceIdentityDriftRowResponse(BaseModel):
     argo_app_name: str | None = Field(default=None, alias="argoAppName")
     expected_argo_app_name: str | None = Field(default=None, alias="expectedArgoAppName")
     release_argo_app_name: str | None = Field(default=None, alias="releaseArgoAppName")
+    observability_mode: str | None = Field(default=None, alias="observabilityMode")
     gitops_path: str | None = Field(default=None, alias="gitopsPath")
     expected_gitops_path: str | None = Field(default=None, alias="expectedGitopsPath")
     monitoring_selector: ServiceIdentityMonitoringSelectorResponse = Field(alias="monitoringSelector")
@@ -1071,7 +1076,7 @@ def _load_project_rows(env: str | None = None) -> list[dict[str, str | None]]:
             if env:
                 cur.execute(
                     """
-                    SELECT project_id, project_name, env, owner, repo_url, runbook_url
+                    SELECT project_id, project_name, env, owner, repo_url, runbook_url, observability_mode
                     FROM project_registry
                     WHERE source = %s
                       AND env = %s
@@ -1082,7 +1087,7 @@ def _load_project_rows(env: str | None = None) -> list[dict[str, str | None]]:
             else:
                 cur.execute(
                     """
-                    SELECT project_id, project_name, env, owner, repo_url, runbook_url
+                    SELECT project_id, project_name, env, owner, repo_url, runbook_url, observability_mode
                     FROM project_registry
                     WHERE source = %s
                     ORDER BY project_id ASC, env ASC
@@ -1099,6 +1104,7 @@ def _load_project_rows(env: str | None = None) -> list[dict[str, str | None]]:
             "owner": row[3],
             "repo_url": row[4],
             "runbook_url": row[5],
+            "observability_mode": row[6] if len(row) > 6 else None,
         }
         for row in rows
     ]
@@ -1123,7 +1129,7 @@ def _load_project_catalog_rows(
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT project_id, project_name, env, namespace, app_label, source_ref
+                SELECT project_id, project_name, env, namespace, app_label, source_ref, observability_mode
                 FROM project_registry
                 WHERE {where_clause}
                 ORDER BY project_id ASC, env ASC
@@ -1140,9 +1146,22 @@ def _load_project_catalog_rows(
             "namespace": row[3],
             "app_label": row[4],
             "source_ref": row[5] if len(row) > 5 else None,
+            "observability_mode": normalize_observability_mode(row[6] if len(row) > 6 else None),
         }
         for row in rows
     ]
+
+
+def _project_catalog_index(
+    rows: list[dict[str, str | None]],
+) -> dict[tuple[str, str], dict[str, str | None]]:
+    return {
+        (
+            str(row.get("project_id") or "").strip(),
+            str(row.get("env") or "").strip(),
+        ): row
+        for row in rows
+    }
 
 
 def _load_service_rows(
@@ -3025,6 +3044,9 @@ def list_projects(
                 owner=row["owner"] if isinstance(row.get("owner"), str) else None,
                 repoUrl=row["repo_url"] if isinstance(row.get("repo_url"), str) else None,
                 runbookUrl=row["runbook_url"] if isinstance(row.get("runbook_url"), str) else None,
+                observabilityMode=(
+                    row["observability_mode"] if isinstance(row.get("observability_mode"), str) else None
+                ),
             )
             for row in rows
         ]
@@ -3141,6 +3163,7 @@ def list_services(
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServicesResponse:
     rows = _load_service_rows(env=env, namespace=namespace)
+    project_index = _project_catalog_index(_load_project_catalog_rows(env=env))
     return ServicesResponse(
         services=[
             ServiceRow(
@@ -3153,6 +3176,11 @@ def list_services(
                 source=str(row["source"]),
                 sourceRef=row["source_ref"] if isinstance(row["source_ref"], str) else None,
                 lastSyncedAt=row["last_synced_at"] if isinstance(row["last_synced_at"], str) else None,
+                observabilityMode=(
+                    project_index.get((str(row["service_id"]), str(row["env"])), {}).get(
+                        "observability_mode"
+                    )
+                ),
             )
             for row in rows
         ]
@@ -3189,6 +3217,11 @@ def get_service(
         else None
     )
     active_lock = _get_active_deployment_lock(str(selected["service_id"]), str(selected["env"]))
+    project_rows = _load_project_catalog_rows(
+        env=str(selected["env"]),
+        project_id=str(selected["service_id"]),
+    )
+    observability_mode = project_rows[0].get("observability_mode") if project_rows else None
 
     return ServiceDetailResponse(
         id=str(selected["service_id"]),
@@ -3203,6 +3236,7 @@ def get_service(
         source=str(selected["source"]),
         sourceRef=selected["source_ref"] if isinstance(selected["source_ref"], str) else None,
         lastSyncedAt=selected["last_synced_at"] if isinstance(selected["last_synced_at"], str) else None,
+        observabilityMode=observability_mode if isinstance(observability_mode, str) else None,
         deploymentLock=_build_deployment_lock_response(active_lock),
     )
 

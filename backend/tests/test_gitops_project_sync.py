@@ -53,6 +53,7 @@ def test_discover_gitops_project_records_reads_app_env_directories(tmp_path: Pat
     assert row.owner is None
     assert row.repo_url is None
     assert row.runbook_url is None
+    assert row.observability_mode is None
     assert row.source == "gitops_apps"
     assert row.last_synced_at == synced_at
     assert row.source_ref.endswith(":apps/homelab-api/envs/dev")
@@ -85,6 +86,8 @@ def test_discover_gitops_project_records_joins_services_yaml_metadata(tmp_path: 
             "    owner: wlodzimierrr\n"
             "    repo_url: https://github.com/wlodzimierrr/homelab/tree/main/apps/portal/backend\n"
             "    runbook_url: https://github.com/wlodzimierrr/homelab/blob/main/docs/runbooks/homelab-api-service-operations.md\n"
+            "    observability:\n"
+            "      mode: app-native\n"
         ),
     )
 
@@ -102,6 +105,7 @@ def test_discover_gitops_project_records_joins_services_yaml_metadata(tmp_path: 
         rows[0].runbook_url
         == "https://github.com/wlodzimierrr/homelab/blob/main/docs/runbooks/homelab-api-service-operations.md"
     )
+    assert rows[0].observability_mode == "app-native"
 
 
 def test_resolve_default_workloads_repo_path_does_not_raise_for_shallow_container_layout() -> None:

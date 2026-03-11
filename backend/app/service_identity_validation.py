@@ -9,6 +9,7 @@ from app.release_traceability import (
     ProjectRow,
     build_release_traceability_rows,
 )
+from app.service_observability import normalize_observability_mode
 from app.service_identity import default_argo_app_name, normalize_service_id, parse_source_ref_path
 
 
@@ -29,6 +30,7 @@ class ServiceIdentityDriftRow(TypedDict):
     argoAppName: str | None
     expectedArgoAppName: str | None
     releaseArgoAppName: str | None
+    observabilityMode: str | None
     gitopsPath: str | None
     expectedGitopsPath: str | None
     monitoringSelector: ServiceIdentityMonitoringSelector
@@ -134,6 +136,11 @@ def build_service_identity_diagnostics(
         expected_argo_app_name = (
             default_argo_app_name(service_id, env) if project_row is not None else None
         )
+        observability_mode = (
+            normalize_observability_mode(str(project_row.get("observability_mode") or "").strip())
+            if project_row is not None
+            else None
+        )
         expected_gitops_path = (
             f"apps/{str(project_row.get('project_id') or '').strip()}/envs/{env}"
             if project_row is not None
@@ -171,6 +178,8 @@ def build_service_identity_diagnostics(
                 violations.append("argo_app_mismatch")
             if expected_gitops_path and gitops_path != expected_gitops_path:
                 violations.append("gitops_path_mismatch")
+            if observability_mode is None:
+                violations.append("observability_mode_missing")
         if release_argo_app_name and argo_app_name and release_argo_app_name != argo_app_name:
             violations.append("release_join_argo_app_mismatch")
 
@@ -186,6 +195,7 @@ def build_service_identity_diagnostics(
             "argoAppName": argo_app_name,
             "expectedArgoAppName": expected_argo_app_name,
             "releaseArgoAppName": release_argo_app_name,
+            "observabilityMode": observability_mode,
             "gitopsPath": gitops_path,
             "expectedGitopsPath": expected_gitops_path,
             "monitoringSelector": {

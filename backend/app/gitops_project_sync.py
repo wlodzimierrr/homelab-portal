@@ -11,6 +11,7 @@ import time
 from uuid import uuid4
 
 import psycopg
+from app.service_observability import normalize_observability_mode
 import yaml
 from app.service_identity import normalize_service_id
 
@@ -50,6 +51,7 @@ class ProjectRegistryRecord:
     owner: str | None
     repo_url: str | None
     runbook_url: str | None
+    observability_mode: str | None
     source: str
     source_ref: str
     last_synced_at: datetime
@@ -217,7 +219,28 @@ def _load_service_catalog_metadata(
             "owner": _first_nonempty_string(item.get("owner"), item.get("owner_email")),
             "repo_url": _first_nonempty_string(item.get("repo_url"), item.get("repoUrl")),
             "runbook_url": _first_nonempty_string(item.get("runbook_url"), item.get("runbookUrl")),
+            "observability_mode": None,
         }
+
+        raw_mode = _first_nonempty_string(
+            _nested_get(item, "observability", "mode"),
+            item.get("observability_mode"),
+            item.get("observabilityMode"),
+        )
+        normalized_mode = normalize_observability_mode(raw_mode)
+        if raw_mode is not None and normalized_mode is None:
+            failures.append(
+                {
+                    "source": DEFAULT_SOURCE,
+                    "scope": scope,
+                    "error": (
+                        "service catalog observability mode must be one of "
+                        "app-native, ingress-derived, no-http"
+                    ),
+                }
+            )
+            continue
+        metadata_by_id[service_id]["observability_mode"] = normalized_mode
 
     return metadata_by_id, failures
 
@@ -313,6 +336,9 @@ def _discover_records_from_repo(
                 owner=service_metadata.get("owner") if service_metadata else None,
                 repo_url=service_metadata.get("repo_url") if service_metadata else None,
                 runbook_url=service_metadata.get("runbook_url") if service_metadata else None,
+                observability_mode=(
+                    service_metadata.get("observability_mode") if service_metadata else None
+                ),
                 source=DEFAULT_SOURCE,
                 source_ref=_build_source_ref(repo_path, env_dir),
                 last_synced_at=synced_at,
@@ -393,11 +419,12 @@ def _upsert_project_registry_records(
                     owner,
                     repo_url,
                     runbook_url,
+                    observability_mode,
                     source,
                     source_ref,
                     last_synced_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (project_id, env) DO UPDATE
                 SET project_name = EXCLUDED.project_name,
                     namespace = EXCLUDED.namespace,
@@ -405,6 +432,7 @@ def _upsert_project_registry_records(
                     owner = EXCLUDED.owner,
                     repo_url = EXCLUDED.repo_url,
                     runbook_url = EXCLUDED.runbook_url,
+                    observability_mode = EXCLUDED.observability_mode,
                     source = EXCLUDED.source,
                     source_ref = EXCLUDED.source_ref,
                     last_synced_at = EXCLUDED.last_synced_at,
@@ -420,6 +448,7 @@ def _upsert_project_registry_records(
                     row.owner,
                     row.repo_url,
                     row.runbook_url,
+                    row.observability_mode,
                     row.source,
                     row.source_ref,
                     row.last_synced_at,

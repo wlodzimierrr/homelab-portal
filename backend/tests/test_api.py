@@ -154,7 +154,9 @@ def test_projects_list_does_not_seed_defaults_on_read(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"projects": []}
     assert any(
-        sql.startswith("SELECT PROJECT_ID, PROJECT_NAME, ENV, OWNER, REPO_URL, RUNBOOK_URL FROM PROJECT_REGISTRY")
+        sql.startswith(
+            "SELECT PROJECT_ID, PROJECT_NAME, ENV, OWNER, REPO_URL, RUNBOOK_URL, OBSERVABILITY_MODE FROM PROJECT_REGISTRY"
+        )
         for sql in executed_sql
     )
 
@@ -173,7 +175,7 @@ def test_projects_list_supports_env_filter(monkeypatch) -> None:
             executed_args.append((" ".join(sql.split()).upper(), args))
 
         def fetchall(self):
-            return [("homelab-api", "homelab-api", "dev", None, None, None)]
+            return [("homelab-api", "homelab-api", "dev", None, None, None, "app-native")]
 
     class _Conn:
         def __enter__(self):
@@ -194,7 +196,14 @@ def test_projects_list_supports_env_filter(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == {
-        "projects": [{"id": "homelab-api", "name": "homelab-api", "environment": "dev"}]
+        "projects": [
+            {
+                "id": "homelab-api",
+                "name": "homelab-api",
+                "environment": "dev",
+                "observabilityMode": "app-native",
+            }
+        ]
     }
     assert executed_args[0][1] == ("gitops_apps", "dev")
 
@@ -219,6 +228,7 @@ def test_projects_list_includes_gitops_catalog_metadata(monkeypatch) -> None:
                     "wlodzimierrr",
                     "https://github.com/wlodzimierrr/homelab/tree/main/apps/portal/backend",
                     "https://github.com/wlodzimierrr/homelab/blob/main/docs/runbooks/homelab-api-service-operations.md",
+                    "app-native",
                 )
             ]
 
@@ -249,6 +259,7 @@ def test_projects_list_includes_gitops_catalog_metadata(monkeypatch) -> None:
                 "owner": "wlodzimierrr",
                 "repoUrl": "https://github.com/wlodzimierrr/homelab/tree/main/apps/portal/backend",
                 "runbookUrl": "https://github.com/wlodzimierrr/homelab/blob/main/docs/runbooks/homelab-api-service-operations.md",
+                "observabilityMode": "app-native",
             }
         ]
     }
@@ -397,6 +408,19 @@ def test_services_list_returns_cluster_backed_rows(monkeypatch) -> None:
             return _Cursor()
 
     monkeypatch.setattr("app.main._with_connection", lambda: _Conn())
+    monkeypatch.setattr(
+        "app.main._load_project_catalog_rows",
+        lambda env=None, project_id=None: [
+            {
+                "project_id": "homelab-api",
+                "project_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "observability_mode": "app-native",
+            }
+        ],
+    )
 
     response = client.get(
         "/services?env=dev",
@@ -416,12 +440,26 @@ def test_services_list_returns_cluster_backed_rows(monkeypatch) -> None:
                 "source": "cluster_services",
                 "sourceRef": "kubernetes_api",
                 "lastSyncedAt": None,
+                "observabilityMode": "app-native",
             }
         ]
     }
 
 
 def test_service_detail_returns_cluster_backed_row(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_project_catalog_rows",
+        lambda env=None, project_id=None: [
+            {
+                "project_id": "homelab-web",
+                "project_name": "homelab-web",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "homelab-web",
+                "observability_mode": "ingress-derived",
+            }
+        ],
+    )
     monkeypatch.setattr(
         "app.main._load_service_rows",
         lambda **_kwargs: [
@@ -460,6 +498,7 @@ def test_service_detail_returns_cluster_backed_row(monkeypatch) -> None:
         "source": "cluster_services",
         "sourceRef": "kubernetes_api",
         "lastSyncedAt": None,
+        "observabilityMode": "ingress-derived",
         "deploymentLock": None,
     }
 
@@ -702,6 +741,7 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
                 "env": "dev",
                 "namespace": "portal",
                 "app_label": "portal-project",
+                "observability_mode": "app-native",
             }
         ],
     )
@@ -747,6 +787,7 @@ def test_service_registry_diagnostics_reports_stale_registry_with_mismatches(
     assert body["catalogJoin"]["serviceOnlyCount"] == 1
     assert body["identityDrift"]["driftCount"] == 0
     assert body["identityDrift"]["driftKeys"] == []
+    assert body["identityDrift"]["rows"][0]["observabilityMode"] == "app-native"
 
 
 def test_service_registry_diagnostics_reports_warning_before_stale(monkeypatch) -> None:

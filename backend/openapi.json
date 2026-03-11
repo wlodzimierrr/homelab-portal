@@ -4586,6 +4586,17 @@
               }
             ],
             "title": "Runbookurl"
+          },
+          "observabilityMode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observabilitymode"
           }
         },
         "type": "object",
@@ -4993,6 +5004,17 @@
             ],
             "title": "Lastsyncedat"
           },
+          "observabilityMode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observabilitymode"
+          },
           "deploymentLock": {
             "anyOf": [
               {
@@ -5170,6 +5192,17 @@
               }
             ],
             "title": "Releaseargoappname"
+          },
+          "observabilityMode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observabilitymode"
           },
           "gitopsPath": {
             "anyOf": [
@@ -5732,6 +5765,17 @@
               }
             ],
             "title": "Lastsyncedat"
+          },
+          "observabilityMode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observabilitymode"
           }
         },
         "type": "object",
