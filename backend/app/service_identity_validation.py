@@ -147,7 +147,9 @@ def build_service_identity_diagnostics(
         if isinstance(release_row, dict):
             argo_state = release_row.get("argo")
             if isinstance(argo_state, dict) and isinstance(argo_state.get("appName"), str):
-                release_argo_app_name = str(argo_state.get("appName")).strip() or None
+                candidate = str(argo_state.get("appName")).strip()
+                if candidate and candidate.lower() != "unknown":
+                    release_argo_app_name = candidate
 
         violations: list[str] = []
         if service_id != normalize_service_id(service_id):
@@ -169,8 +171,6 @@ def build_service_identity_diagnostics(
                 violations.append("argo_app_mismatch")
             if expected_gitops_path and gitops_path != expected_gitops_path:
                 violations.append("gitops_path_mismatch")
-        else:
-            violations.append("catalog_link_missing")
         if release_argo_app_name and argo_app_name and release_argo_app_name != argo_app_name:
             violations.append("release_join_argo_app_mismatch")
 

@@ -102,6 +102,65 @@ def test_build_service_identity_diagnostics_reports_multiple_drift_vectors() -> 
     assert "argo_app_mismatch" in diagnostics["rows"][0]["violations"]
 
 
+def test_build_service_identity_diagnostics_ignores_unknown_release_app_and_support_service() -> None:
+    diagnostics = build_service_identity_diagnostics(
+        project_rows=[
+            {
+                "project_id": "homelab-web",
+                "project_name": "homelab-web",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "homelab-web",
+                "source_ref": "repo@sha:apps/homelab-web/envs/dev",
+            }
+        ],
+        service_rows=[
+            {
+                "service_id": "homelab-web",
+                "service_name": "homelab-web",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "homelab-web",
+                "argo_app_name": "homelab-web-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-11T00:00:00Z",
+            },
+            {
+                "service_id": "oauth2-proxy",
+                "service_name": "oauth2-proxy",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "oauth2-proxy",
+                "argo_app_name": "homelab-web-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-11T00:00:00Z",
+            },
+        ],
+        ci_rows=[],
+        argo_rows=[
+            {
+                "serviceId": "homelab-web",
+                "serviceName": "homelab-web",
+                "env": "dev",
+                "appName": "unknown",
+                "revision": "abc123",
+                "liveRevision": "abc123",
+                "syncStatus": "Synced",
+                "healthStatus": "Healthy",
+            }
+        ],
+        env_filter="dev",
+        service_id_filter=None,
+    )
+
+    assert diagnostics["driftCount"] == 0
+    assert diagnostics["okCount"] == 2
+    assert diagnostics["rows"][0]["violations"] == []
+    assert diagnostics["rows"][1]["violations"] == []
+
+
 def test_create_deployment_record_request_rejects_noncanonical_service_id() -> None:
     with pytest.raises(ValidationError, match="canonical lowercase-hyphen identity"):
         CreateDeploymentRecordRequest(
