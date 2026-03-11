@@ -1069,6 +1069,77 @@ def test_service_metrics_summary_translates_prometheus_http_errors(monkeypatch) 
     assert detail["providerStatus"]["httpStatus"] == 503
 
 
+def test_service_metrics_trends_use_sequential_fallback(monkeypatch) -> None:
+    payloads = iter(
+        [
+            {"status": "success", "data": {"result": []}},
+            {
+                "status": "success",
+                "data": {
+                    "result": [
+                        {
+                            "values": [
+                                [1000, "120"],
+                                [1300, "240"],
+                            ]
+                        }
+                    ]
+                },
+            },
+            {
+                "status": "success",
+                "data": {
+                    "result": [
+                        {
+                            "values": [
+                                [1000, "0.2"],
+                                [1300, "0.4"],
+                            ]
+                        }
+                    ]
+                },
+            },
+        ]
+    )
+
+    def _mock_urlopen(*args, **kwargs):
+        return _MockPrometheusResponse(next(payloads))
+
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._resolve_service_monitoring_metadata",
+        lambda _service_id: ("homelab-api", "homelab-api"),
+    )
+
+    response = client.get(
+        "/services/homelab-api/metrics/trends?range=24h",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["serviceId"] == "homelab-api"
+    assert body["range"] == "24h"
+    assert body["p95LatencyMs"]["queryStatus"] == "ok"
+    assert body["p95LatencyMs"]["querySource"] == "traefik_fallback"
+    assert body["p95LatencyMs"]["pointCount"] == 2
+    assert body["p95LatencyMs"]["latestValue"] == 240.0
+    assert body["errorRatePct"]["queryStatus"] == "ok"
+    assert body["errorRatePct"]["querySource"] == "app_metrics"
+    assert body["errorRatePct"]["pointCount"] == 2
+    assert body["errorRatePct"]["latestValue"] == 0.4
+    assert body["providerStatus"]["provider"] == "prometheus"
+
+
+def test_service_metrics_trends_reject_invalid_range() -> None:
+    response = client.get(
+        "/services/homelab-api/metrics/trends?range=2h",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_service_health_timeline_returns_segments(monkeypatch) -> None:
     payloads = iter(
         [

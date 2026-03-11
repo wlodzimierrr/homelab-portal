@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AppLink } from '@/components/navigation/app-link'
 import { ErrorState } from '@/components/error-state'
-import { GrafanaEmbedPanel } from '@/components/grafana-embed-panel'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
+import { ServiceMetricTrendChart } from '@/components/service-metric-trend-chart'
 import { ServiceHealthTimeline } from '@/components/service-health-timeline'
 import { ServiceMetricCard, type MetricSeverity } from '@/components/service-metric-card'
 import { StatusCard } from '@/components/status-card'
@@ -26,9 +26,12 @@ import {
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import {
   createEmptyServiceMetricsSummary,
+  createEmptyServiceMetricsTrends,
   getServiceMetricsSummary,
+  getServiceMetricsTrends,
   type ServiceMetricsRange,
   type ServiceMetricsSummary,
+  type ServiceMetricsTrends,
 } from '@/lib/adapters/service-metrics'
 import {
   getServiceLogsQuickView,
@@ -451,6 +454,16 @@ function buildMetricsCoverageMessage(metrics: ServiceMetricsSummary) {
   return `${missingLabels.join(' and ')} require service-level HTTP instrumentation. Prometheus is healthy, but this service is not emitting matching request metrics yet.`
 }
 
+function formatTrendSource(source?: 'app_metrics' | 'traefik_fallback') {
+  if (source === 'app_metrics') {
+    return 'App metrics'
+  }
+  if (source === 'traefik_fallback') {
+    return 'Ingress fallback'
+  }
+  return 'No source'
+}
+
 function IncidentServiceBadge({ alert }: { alert: ServiceIncidentBadge }) {
   const severity = alert.highestSeverity ?? 'info'
   const tone =
@@ -515,6 +528,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   )
   const [metricsLoading, setMetricsLoading] = useState(true)
   const [metricsError, setMetricsError] = useState('')
+  const [metricTrends, setMetricTrends] = useState<ServiceMetricsTrends>(() =>
+    createEmptyServiceMetricsTrends(decodedServiceId, '24h'),
+  )
+  const [metricTrendsLoading, setMetricTrendsLoading] = useState(true)
+  const [metricTrendsError, setMetricTrendsError] = useState('')
   const [timelineWindow, setTimelineWindow] = useState<TimelineWindow>('24h')
   const [timeline, setTimeline] = useState<ServiceHealthTimelineData | null>(null)
   const [timelineLoading, setTimelineLoading] = useState(true)
@@ -664,6 +682,26 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     void loadMetrics()
   }, [loadMetrics])
 
+  const loadMetricTrends = useCallback(async () => {
+    setMetricTrendsLoading(true)
+    setMetricTrendsError('')
+
+    try {
+      const response = await getServiceMetricsTrends(serviceIdentity, metricsRange)
+      setMetricTrends(response)
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : 'Failed to load service metric trends'
+      setMetricTrendsError(message)
+      setMetricTrends(createEmptyServiceMetricsTrends(serviceIdentity, metricsRange))
+    } finally {
+      setMetricTrendsLoading(false)
+    }
+  }, [metricsRange, serviceIdentity])
+
+  useEffect(() => {
+    void loadMetricTrends()
+  }, [loadMetricTrends])
+
   const loadTimeline = useCallback(async () => {
     setTimelineLoading(true)
     setTimelineError('')
@@ -777,6 +815,19 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     () => buildMetricsCoverageMessage(metrics),
     [metrics],
   )
+  const metricTrendsAllNoData = useMemo(
+    () => metricTrends.p95LatencyMs.queryStatus === 'no_data' && metricTrends.errorRatePct.queryStatus === 'no_data',
+    [metricTrends],
+  )
+  const metricTrendsPanelState = useMemo(
+    () =>
+      normalizeProviderPanelState(
+        metricTrends.providerStatus,
+        metricTrendsError,
+        metricTrendsAllNoData,
+      ),
+    [metricTrends.providerStatus, metricTrendsAllNoData, metricTrendsError],
+  )
   const logsPanelState = useMemo(
     () =>
       normalizeProviderPanelState(
@@ -830,11 +881,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   }, [rollbackApiTag, rollbackReason, rollbackWebTag])
 
   useEffect(() => {
-    if (!logsDrawerOpen) {
-      return
-    }
     void loadQuickViewLogs()
-  }, [loadQuickViewLogs, logsDrawerOpen])
+  }, [loadQuickViewLogs])
 
   return (
     <PageShell
@@ -914,6 +962,122 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 </div>
               </div>
             ) : null}
+
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold">Logs Console</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Live Loki quick-view lines scoped to this service. Full logs still open in Grafana/Loki.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    Range
+                    <select
+                      value={logsRange}
+                      onChange={(event) => setLogsRange(event.target.value as LogsQuickViewRange)}
+                      className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+                    >
+                      {logsRangeOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {activePreset?.link.href ? (
+                    <Button asChild size="sm" variant="outline">
+                      <a href={activePreset.link.href} target="_blank" rel="noreferrer">
+                        Open full logs
+                      </a>
+                    </Button>
+                  ) : (
+                    <Button type="button" size="sm" variant="outline" disabled>
+                      Open full logs
+                    </Button>
+                  )}
+                </div>
+              </div>
+              {!logsLoading ? <MonitoringPanelNotice provider="Loki" state={logsPanelState} /> : null}
+              <div className="rounded-md border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
+                  <div className="flex flex-wrap gap-2">
+                    {presetLinks.map((preset) => (
+                      <Button
+                        key={preset.id}
+                        type="button"
+                        size="sm"
+                        variant={activeLogsPreset === preset.id ? 'default' : 'outline'}
+                        onClick={() => setActiveLogsPreset(preset.id)}
+                        className={activeLogsPreset === preset.id ? '' : 'border-zinc-700 text-zinc-100 hover:bg-zinc-800'}
+                      >
+                        {preset.label}
+                      </Button>
+                    ))}
+                  </div>
+                  <div className="text-right text-[11px] text-zinc-400">
+                    <p>{serviceIdentity.namespace}/{serviceIdentity.appLabel}</p>
+                    <p>{serviceIdentity.env}</p>
+                  </div>
+                </div>
+                <div className="border-b border-zinc-800 px-4 py-2 font-mono text-[11px] text-zinc-400">
+                  $ preset={activePreset?.id ?? activeLogsPreset} range={logsRange} source=loki
+                </div>
+                {!activePreset?.link.href ? (
+                  <div className="border-b border-zinc-800 px-4 py-3 text-xs text-zinc-400">
+                    {formatLogsLinkUnavailable(activePreset?.link.reason ?? null)}
+                  </div>
+                ) : null}
+                {logsLoading ? (
+                  <div className="px-4 py-6">
+                    <LoadingState label="Loading logs..." rows={3} />
+                  </div>
+                ) : null}
+                {!logsLoading && logsError ? (
+                  <div className="px-4 py-4">
+                    <div className="rounded-md border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-200">
+                      <p>{logsError}</p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="mt-3 border-zinc-700 text-zinc-100 hover:bg-zinc-800"
+                        onClick={() => void loadQuickViewLogs()}
+                      >
+                        Retry logs
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                {!logsLoading && !logsError ? (
+                  <div className="max-h-80 overflow-y-auto px-4 py-4 font-mono text-xs">
+                    {(logsResult?.lines.length ?? 0) === 0 ? (
+                      <p className="text-zinc-400">[no_data] No logs found for this preset and range.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {logsResult?.lines.map((line) => (
+                          <article
+                            key={`${line.timestamp}-${line.message.slice(0, 40)}`}
+                            className="rounded border border-zinc-800 bg-zinc-900/70 p-3"
+                          >
+                            <p className="text-[11px] text-zinc-400">{formatDate(line.timestamp)}</p>
+                            <p className="mt-1 break-words whitespace-pre-wrap text-zinc-100">{line.message}</p>
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 px-4 py-3 text-[11px] text-zinc-400">
+                  <p>
+                    Returned {logsResult?.returned ?? 0} line(s)
+                    {logsResult?.moreAvailable ? '; more logs are available.' : '.'}
+                  </p>
+                  <p>Last refreshed: {formatDate(logsResult?.generatedAt)}</p>
+                </div>
+              </div>
+            </section>
 
             {rollbackSupported ? (
               <section className="space-y-3 rounded-md border border-border bg-card p-4">
@@ -1106,27 +1270,121 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
             <section className="space-y-3">
               <h2 className="text-sm font-semibold">Latency & Error Trends</h2>
               <p className="text-xs text-muted-foreground">
-                Embedded Grafana panels scoped to this service and the last {grafanaTimeRange}.
+                Portal-native trend cards backed by the same Prometheus fallback logic as the API summary, with
+                Grafana kept as the drill-down path.
               </p>
+              {metricTrendsError ? (
+                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                  <p className="text-xs text-amber-900 dark:text-amber-200">{metricTrendsError}</p>
+                  <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => void loadMetricTrends()}>
+                    Retry trends
+                  </Button>
+                </div>
+              ) : null}
+              {!metricTrendsLoading ? (
+                <MonitoringPanelNotice provider="Prometheus" state={metricTrendsPanelState} />
+              ) : null}
               <div className="grid gap-3 xl:grid-cols-2">
-                <GrafanaEmbedPanel
-                  key={`latency-${decodedServiceId}`}
-                  title="P95 Latency Trend"
-                  description="Latency trend panel for current service scope."
-                  embedUrl={latencyPanelLink.href}
-                  openUrl={latencyPanelLink.href}
-                  unavailableMessage={formatGrafanaLinkUnavailable(latencyPanelLink.reason)}
-                  height={280}
-                />
-                <GrafanaEmbedPanel
-                  key={`errors-${decodedServiceId}`}
-                  title="Error Rate Trend"
-                  description="Error-rate trend panel for current service scope."
-                  embedUrl={errorPanelLink.href}
-                  openUrl={errorPanelLink.href}
-                  unavailableMessage={formatGrafanaLinkUnavailable(errorPanelLink.reason)}
-                  height={280}
-                />
+                <article className="space-y-4 rounded-md border border-border bg-background p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold">P95 Latency Trend</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Current service scope over the last {grafanaTimeRange}.
+                      </p>
+                    </div>
+                    {latencyPanelLink.href ? (
+                      <Button asChild size="sm" variant="outline">
+                        <a href={latencyPanelLink.href} target="_blank" rel="noreferrer">
+                          Open in Grafana
+                        </a>
+                      </Button>
+                    ) : (
+                      <Button type="button" size="sm" variant="outline" disabled>
+                        Open in Grafana
+                      </Button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span>Source: {formatTrendSource(metricTrends.p95LatencyMs.querySource)}</span>
+                    <span>
+                      Latest:{' '}
+                      {typeof metricTrends.p95LatencyMs.latestValue === 'number'
+                        ? `${Math.round(metricTrends.p95LatencyMs.latestValue)} ms`
+                        : 'N/A'}
+                    </span>
+                  </div>
+                  {metricTrendsLoading ? (
+                    <LoadingState label="Loading latency trend..." rows={3} />
+                  ) : (
+                    <ServiceMetricTrendChart
+                      points={metricTrends.p95LatencyMs.points}
+                      color="#38bdf8"
+                      fill="rgba(56, 189, 248, 0.18)"
+                      formatValue={(value) => `${Math.round(value)} ms`}
+                    />
+                  )}
+                  {metricTrends.p95LatencyMs.queryStatus === 'no_data' && !metricTrendsLoading ? (
+                    <p className="text-xs text-muted-foreground">
+                      {metricTrends.p95LatencyMs.queryMessage ?? 'No retained latency samples were available.'}
+                    </p>
+                  ) : null}
+                  {!latencyPanelLink.href ? (
+                    <p className="text-xs text-muted-foreground">
+                      {formatGrafanaLinkUnavailable(latencyPanelLink.reason)}
+                    </p>
+                  ) : null}
+                </article>
+                <article className="space-y-4 rounded-md border border-border bg-background p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold">Error Rate Trend</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Current service scope over the last {grafanaTimeRange}.
+                      </p>
+                    </div>
+                    {errorPanelLink.href ? (
+                      <Button asChild size="sm" variant="outline">
+                        <a href={errorPanelLink.href} target="_blank" rel="noreferrer">
+                          Open in Grafana
+                        </a>
+                      </Button>
+                    ) : (
+                      <Button type="button" size="sm" variant="outline" disabled>
+                        Open in Grafana
+                      </Button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                    <span>Source: {formatTrendSource(metricTrends.errorRatePct.querySource)}</span>
+                    <span>
+                      Latest:{' '}
+                      {typeof metricTrends.errorRatePct.latestValue === 'number'
+                        ? `${metricTrends.errorRatePct.latestValue.toFixed(2)}%`
+                        : 'N/A'}
+                    </span>
+                  </div>
+                  {metricTrendsLoading ? (
+                    <LoadingState label="Loading error-rate trend..." rows={3} />
+                  ) : (
+                    <ServiceMetricTrendChart
+                      points={metricTrends.errorRatePct.points}
+                      color="#f97316"
+                      fill="rgba(249, 115, 22, 0.18)"
+                      formatValue={(value) => `${value.toFixed(2)}%`}
+                    />
+                  )}
+                  {metricTrends.errorRatePct.queryStatus === 'no_data' && !metricTrendsLoading ? (
+                    <p className="text-xs text-muted-foreground">
+                      {metricTrends.errorRatePct.queryMessage ?? 'No retained error-rate samples were available.'}
+                    </p>
+                  ) : null}
+                  {!errorPanelLink.href ? (
+                    <p className="text-xs text-muted-foreground">
+                      {formatGrafanaLinkUnavailable(errorPanelLink.reason)}
+                    </p>
+                  ) : null}
+                </article>
               </div>
             </section>
 

@@ -1593,6 +1593,96 @@
         }
       }
     },
+    "/services/{service_id}/metrics/trends": {
+      "get": {
+        "tags": [
+          "monitoring"
+        ],
+        "summary": "Get Service Metrics Trends",
+        "operationId": "get_service_metrics_trends_services__service_id__metrics_trends_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "range",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^([1-9][0-9]*)(m|h|d)$",
+              "default": "24h",
+              "title": "Range"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceMetricsTrendsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/services/{service_id}/metrics-summary": {
       "get": {
         "tags": [
@@ -5144,6 +5234,91 @@
         ],
         "title": "ServiceIdentityMonitoringSelectorResponse"
       },
+      "ServiceMetricTrendPointResponse": {
+        "properties": {
+          "timestamp": {
+            "type": "string",
+            "title": "Timestamp"
+          },
+          "value": {
+            "type": "number",
+            "title": "Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "timestamp",
+          "value"
+        ],
+        "title": "ServiceMetricTrendPointResponse"
+      },
+      "ServiceMetricTrendSeriesResponse": {
+        "properties": {
+          "queryStatus": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "no_data"
+            ],
+            "title": "Querystatus"
+          },
+          "queryMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Querymessage"
+          },
+          "querySource": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "app_metrics",
+                  "traefik_fallback"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Querysource"
+          },
+          "latestValue": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latestvalue"
+          },
+          "pointCount": {
+            "type": "integer",
+            "title": "Pointcount"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceMetricTrendPointResponse"
+            },
+            "type": "array",
+            "title": "Points"
+          }
+        },
+        "type": "object",
+        "required": [
+          "queryStatus",
+          "pointCount",
+          "points"
+        ],
+        "title": "ServiceMetricTrendSeriesResponse"
+      },
       "ServiceMetricsSummaryResponse": {
         "properties": {
           "serviceId": {
@@ -5227,6 +5402,51 @@
           "providerStatus"
         ],
         "title": "ServiceMetricsSummaryResponse"
+      },
+      "ServiceMetricsTrendsResponse": {
+        "properties": {
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "range": {
+            "type": "string",
+            "title": "Range"
+          },
+          "windowStart": {
+            "type": "string",
+            "title": "Windowstart"
+          },
+          "windowEnd": {
+            "type": "string",
+            "title": "Windowend"
+          },
+          "generatedAt": {
+            "type": "string",
+            "title": "Generatedat"
+          },
+          "providerStatus": {
+            "$ref": "#/components/schemas/MonitoringProviderStatusResponse"
+          },
+          "p95LatencyMs": {
+            "$ref": "#/components/schemas/ServiceMetricTrendSeriesResponse"
+          },
+          "errorRatePct": {
+            "$ref": "#/components/schemas/ServiceMetricTrendSeriesResponse"
+          }
+        },
+        "type": "object",
+        "required": [
+          "serviceId",
+          "range",
+          "windowStart",
+          "windowEnd",
+          "generatedAt",
+          "providerStatus",
+          "p95LatencyMs",
+          "errorRatePct"
+        ],
+        "title": "ServiceMetricsTrendsResponse"
       },
       "ServiceRegistryDiagnosticsResponse": {
         "properties": {

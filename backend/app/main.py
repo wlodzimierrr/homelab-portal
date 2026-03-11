@@ -600,6 +600,38 @@ class ServiceMetricsSummaryResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ServiceMetricTrendPointResponse(BaseModel):
+    timestamp: str
+    value: float
+
+
+class ServiceMetricTrendSeriesResponse(BaseModel):
+    query_status: Literal["ok", "no_data"] = Field(alias="queryStatus")
+    query_message: str | None = Field(default=None, alias="queryMessage")
+    query_source: Literal["app_metrics", "traefik_fallback"] | None = Field(
+        default=None,
+        alias="querySource",
+    )
+    latest_value: float | None = Field(default=None, alias="latestValue")
+    point_count: int = Field(alias="pointCount")
+    points: list[ServiceMetricTrendPointResponse]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceMetricsTrendsResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    range_value: str = Field(alias="range")
+    window_start: str = Field(alias="windowStart")
+    window_end: str = Field(alias="windowEnd")
+    generated_at: str = Field(alias="generatedAt")
+    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
+    p95_latency_ms: ServiceMetricTrendSeriesResponse = Field(alias="p95LatencyMs")
+    error_rate_pct: ServiceMetricTrendSeriesResponse = Field(alias="errorRatePct")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ServiceHealthTimelineSegmentResponse(BaseModel):
     start: str
     end: str
@@ -2358,6 +2390,64 @@ def _build_service_metrics_queries(
     }
 
 
+def _serialize_metric_trend_points(points: dict[int, float]) -> list[ServiceMetricTrendPointResponse]:
+    return [
+        ServiceMetricTrendPointResponse(
+            timestamp=datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat(),
+            value=value,
+        )
+        for timestamp, value in sorted(points.items())
+    ]
+
+
+def _build_metric_trend_series(
+    *,
+    field_name: str,
+    query_candidates: tuple[str, ...],
+    start: datetime,
+    end: datetime,
+    step_seconds: int,
+    correlation_id: str,
+) -> ServiceMetricTrendSeriesResponse:
+    sources: tuple[Literal["app_metrics", "traefik_fallback"], ...] = (
+        "app_metrics",
+        "traefik_fallback",
+    )
+
+    for index, query in enumerate(query_candidates):
+        points = _query_prometheus_range(
+            query,
+            f"{field_name}_{index}",
+            start=start,
+            end=end,
+            step_seconds=step_seconds,
+            correlation_id=correlation_id,
+        )
+        if not points:
+            continue
+
+        serialized_points = _serialize_metric_trend_points(points)
+        latest_value = serialized_points[-1].value if serialized_points else None
+        source = sources[index] if index < len(sources) else sources[-1]
+        return ServiceMetricTrendSeriesResponse(
+            queryStatus="ok",
+            queryMessage=None,
+            querySource=source,
+            latestValue=latest_value,
+            pointCount=len(serialized_points),
+            points=serialized_points,
+        )
+
+    return ServiceMetricTrendSeriesResponse(
+        queryStatus="no_data",
+        queryMessage="Prometheus returned no retained samples for this metric and time window.",
+        querySource=None,
+        latestValue=None,
+        pointCount=0,
+        points=[],
+    )
+
+
 def _build_health_timeline_queries(*, namespace: str, app_label: str, config) -> dict[str, str]:
     deployment_name = app_label
     values = {
@@ -3592,6 +3682,86 @@ def get_service_metrics_summary(
         key=("metrics-summary", service_id, safe_range),
         ttl_seconds=config.metrics_cache_ttl_seconds,
         loader=_load_summary,
+    )
+
+
+@app.get(
+    "/services/{service_id}/metrics/trends",
+    response_model=ServiceMetricsTrendsResponse,
+    tags=["monitoring"],
+)
+def get_service_metrics_trends(
+    service_id: str,
+    selected_range: str = Query(
+        default="24h",
+        alias="range",
+        pattern="^([1-9][0-9]*)(m|h|d)$",
+    ),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> ServiceMetricsTrendsResponse:
+    config = load_observability_config()
+    safe_range = _validate_selected_range(
+        selected_range=selected_range,
+        allowed_ranges=config.metrics_allowed_ranges,
+        field_name="range",
+    )
+    namespace, app_label = _resolve_service_monitoring_metadata(service_id)
+
+    def _load_trends() -> ServiceMetricsTrendsResponse:
+        now = datetime.now(tz=timezone.utc)
+        durations = {
+            "1h": timedelta(hours=1),
+            "24h": timedelta(hours=24),
+            "7d": timedelta(days=7),
+        }
+        window_start = now - durations[safe_range]
+        step_seconds = _select_timeline_step_seconds(now - window_start, config)
+        correlation_id = str(uuid4())
+        queries = _build_service_metrics_queries(
+            namespace=namespace,
+            app_label=app_label,
+            selected_range=safe_range,
+            config=config,
+        )
+
+        return ServiceMetricsTrendsResponse(
+            serviceId=service_id,
+            range=safe_range,
+            windowStart=window_start.isoformat(),
+            windowEnd=now.isoformat(),
+            generatedAt=now.isoformat(),
+            providerStatus=MonitoringProviderStatusResponse(
+                **build_provider_status(
+                    provider="prometheus",
+                    base_url=get_prometheus_base_url(),
+                    status_value="healthy",
+                    reachable=True,
+                    checked_at=now.isoformat(),
+                    correlation_id=correlation_id,
+                )
+            ),
+            p95LatencyMs=_build_metric_trend_series(
+                field_name="p95LatencyMs",
+                query_candidates=queries["p95LatencyMs"],
+                start=window_start,
+                end=now,
+                step_seconds=step_seconds,
+                correlation_id=correlation_id,
+            ),
+            errorRatePct=_build_metric_trend_series(
+                field_name="errorRatePct",
+                query_candidates=queries["errorRatePct"],
+                start=window_start,
+                end=now,
+                step_seconds=step_seconds,
+                correlation_id=correlation_id,
+            ),
+        )
+
+    return metrics_summary_cache.get_or_set(
+        key=("metrics-trends", service_id, safe_range),
+        ttl_seconds=config.metrics_cache_ttl_seconds,
+        loader=_load_trends,
     )
 
 
