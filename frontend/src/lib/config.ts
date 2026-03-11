@@ -199,13 +199,13 @@ export const config = {
   argoAppPathTemplate: env.VITE_ARGO_APP_PATH_TEMPLATE ?? '/applications/{argoAppName}',
   grafanaDashboardPathTemplate:
     env.VITE_GRAFANA_DASHBOARD_PATH_TEMPLATE ??
-    '/d/service-overview?var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&from=now-{timeRange}&to=now',
+    '/d/portal-service-embeds/portal-service-embeds?var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&var-argoApp={argoAppName}&from=now-{timeRange}&to=now',
   grafanaLatencyPanelPathTemplate:
     env.VITE_GRAFANA_LATENCY_PANEL_PATH_TEMPLATE ??
-    '/d-solo/service-overview/service-overview?panelId=2&var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&from=now-{timeRange}&to=now',
+    '/d-solo/portal-service-embeds/portal-service-embeds?panelId=2&var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&var-argoApp={argoAppName}&from=now-{timeRange}&to=now',
   grafanaErrorPanelPathTemplate:
     env.VITE_GRAFANA_ERROR_PANEL_PATH_TEMPLATE ??
-    '/d-solo/service-overview/service-overview?panelId=3&var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&from=now-{timeRange}&to=now',
+    '/d-solo/portal-service-embeds/portal-service-embeds?panelId=3&var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&var-argoApp={argoAppName}&from=now-{timeRange}&to=now',
   lokiLogsPathTemplate:
     env.VITE_LOKI_LOGS_PATH_TEMPLATE ??
     '/explore?var-service={serviceId}&var-namespace={{namespace}}&var-app={{app_label}}&var-env={environment}&var-argoApp={argoAppName}&from=now-{{time_range}}&to=now',

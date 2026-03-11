@@ -52,9 +52,9 @@ Frontend runtime config (see `src/lib/config.ts`):
 - `VITE_ARGO_BASE_URL` (default: inferred on `*.homelab.local` / `*.wlodzimierrr.co.uk`, otherwise empty)
 - `VITE_GRAFANA_BASE_URL` (default: inferred on `*.homelab.local` / `*.wlodzimierrr.co.uk`, otherwise empty)
 - `VITE_ARGO_APP_PATH_TEMPLATE` (default: `/applications/{argoAppName}`)
-- `VITE_GRAFANA_DASHBOARD_PATH_TEMPLATE` (default: `/d/service-overview?var-service={serviceId}`)
-- `VITE_GRAFANA_LATENCY_PANEL_PATH_TEMPLATE` (default: `/d-solo/service-overview/service-overview?panelId=2&var-service={serviceId}&from=now-{timeRange}&to=now`)
-- `VITE_GRAFANA_ERROR_PANEL_PATH_TEMPLATE` (default: `/d-solo/service-overview/service-overview?panelId=3&var-service={serviceId}&from=now-{timeRange}&to=now`)
+- `VITE_GRAFANA_DASHBOARD_PATH_TEMPLATE` (default: `/d/portal-service-embeds/portal-service-embeds?var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&var-argoApp={argoAppName}&from=now-{timeRange}&to=now`)
+- `VITE_GRAFANA_LATENCY_PANEL_PATH_TEMPLATE` (default: `/d-solo/portal-service-embeds/portal-service-embeds?panelId=2&var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&var-argoApp={argoAppName}&from=now-{timeRange}&to=now`)
+- `VITE_GRAFANA_ERROR_PANEL_PATH_TEMPLATE` (default: `/d-solo/portal-service-embeds/portal-service-embeds?panelId=3&var-service={serviceId}&var-namespace={namespace}&var-app={appLabel}&var-env={environment}&var-argoApp={argoAppName}&from=now-{timeRange}&to=now`)
 - `VITE_LOKI_LOGS_PATH_TEMPLATE` (default: `/explore?var-namespace={{namespace}}&var-app={{app_label}}&from=now-{{time_range}}&to=now`)
 
 ### Runtime config examples
@@ -82,7 +82,7 @@ Notes:
 - If `VITE_ARGO_BASE_URL` or `VITE_GRAFANA_BASE_URL` remains empty after inference, related external links are unavailable.
 - Logs templates support both `{var}` and `{{var}}` placeholders, including `{{namespace}}`, `{{app_label}}`, `{{time_range}}`, and optional `{{preset}}`/`{{query}}`.
 - Argo app templates support `serviceId` and `argoAppName` placeholders.
-- Grafana dashboard/panel templates support `serviceId`, `namespace`, `environment`, and `timeRange` placeholders.
+- Grafana dashboard/panel templates support `serviceId`, `namespace`, `environment`, `appLabel`, `argoAppName`, and `timeRange` placeholders.
 - In development mode, missing/unresolved template variables emit `[monitoring-url]` console warnings and fall back to safe links.
 
 ### Services registry fallback (MVP)
