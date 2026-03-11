@@ -102,6 +102,8 @@ type MonitoringPanelState =
   | 'provider_error'
   | 'no_data'
 
+type ConsoleLogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'unknown'
+
 function normalizeHealthStatus(value?: string): HealthStatus {
   if (!value) {
     return 'unknown'
@@ -141,6 +143,22 @@ function formatDate(value?: string) {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: 'medium',
     timeStyle: 'short',
+  }).format(parsed)
+}
+
+function formatConsoleTimestamp(value?: string) {
+  if (!value) {
+    return '--:--:--'
+  }
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return '--:--:--'
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
   }).format(parsed)
 }
 
@@ -363,6 +381,86 @@ function formatLogsLinkUnavailable(reason: string | null) {
   return reason ?? 'Unavailable because the Grafana/Loki URL template could not be resolved for this service.'
 }
 
+function detectConsoleLogLevel(message: string): ConsoleLogLevel {
+  const normalized = message.toLowerCase()
+  if (normalized.includes('error') || normalized.includes('exception') || normalized.includes('fatal')) {
+    return 'error'
+  }
+  if (normalized.includes('warn')) {
+    return 'warn'
+  }
+  if (normalized.includes('info')) {
+    return 'info'
+  }
+  if (normalized.includes('debug')) {
+    return 'debug'
+  }
+  if (normalized.includes('trace')) {
+    return 'trace'
+  }
+  return 'unknown'
+}
+
+function getConsoleLogTone(level: ConsoleLogLevel) {
+  switch (level) {
+    case 'error':
+      return {
+        row: 'border-rose-950/70 bg-rose-950/45',
+        text: 'text-rose-300',
+        badge: 'bg-rose-500/20 text-rose-200',
+      }
+    case 'warn':
+      return {
+        row: 'border-amber-950/70 bg-amber-950/35',
+        text: 'text-amber-300',
+        badge: 'bg-amber-500/20 text-amber-200',
+      }
+    case 'info':
+      return {
+        row: 'border-sky-950/60 bg-sky-950/25',
+        text: 'text-sky-300',
+        badge: 'bg-sky-500/20 text-sky-200',
+      }
+    case 'debug':
+      return {
+        row: 'border-emerald-950/60 bg-emerald-950/20',
+        text: 'text-emerald-300',
+        badge: 'bg-emerald-500/20 text-emerald-200',
+      }
+    case 'trace':
+      return {
+        row: 'border-violet-950/60 bg-violet-950/20',
+        text: 'text-violet-300',
+        badge: 'bg-violet-500/20 text-violet-200',
+      }
+    default:
+      return {
+        row: 'border-zinc-900 bg-zinc-950/50',
+        text: 'text-zinc-100',
+        badge: 'bg-zinc-800 text-zinc-300',
+      }
+  }
+}
+
+function formatConsoleLogSource(labels: Record<string, string>, identity: ServiceIdentity) {
+  const pod = labels.pod || labels.pod_name
+  const container = labels.container || labels.container_name
+  const app = labels.app || labels.app_kubernetes_io_name || identity.appLabel
+  if (pod && container) {
+    return `[${pod}/${container}]`
+  }
+  if (pod) {
+    return `[${pod}]`
+  }
+  if (container) {
+    return `[${container}]`
+  }
+  if (app) {
+    return `[${app}]`
+  }
+  return '[service]'
+}
+
 function normalizeProviderPanelState(
   providerStatus?: MonitoringProviderStatus,
   errorMessage?: string,
@@ -540,6 +638,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [logsDrawerOpen, setLogsDrawerOpen] = useState(false)
   const [activeLogsPreset, setActiveLogsPreset] = useState<LogsQuickViewPreset>('errors')
   const [logsRange, setLogsRange] = useState<LogsQuickViewRange>('1h')
+  const [logsSearch, setLogsSearch] = useState('')
   const [logsResult, setLogsResult] = useState<ServiceLogsQuickView | null>(null)
   const [logsLoading, setLogsLoading] = useState(false)
   const [logsError, setLogsError] = useState('')
@@ -799,6 +898,24 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     [activeLogsPreset, presetLinks],
   )
   const logsUrl = activePreset?.link.href ?? ''
+  const consoleTimezone = useMemo(() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local time'
+    } catch {
+      return 'Local time'
+    }
+  }, [])
+  const filteredConsoleLines = useMemo(() => {
+    const lines = logsResult?.lines ?? []
+    const query = logsSearch.trim().toLowerCase()
+    if (!query) {
+      return lines
+    }
+    return lines.filter((line) => {
+      const labelText = Object.values(line.labels).join(' ').toLowerCase()
+      return line.message.toLowerCase().includes(query) || labelText.includes(query)
+    })
+  }, [logsResult?.lines, logsSearch])
   const metricsAllNoData = useMemo(
     () =>
       metrics.noData.uptimePct &&
@@ -1001,28 +1118,64 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               </div>
               {!logsLoading ? <MonitoringPanelNotice provider="Loki" state={logsPanelState} /> : null}
               <div className="rounded-md border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-sm">
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
-                  <div className="flex flex-wrap gap-2">
+                <div className="grid gap-2 border-b border-zinc-800 px-4 py-3 xl:grid-cols-[160px_minmax(0,1fr)_160px_auto_auto]">
+                  <select
+                    value={activeLogsPreset}
+                    onChange={(event) => setActiveLogsPreset(event.target.value as LogsQuickViewPreset)}
+                    className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                  >
                     {presetLinks.map((preset) => (
-                      <Button
-                        key={preset.id}
-                        type="button"
-                        size="sm"
-                        variant={activeLogsPreset === preset.id ? 'default' : 'outline'}
-                        onClick={() => setActiveLogsPreset(preset.id)}
-                        className={activeLogsPreset === preset.id ? '' : 'border-zinc-700 text-zinc-100 hover:bg-zinc-800'}
-                      >
+                      <option key={preset.id} value={preset.id}>
                         {preset.label}
-                      </Button>
+                      </option>
                     ))}
+                  </select>
+                  <input
+                    value={logsSearch}
+                    onChange={(event) => setLogsSearch(event.target.value)}
+                    placeholder="Search current console lines"
+                    className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500"
+                  />
+                  <select
+                    value={logsRange}
+                    onChange={(event) => setLogsRange(event.target.value as LogsQuickViewRange)}
+                    className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+                  >
+                    {logsRangeOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        Last {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="flex items-center justify-center rounded-md border border-zinc-700 px-3 py-2 text-xs text-zinc-300">
+                    {consoleTimezone}
                   </div>
-                  <div className="text-right text-[11px] text-zinc-400">
-                    <p>{serviceIdentity.namespace}/{serviceIdentity.appLabel}</p>
-                    <p>{serviceIdentity.env}</p>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="border-zinc-700 text-zinc-100 hover:bg-zinc-800"
+                      onClick={() => void loadQuickViewLogs()}
+                    >
+                      Refresh
+                    </Button>
+                    {activePreset?.link.href ? (
+                      <Button asChild size="sm" variant="outline" className="border-zinc-700 text-zinc-100 hover:bg-zinc-800">
+                        <a href={activePreset.link.href} target="_blank" rel="noreferrer">
+                          Open full logs
+                        </a>
+                      </Button>
+                    ) : (
+                      <Button type="button" size="sm" variant="outline" className="border-zinc-700 text-zinc-100" disabled>
+                        Open full logs
+                      </Button>
+                    )}
                   </div>
                 </div>
                 <div className="border-b border-zinc-800 px-4 py-2 font-mono text-[11px] text-zinc-400">
-                  $ preset={activePreset?.id ?? activeLogsPreset} range={logsRange} source=loki
+                  $ scope={serviceIdentity.namespace}/{serviceIdentity.appLabel} env={serviceIdentity.env} preset=
+                  {activePreset?.id ?? activeLogsPreset} range={logsRange} provider=loki
                 </div>
                 {!activePreset?.link.href ? (
                   <div className="border-b border-zinc-800 px-4 py-3 text-xs text-zinc-400">
@@ -1051,27 +1204,51 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                   </div>
                 ) : null}
                 {!logsLoading && !logsError ? (
-                  <div className="max-h-80 overflow-y-auto px-4 py-4 font-mono text-xs">
-                    {(logsResult?.lines.length ?? 0) === 0 ? (
-                      <p className="text-zinc-400">[no_data] No logs found for this preset and range.</p>
+                  <div className="max-h-[28rem] overflow-y-auto font-mono text-xs">
+                    {filteredConsoleLines.length === 0 ? (
+                      <div className="px-4 py-6 text-zinc-400">
+                        <p>[no_data] No logs found for this preset, range, and search.</p>
+                      </div>
                     ) : (
-                      <div className="space-y-3">
-                        {logsResult?.lines.map((line) => (
-                          <article
-                            key={`${line.timestamp}-${line.message.slice(0, 40)}`}
-                            className="rounded border border-zinc-800 bg-zinc-900/70 p-3"
-                          >
-                            <p className="text-[11px] text-zinc-400">{formatDate(line.timestamp)}</p>
-                            <p className="mt-1 break-words whitespace-pre-wrap text-zinc-100">{line.message}</p>
-                          </article>
-                        ))}
+                      <div className="divide-y divide-zinc-900/80">
+                        {filteredConsoleLines.map((line) => {
+                          const level = detectConsoleLogLevel(line.message)
+                          const tone = getConsoleLogTone(level)
+                          const source = formatConsoleLogSource(line.labels, serviceIdentity)
+                          const segments = line.message.split('\n').filter((segment) => segment.trim().length > 0)
+                          const [head, ...rest] = segments.length > 0 ? segments : [line.message]
+
+                          return (
+                            <article
+                              key={`${line.timestamp}-${line.message.slice(0, 40)}`}
+                              className={`border-l-2 px-4 py-2 ${tone.row} ${tone.text}`}
+                            >
+                              <div className="grid gap-x-3 gap-y-1 md:grid-cols-[92px_150px_74px_minmax(0,1fr)]">
+                                <span className="text-zinc-400">{formatConsoleTimestamp(line.timestamp)}</span>
+                                <span className="text-zinc-500">{source}</span>
+                                <span className={`inline-flex w-fit items-center rounded px-2 py-0.5 text-[10px] uppercase tracking-wide ${tone.badge}`}>
+                                  {level}
+                                </span>
+                                <span className="break-words whitespace-pre-wrap">{head}</span>
+                                {rest.map((segment, index) => (
+                                  <div key={index} className="contents">
+                                    <span />
+                                    <span />
+                                    <span />
+                                    <span className="break-words whitespace-pre-wrap text-zinc-300">{segment}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </article>
+                          )
+                        })}
                       </div>
                     )}
                   </div>
                 ) : null}
                 <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 px-4 py-3 text-[11px] text-zinc-400">
                   <p>
-                    Returned {logsResult?.returned ?? 0} line(s)
+                    Showing {filteredConsoleLines.length} of {logsResult?.returned ?? 0} line(s)
                     {logsResult?.moreAvailable ? '; more logs are available.' : '.'}
                   </p>
                   <p>Last refreshed: {formatDate(logsResult?.generatedAt)}</p>
