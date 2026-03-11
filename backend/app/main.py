@@ -968,7 +968,7 @@ def _load_project_catalog_rows(
             "env": row[2],
             "namespace": row[3],
             "app_label": row[4],
-            "source_ref": row[5],
+            "source_ref": row[5] if len(row) > 5 else None,
         }
         for row in rows
     ]

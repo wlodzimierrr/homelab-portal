@@ -38,6 +38,11 @@ def _utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
+def _normalize_service_id(value: str) -> str:
+    # Backward-compatible shim for existing tests and callers.
+    return normalize_service_id(value)
+
+
 def _parse_csv_env(var_name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
     raw = os.getenv(var_name, "")
     values = [part.strip() for part in raw.split(",") if part.strip()]
