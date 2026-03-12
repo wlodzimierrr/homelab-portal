@@ -1352,7 +1352,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 <div>
                   <h2 className="text-sm font-semibold">Logs Console</h2>
                   <p className="text-xs text-muted-foreground">
-                    Live Loki quick-view lines scoped to this service. Full logs still open in Grafana/Loki.
+                    Live Loki quick-view lines scoped to this service. Full logs still open in Grafana or Loki.
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
