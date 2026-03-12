@@ -22,6 +22,7 @@ from app.lib.git_service import (
     create_branch,
     modify_file,
     open_pr,
+    read_file,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "create_branch",
     "modify_file",
     "open_pr",
+    "read_file",
 ]

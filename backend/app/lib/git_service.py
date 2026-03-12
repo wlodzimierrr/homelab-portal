@@ -53,6 +53,9 @@ class GitCommitResult(TypedDict):
 class GitProvider(Protocol):
     """Provider-agnostic contract for writing managed Git changes."""
 
+    def read_file(self, repo: str, branch: str, file_path: str) -> str:
+        """Read a tracked file from a branch and return its decoded text content."""
+
     def create_branch(self, repo: str, from_branch: str, new_branch: str) -> GitBranchRef:
         """Create a new branch from an existing branch tip."""
 
@@ -166,6 +169,21 @@ class GitHubGitProvider:
         }
         response = self._request_json("POST", f"/repos/{repo}/git/refs", payload=payload)
         return self._coerce_branch_ref(response, fallback_branch=new_branch)
+
+    def read_file(self, repo: str, branch: str, file_path: str) -> str:
+        """Read a tracked file from a branch and return its decoded text content."""
+
+        if self._dry_run:
+            self._log_dry_run(
+                "read_file",
+                repo=repo,
+                branch=branch,
+                file_path=file_path,
+            )
+            return ""
+
+        current_file = self._get_file(repo, branch, file_path)
+        return current_file["content"]
 
     def modify_file(self, repo: str, branch: str, file_path: str, new_content: str) -> GitFileUpdateResult:
         """Replace one tracked file on a branch and return the unified diff."""
@@ -487,6 +505,12 @@ def create_branch(repo: str, from_branch: str, new_branch: str) -> GitBranchRef:
     """Create a branch using the default configured Git service."""
 
     return build_default_git_provider().create_branch(repo, from_branch, new_branch)
+
+
+def read_file(repo: str, branch: str, file_path: str) -> str:
+    """Read a tracked file using the default configured Git service."""
+
+    return build_default_git_provider().read_file(repo, branch, file_path)
 
 
 def modify_file(repo: str, branch: str, file_path: str, new_content: str) -> GitFileUpdateResult:

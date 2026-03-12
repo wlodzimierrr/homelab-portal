@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 import logging
 import math
@@ -7,7 +8,9 @@ from threading import Event, Thread
 import time
 from typing import Any, Literal
 from uuid import uuid4
+from urllib import error as urlerror
 from urllib import parse as urlparse
+from urllib import request as urlrequest
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
@@ -65,6 +68,14 @@ from app.github_workflows import (
     GitHubWorkflowDispatchError,
     dispatch_portal_rollback_workflow,
 )
+from app.lib import (
+    GitProvider,
+    GitServiceAuthError,
+    GitServiceConfigurationError,
+    GitServiceConflictError,
+    GitServiceError,
+    build_default_git_provider,
+)
 from app.release_traceability import (
     build_release_join_diagnostics,
     build_release_traceability_rows,
@@ -111,6 +122,33 @@ http_request_duration_seconds = Histogram(
     "HTTP request latency for the homelab API.",
     labelnames=("namespace", "app", "method", "path"),
 )
+
+DEFAULT_GITHUB_OWNER = "wlodzimierrr"
+DEFAULT_PORTAL_REPO = "homelab-portal"
+DEFAULT_WORKLOADS_REPO = "homelab-workloads"
+DEFAULT_PORTAL_IMAGES_WORKFLOW_FILE = "portal-images.yml"
+DEFAULT_PORTAL_IMAGES_WORKFLOW_REF = "main"
+DEFAULT_PORTAL_IMAGES_LOOKBACK = 20
+SHA_IMAGE_TAG_RE = re.compile(r"^sha-([0-9a-f]{40})$")
+BRANCH_SAFE_FRAGMENT_RE = re.compile(r"[^a-z0-9.-]+")
+DEV_DEPLOY_TARGETS: dict[str, dict[str, object]] = {
+    "homelab-api": {
+        "image_repo": "ghcr.io/wlodzimierrr/homelab-api",
+        "argo_app": "homelab-api-dev",
+        "patch_files": [
+            "apps/homelab-api/envs/dev/patch-deployment.yaml",
+            "apps/homelab-api/envs/dev/patch-migration-job.yaml",
+            "apps/homelab-api/envs/dev/patch-catalog-sync-cronjob.yaml",
+        ],
+    },
+    "homelab-web": {
+        "image_repo": "ghcr.io/wlodzimierrr/homelab-web",
+        "argo_app": "homelab-web-dev",
+        "patch_files": [
+            "apps/homelab-web/envs/dev/patch-deployment.yaml",
+        ],
+    },
+}
 
 
 def clear_observability_caches_for_tests() -> None:
@@ -439,6 +477,51 @@ class PortalRollbackResponse(BaseModel):
     workflow_file: str = Field(alias="workflowFile")
     workflow_ref: str = Field(alias="workflowRef")
     workflow_url: str = Field(alias="workflowUrl")
+    initiated_at: str = Field(alias="initiatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class PortalDeployToDevError(Exception):
+    def __init__(self, message: str, *, status_code: int = status.HTTP_502_BAD_GATEWAY):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PortalDeployToDevRequest(BaseModel):
+    deploy_reason: str = Field(..., alias="deployReason", min_length=5, max_length=500)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("deploy_reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 5:
+            raise ValueError("deployReason must be at least 5 characters long")
+        return normalized
+
+
+class PortalDeployToDevResponse(BaseModel):
+    status: Literal["accepted", "noop"]
+    action: Literal["deploy"]
+    service_id: str = Field(alias="serviceId")
+    target_environment: str = Field(alias="targetEnvironment")
+    requested_by: str = Field(alias="requestedBy")
+    repository: str
+    base_branch: str = Field(alias="baseBranch")
+    branch_name: str | None = Field(default=None, alias="branchName")
+    deployment_id: str | None = Field(default=None, alias="deploymentId")
+    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
+    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
+    previous_tag: str | None = Field(default=None, alias="previousTag")
+    new_tag: str | None = Field(default=None, alias="newTag")
+    previous_image_ref: str | None = Field(default=None, alias="previousImageRef")
+    new_image_ref: str | None = Field(default=None, alias="newImageRef")
+    compare_url: str | None = Field(default=None, alias="compareUrl")
+    source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
+    source_workflow_run_url: str | None = Field(default=None, alias="sourceWorkflowRunUrl")
+    message: str | None = None
     initiated_at: str = Field(alias="initiatedAt")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -1384,6 +1467,290 @@ def _extract_version_from_image_ref(image_ref: str | None) -> str | None:
     if last_colon > last_slash:
         return trimmed[last_colon + 1 :] or trimmed
     return trimmed
+
+
+def _portal_repo_slug() -> str:
+    configured = os.getenv("PORTAL_DEPLOY_PORTAL_REPO", "").strip()
+    if configured:
+        return configured
+    actions_repo = os.getenv("PORTAL_GITHUB_ACTIONS_REPO", "").strip()
+    if actions_repo:
+        return actions_repo
+    return f"{DEFAULT_GITHUB_OWNER}/{DEFAULT_PORTAL_REPO}"
+
+
+def _workloads_repo_slug() -> str:
+    configured = os.getenv("PORTAL_DEPLOY_GITOPS_REPO", "").strip()
+    if configured:
+        return configured
+    reconciler_repo = os.getenv("DEPLOYMENT_RECONCILER_GITOPS_REPO", "").strip()
+    if reconciler_repo:
+        owner = os.getenv("DEPLOYMENT_RECONCILER_GITHUB_OWNER", DEFAULT_GITHUB_OWNER).strip() or DEFAULT_GITHUB_OWNER
+        return f"{owner}/{reconciler_repo}"
+    return f"{DEFAULT_GITHUB_OWNER}/{DEFAULT_WORKLOADS_REPO}"
+
+
+def _workloads_base_branch() -> str:
+    configured = os.getenv("PORTAL_DEPLOY_GITOPS_BASE_BRANCH", "").strip()
+    return configured or DEFAULT_PORTAL_IMAGES_WORKFLOW_REF
+
+
+def _portal_images_workflow_file() -> str:
+    configured = os.getenv("PORTAL_DEPLOY_WORKFLOW_FILE", "").strip()
+    return configured or DEFAULT_PORTAL_IMAGES_WORKFLOW_FILE
+
+
+def _portal_images_workflow_ref() -> str:
+    configured = os.getenv("PORTAL_DEPLOY_WORKFLOW_REF", "").strip()
+    return configured or DEFAULT_PORTAL_IMAGES_WORKFLOW_REF
+
+
+def _github_metadata_token() -> str | None:
+    for name in (
+        "PORTAL_GITHUB_ACTIONS_TOKEN",
+        "GITHUB_API_TOKEN",
+        "GITHUB_READ_TOKEN",
+        "GITHUB_TOKEN",
+    ):
+        token = os.getenv(name, "").strip()
+        if token:
+            return token
+    return None
+
+
+def _github_api_base_url() -> str:
+    return os.getenv("GITHUB_API_BASE_URL", "https://api.github.com").rstrip("/")
+
+
+def _github_api_json(path: str, *, timeout_seconds: float = 10.0) -> object:
+    request = urlrequest.Request(
+        f"{_github_api_base_url()}/{path.lstrip('/')}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "homelab-portal-backend",
+        },
+    )
+    token = _github_metadata_token()
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urlrequest.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read()
+    except urlerror.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace").strip()
+        message = body or exc.reason or "GitHub API request failed"
+        raise PortalDeployToDevError(message, status_code=status.HTTP_502_BAD_GATEWAY) from exc
+    except urlerror.URLError as exc:
+        raise PortalDeployToDevError(
+            f"GitHub API request failed: {exc.reason}",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        ) from exc
+
+    if not raw:
+        return {}
+    return json.loads(raw)
+
+
+def _dev_deploy_target(service_id: str) -> dict[str, object]:
+    target = DEV_DEPLOY_TARGETS.get(service_id)
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Service {service_id!r} does not support deploy-to-dev.",
+        )
+    return target
+
+
+def _build_service_image_ref(service_id: str, tag: str) -> str:
+    target = _dev_deploy_target(service_id)
+    image_repo = str(target["image_repo"])
+    return f"{image_repo}:{tag}"
+
+
+def _extract_sha_from_tag(tag: str | None) -> str | None:
+    if not isinstance(tag, str):
+        return None
+    match = SHA_IMAGE_TAG_RE.fullmatch(tag.strip())
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _build_compare_url_for_portal_tags(previous_tag: str | None, new_tag: str | None) -> str | None:
+    previous_sha = _extract_sha_from_tag(previous_tag)
+    new_sha = _extract_sha_from_tag(new_tag)
+    if not previous_sha or not new_sha or previous_sha == new_sha:
+        return None
+    return f"https://github.com/{_portal_repo_slug()}/compare/{previous_sha}...{new_sha}"
+
+
+def _safe_branch_fragment(value: str) -> str:
+    normalized = BRANCH_SAFE_FRAGMENT_RE.sub("-", value.strip().lower()).strip(".-")
+    return normalized or "deploy"
+
+
+def _build_dev_deploy_branch_name(service_id: str, tag: str, requested_at: datetime) -> str:
+    tag_fragment = tag
+    if tag.startswith("sha-") and len(tag) > 20:
+        tag_fragment = f"sha-{tag[4:16]}"
+    return (
+        f"automation/dev-deploy-{service_id}-"
+        f"{_safe_branch_fragment(tag_fragment)}-"
+        f"{requested_at.strftime('%Y%m%d%H%M%S')}"
+    )
+
+
+def _extract_image_ref_from_overlay(
+    content: str,
+    *,
+    image_repo: str,
+    file_path: str,
+) -> str:
+    pattern = re.compile(rf"(?m)^\s*image:\s*({re.escape(image_repo)}:[^\s#]+)")
+    match = pattern.search(content)
+    if match is None:
+        raise PortalDeployToDevError(
+            f"GitOps overlay file {file_path} does not contain an image ref for {image_repo}.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    return match.group(1)
+
+
+def _replace_image_ref_in_overlay(
+    content: str,
+    *,
+    image_repo: str,
+    new_image_ref: str,
+    file_path: str,
+) -> str:
+    pattern = re.compile(rf"(?m)^(\s*image:\s*){re.escape(image_repo)}:[^\s#]+(\s*(?:#.*)?)$")
+
+    def _replace(match: re.Match[str]) -> str:
+        trailing = match.group(2) or ""
+        return f"{match.group(1)}{new_image_ref}{trailing}"
+
+    updated, count = pattern.subn(_replace, content)
+    if count == 0:
+        raise PortalDeployToDevError(
+            f"GitOps overlay file {file_path} does not contain a replaceable image ref for {image_repo}.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    return updated
+
+
+def _resolve_latest_portal_image_candidate(service_id: str) -> dict[str, object]:
+    repo_slug = _portal_repo_slug()
+    workflow_file = _portal_images_workflow_file()
+    branch = _portal_images_workflow_ref()
+    payload = _github_api_json(
+        f"repos/{repo_slug}/actions/workflows/{workflow_file}/runs"
+        f"?branch={urlparse.quote(branch)}&event=push&status=completed&per_page={DEFAULT_PORTAL_IMAGES_LOOKBACK}"
+    )
+    workflow_runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+    if not isinstance(workflow_runs, list):
+        raise PortalDeployToDevError(
+            "GitHub Actions did not return workflow run data for portal-images.yml.",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    for run in workflow_runs:
+        if not isinstance(run, dict):
+            continue
+        if str(run.get("conclusion") or "").strip().lower() != "success":
+            continue
+        head_sha = run.get("head_sha")
+        if not isinstance(head_sha, str) or len(head_sha.strip()) != 40:
+            continue
+        normalized_sha = head_sha.strip()
+        tag = f"sha-{normalized_sha}"
+        return {
+            "tag": tag,
+            "imageRef": _build_service_image_ref(service_id, tag),
+            "sourceCommitSha": normalized_sha,
+            "workflowRunId": run.get("id") if isinstance(run.get("id"), int) else None,
+            "workflowRunUrl": run.get("html_url") if isinstance(run.get("html_url"), str) else None,
+        }
+
+    raise PortalDeployToDevError(
+        "No successful portal-images workflow run was found on the portal repository main branch.",
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
+def _load_dev_overlay_update_plan(
+    git_provider: GitProvider,
+    *,
+    service_id: str,
+    repo_slug: str,
+    branch: str,
+    new_image_ref: str,
+) -> tuple[str, str | None, dict[str, str]]:
+    target = _dev_deploy_target(service_id)
+    image_repo = str(target["image_repo"])
+    patch_files = [str(path) for path in target["patch_files"]]
+    previous_image_ref: str | None = None
+    updated_files: dict[str, str] = {}
+
+    for file_path in patch_files:
+        current_content = git_provider.read_file(repo_slug, branch, file_path)
+        file_image_ref = _extract_image_ref_from_overlay(
+            current_content,
+            image_repo=image_repo,
+            file_path=file_path,
+        )
+        if previous_image_ref is None:
+            previous_image_ref = file_image_ref
+        elif previous_image_ref != file_image_ref:
+            raise PortalDeployToDevError(
+                f"GitOps dev overlay for {service_id} is inconsistent across image patch files.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        updated_files[file_path] = _replace_image_ref_in_overlay(
+            current_content,
+            image_repo=image_repo,
+            new_image_ref=new_image_ref,
+            file_path=file_path,
+        )
+
+    return image_repo, previous_image_ref, updated_files
+
+
+def _build_dev_deploy_pr_body(
+    *,
+    service_id: str,
+    requested_by: str,
+    deploy_reason: str,
+    previous_tag: str | None,
+    new_tag: str,
+    new_image_ref: str,
+    compare_url: str | None,
+    source_commit_sha: str | None,
+    workflow_run_url: str | None,
+) -> str:
+    lines = [
+        "Portal-requested dev deploy.",
+        "",
+        f"- Service: `{service_id}`",
+        "- Environment: `dev`",
+        f"- Requested by: `{requested_by}`",
+        f"- Reason: {deploy_reason}",
+        f"- Previous tag: `{previous_tag or 'unknown'}`",
+        f"- Target tag: `{new_tag}`",
+        f"- Target image: `{new_image_ref}`",
+    ]
+    if compare_url:
+        lines.append(f"- Compare: {compare_url}")
+    if source_commit_sha:
+        lines.append(f"- Source commit: `{source_commit_sha}`")
+    if workflow_run_url:
+        lines.append(f"- Source workflow run: {workflow_run_url}")
+    lines.extend(
+        [
+            "",
+            "This pull request updates only the dev overlay image reference(s) for the selected service.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _select_preferred_service_row(
@@ -3466,6 +3833,212 @@ def create_deployment_record(
     service_rows = _load_service_rows(service_id=payload.service_id, env=payload.env)
     selected = _select_preferred_service_row(payload.service_id, service_rows, payload.env)
     return _build_deployment_record_response(record, selected)
+
+
+@app.post(
+    "/services/{service_id}/deploy-to-dev",
+    response_model=PortalDeployToDevResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["metadata"],
+)
+def request_portal_deploy_to_dev(
+    service_id: str,
+    payload: PortalDeployToDevRequest,
+    response: Response,
+    identity: tuple[str, set[str]] = Depends(get_current_user),
+) -> PortalDeployToDevResponse:
+    requested_by, _groups = identity
+    target = _dev_deploy_target(service_id)
+    initiated_at = datetime.now(tz=timezone.utc)
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+
+    latest_candidate = _resolve_latest_portal_image_candidate(service_id)
+    new_tag = str(latest_candidate["tag"])
+    new_image_ref = str(latest_candidate["imageRef"])
+
+    try:
+        git_provider = build_default_git_provider()
+        _image_repo, previous_image_ref, updated_files = _load_dev_overlay_update_plan(
+            git_provider,
+            service_id=service_id,
+            repo_slug=workloads_repo,
+            branch=base_branch,
+            new_image_ref=new_image_ref,
+        )
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except PortalDeployToDevError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    previous_tag = _extract_version_from_image_ref(previous_image_ref)
+    compare_url = _build_compare_url_for_portal_tags(previous_tag, new_tag)
+    if previous_image_ref == new_image_ref:
+        response.status_code = status.HTTP_200_OK
+        return PortalDeployToDevResponse(
+            status="noop",
+            action="deploy",
+            serviceId=service_id,
+            targetEnvironment="dev",
+            requestedBy=requested_by,
+            repository=workloads_repo,
+            baseBranch=base_branch,
+            branchName=None,
+            deploymentId=None,
+            gitPrUrl=None,
+            gitPrNumber=None,
+            previousTag=previous_tag,
+            newTag=new_tag,
+            previousImageRef=previous_image_ref,
+            newImageRef=new_image_ref,
+            compareUrl=compare_url,
+            sourceCommitSha=latest_candidate.get("sourceCommitSha"),
+            sourceWorkflowRunUrl=latest_candidate.get("workflowRunUrl"),
+            message="Dev overlay already points at the latest deployable image tag.",
+            initiatedAt=initiated_at.isoformat(),
+        )
+
+    active_lock = _get_active_deployment_lock(service_id, "dev")
+    if active_lock is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    f"Active deployment lock already exists for {service_id}/dev. "
+                    "Wait for the in-flight mutation to finish or clear its stale lock."
+                ),
+                "activeLock": _build_deployment_lock_response(active_lock).model_dump(by_alias=True),
+            },
+        )
+
+    branch_name = _build_dev_deploy_branch_name(service_id, new_tag, initiated_at)
+    pr_title = f"Deploy {service_id}: {new_tag} to dev"
+    pr_body = _build_dev_deploy_pr_body(
+        service_id=service_id,
+        requested_by=requested_by,
+        deploy_reason=payload.deploy_reason,
+        previous_tag=previous_tag,
+        new_tag=new_tag,
+        new_image_ref=new_image_ref,
+        compare_url=compare_url,
+        source_commit_sha=latest_candidate.get("sourceCommitSha") if isinstance(latest_candidate.get("sourceCommitSha"), str) else None,
+        workflow_run_url=latest_candidate.get("workflowRunUrl") if isinstance(latest_candidate.get("workflowRunUrl"), str) else None,
+    )
+
+    try:
+        git_provider.create_branch(workloads_repo, base_branch, branch_name)
+        git_provider.commit_to_branch(
+            workloads_repo,
+            branch_name,
+            updated_files,
+            pr_title,
+        )
+        pr = git_provider.open_pr(
+            workloads_repo,
+            branch_name,
+            base_branch,
+            pr_title,
+            pr_body,
+        )
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    request_key = f"gitops-pr:{pr['number']}:{service_id}:dev:deploy"
+    record_payload = CreateDeploymentRecordRequest(
+        serviceId=service_id,
+        env="dev",
+        action="deploy",
+        status="pending",
+        requestedAt=initiated_at,
+        requestedBy=requested_by,
+        gitPrUrl=pr["url"],
+        gitPrNumber=pr["number"],
+        imageRef=new_image_ref,
+        previousImageRef=previous_image_ref,
+        argoApp=str(target["argo_app"]),
+        gitRef=branch_name,
+        deployReason=payload.deploy_reason,
+        compareUrl=compare_url,
+        requestKey=request_key,
+        metadata={
+            "source": "portal-deploy-to-dev",
+            "sourceCommitSha": latest_candidate.get("sourceCommitSha"),
+            "previousTag": previous_tag,
+            "newTag": new_tag,
+            "workflowRunId": latest_candidate.get("workflowRunId"),
+            "workflowRunUrl": latest_candidate.get("workflowRunUrl"),
+            "patchFiles": sorted(updated_files),
+        },
+    )
+
+    try:
+        record = _upsert_deployment_record_row(record_payload, requested_by=requested_by)
+    except DeploymentLockConflictError as exc:
+        try:
+            git_provider.close_pr(workloads_repo, pr["number"])
+        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
+            logger.warning(
+                "deploy_to_dev_failed_to_close_pr service_id=%s pr_number=%s error=%s",
+                service_id,
+                pr["number"],
+                close_exc,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    f"Active deployment lock already exists for {service_id}/dev. "
+                    "Wait for the in-flight mutation to finish or clear its stale lock."
+                ),
+                "activeLock": _build_deployment_lock_response(exc.active_lock).model_dump(by_alias=True),
+            },
+        ) from exc
+    except Exception:
+        try:
+            git_provider.close_pr(workloads_repo, pr["number"])
+        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
+            logger.warning(
+                "deploy_to_dev_failed_to_close_pr service_id=%s pr_number=%s error=%s",
+                service_id,
+                pr["number"],
+                close_exc,
+            )
+        raise
+
+    return PortalDeployToDevResponse(
+        status="accepted",
+        action="deploy",
+        serviceId=service_id,
+        targetEnvironment="dev",
+        requestedBy=requested_by,
+        repository=workloads_repo,
+        baseBranch=base_branch,
+        branchName=branch_name,
+        deploymentId=record.get("deploymentId") if isinstance(record.get("deploymentId"), str) else None,
+        gitPrUrl=pr["url"],
+        gitPrNumber=pr["number"],
+        previousTag=previous_tag,
+        newTag=new_tag,
+        previousImageRef=previous_image_ref,
+        newImageRef=new_image_ref,
+        compareUrl=compare_url,
+        sourceCommitSha=latest_candidate.get("sourceCommitSha"),
+        sourceWorkflowRunUrl=latest_candidate.get("workflowRunUrl"),
+        message=None,
+        initiatedAt=initiated_at.isoformat(),
+    )
 
 
 @app.post(

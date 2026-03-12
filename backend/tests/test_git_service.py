@@ -130,6 +130,25 @@ def test_modify_file_replaces_contents_and_returns_diff() -> None:
     }
 
 
+def test_read_file_returns_decoded_contents() -> None:
+    existing = base64.b64encode(b"replicas: 1\n").decode("ascii")
+
+    def _urlopen(request, timeout=0):
+        assert request.get_method() == "GET"
+        assert "ref=main" in request.full_url
+        return _MockResponse(
+            {
+                "sha": "file-sha-1",
+                "encoding": "base64",
+                "content": existing,
+            }
+        )
+
+    service = GitHubGitService(token="test-token", urlopen_func=_urlopen)
+
+    assert service.read_file("example/workloads", "main", "apps/demo/envs/dev/patch.yaml") == "replicas: 1\n"
+
+
 def test_open_pr_returns_minimal_object() -> None:
     def _urlopen(request, timeout=0):
         assert request.get_method() == "POST"

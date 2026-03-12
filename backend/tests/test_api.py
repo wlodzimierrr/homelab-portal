@@ -1932,6 +1932,280 @@ def test_create_deployment_record_endpoint_returns_record(monkeypatch) -> None:
     assert body["imageRef"] == "ghcr.io/example/homelab-api:sha-abc123"
 
 
+def test_request_portal_deploy_to_dev_endpoint_opens_pr_and_creates_record(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    current_sha = "a" * 40
+    next_sha = "b" * 40
+    current_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{current_sha}"
+    next_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{next_sha}"
+    files = {
+        "apps/homelab-api/envs/dev/patch-deployment.yaml": f"image: {current_image}\n",
+        "apps/homelab-api/envs/dev/patch-migration-job.yaml": f"image: {current_image}\n",
+        "apps/homelab-api/envs/dev/patch-catalog-sync-cronjob.yaml": f"image: {current_image}\n",
+    }
+
+    class _FakeGitProvider:
+        def create_branch(self, repo, from_branch, new_branch):
+            captured["create_branch"] = (repo, from_branch, new_branch)
+            return {"branch": new_branch, "ref": f"refs/heads/{new_branch}", "sha": "head", "url": None}
+
+        def read_file(self, repo, branch, file_path):
+            assert repo == "wlodzimierrr/homelab-workloads"
+            assert branch == "main"
+            return files[file_path]
+
+        def commit_to_branch(self, repo, branch, files_dict, message):
+            captured["commit"] = {
+                "repo": repo,
+                "branch": branch,
+                "files": files_dict,
+                "message": message,
+            }
+            return {"branch": branch, "commit_sha": "commit-sha", "tree_sha": "tree-sha", "files": sorted(files_dict)}
+
+        def open_pr(self, repo, from_branch, to_branch, title, description):
+            captured["pr"] = {
+                "repo": repo,
+                "from_branch": from_branch,
+                "to_branch": to_branch,
+                "title": title,
+                "description": description,
+            }
+            return {
+                "id": 60,
+                "number": 61,
+                "url": "https://github.com/example/homelab-workloads/pull/61",
+                "state": "open",
+            }
+
+        def close_pr(self, repo, pr_id):
+            captured["closed_pr"] = (repo, pr_id)
+            return {"id": pr_id, "number": pr_id, "url": f"https://github.com/example/homelab-workloads/pull/{pr_id}", "state": "closed"}
+
+    def _fake_upsert(payload, *, requested_by):
+        captured["record"] = {
+            "service_id": payload.service_id,
+            "env": payload.env,
+            "action": payload.action,
+            "status": payload.status,
+            "request_key": payload.request_key,
+            "target_image": payload.target_image,
+            "previous_image": payload.previous_image,
+            "compare_url": payload.compare_url,
+            "deploy_reason": payload.deploy_reason,
+            "metadata": payload.metadata,
+            "requested_by": requested_by,
+        }
+        return {
+            "deploymentId": "dep-456",
+            "serviceId": payload.service_id,
+            "env": payload.env,
+            "action": payload.action,
+            "status": payload.status,
+            "requestedAt": "2026-03-12T12:00:00Z",
+            "requestedBy": requested_by,
+            "prUrl": "https://github.com/example/homelab-workloads/pull/61",
+            "prNumber": 61,
+            "mergeSha": None,
+            "targetImage": payload.target_image,
+            "previousImage": payload.previous_image,
+            "argoApp": "homelab-api-dev",
+            "syncStatus": None,
+            "healthStatus": None,
+            "startedAt": None,
+            "finishedAt": None,
+            "deployWindowStart": None,
+            "deployWindowEnd": None,
+            "deployReason": payload.deploy_reason,
+            "compareUrl": payload.compare_url,
+            "gitRef": payload.git_ref,
+            "metadata": payload.metadata or {},
+        }
+
+    monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
+    monkeypatch.setattr(
+        "app.main._resolve_latest_portal_image_candidate",
+        lambda _service_id: {
+            "tag": f"sha-{next_sha}",
+            "imageRef": next_image,
+            "sourceCommitSha": next_sha,
+            "workflowRunId": 101,
+            "workflowRunUrl": "https://github.com/wlodzimierrr/homelab-portal/actions/runs/101",
+        },
+    )
+    monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.main._upsert_deployment_record_row", _fake_upsert)
+
+    response = client.post(
+        "/services/homelab-api/deploy-to-dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={"deployReason": "Ship the latest portal backend fix to dev."},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "accepted"
+    assert body["action"] == "deploy"
+    assert body["serviceId"] == "homelab-api"
+    assert body["deploymentId"] == "dep-456"
+    assert body["gitPrNumber"] == 61
+    assert body["gitPrUrl"] == "https://github.com/example/homelab-workloads/pull/61"
+    assert body["previousTag"] == f"sha-{current_sha}"
+    assert body["newTag"] == f"sha-{next_sha}"
+    assert body["previousImageRef"] == current_image
+    assert body["newImageRef"] == next_image
+    assert body["compareUrl"] == f"https://github.com/wlodzimierrr/homelab-portal/compare/{current_sha}...{next_sha}"
+    assert captured["create_branch"][0] == "wlodzimierrr/homelab-workloads"
+    assert captured["pr"]["title"] == f"Deploy homelab-api: sha-{next_sha} to dev"
+    assert "- Reason: Ship the latest portal backend fix to dev." in captured["pr"]["description"]
+    assert f"- Target image: `{next_image}`" in captured["pr"]["description"]
+    committed_files = captured["commit"]["files"]
+    assert set(committed_files) == set(files)
+    assert all(next_image in content for content in committed_files.values())
+    assert captured["record"]["request_key"] == "gitops-pr:61:homelab-api:dev:deploy"
+    assert captured["record"]["requested_by"] == "dev-static-token"
+    assert captured["record"]["metadata"]["previousTag"] == f"sha-{current_sha}"
+    assert captured["record"]["metadata"]["newTag"] == f"sha-{next_sha}"
+
+
+def test_request_portal_deploy_to_dev_endpoint_returns_noop_when_latest_tag_is_already_deployed(monkeypatch) -> None:
+    current_sha = "a" * 40
+    current_image = f"ghcr.io/wlodzimierrr/homelab-web:sha-{current_sha}"
+    called: dict[str, bool] = {}
+
+    class _FakeGitProvider:
+        def create_branch(self, *_args, **_kwargs):
+            called["create_branch"] = True
+            raise AssertionError("create_branch should not be called for noop")
+
+        def read_file(self, _repo, _branch, _file_path):
+            return f"image: {current_image}\n"
+
+        def commit_to_branch(self, *_args, **_kwargs):
+            raise AssertionError("commit_to_branch should not be called for noop")
+
+        def open_pr(self, *_args, **_kwargs):
+            raise AssertionError("open_pr should not be called for noop")
+
+        def close_pr(self, *_args, **_kwargs):
+            raise AssertionError("close_pr should not be called for noop")
+
+    monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
+    monkeypatch.setattr(
+        "app.main._resolve_latest_portal_image_candidate",
+        lambda _service_id: {
+            "tag": f"sha-{current_sha}",
+            "imageRef": current_image,
+            "sourceCommitSha": current_sha,
+            "workflowRunId": 102,
+            "workflowRunUrl": "https://github.com/wlodzimierrr/homelab-portal/actions/runs/102",
+        },
+    )
+
+    response = client.post(
+        "/services/homelab-web/deploy-to-dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={"deployReason": "No-op deploy request."},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "noop"
+    assert body["gitPrUrl"] is None
+    assert body["deploymentId"] is None
+    assert body["previousImageRef"] == current_image
+    assert body["newImageRef"] == current_image
+    assert "already points at the latest deployable image tag" in body["message"]
+    assert "create_branch" not in called
+
+
+def test_request_portal_deploy_to_dev_endpoint_validates_reason() -> None:
+    response = client.post(
+        "/services/homelab-api/deploy-to-dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={"deployReason": "bad"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_request_portal_deploy_to_dev_closes_pr_when_lock_conflict_happens_after_pr_creation(monkeypatch) -> None:
+    current_sha = "a" * 40
+    next_sha = "b" * 40
+    current_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{current_sha}"
+    next_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{next_sha}"
+    captured: dict[str, object] = {}
+
+    class _FakeGitProvider:
+        def create_branch(self, repo, from_branch, new_branch):
+            return {"branch": new_branch, "ref": f"refs/heads/{new_branch}", "sha": "head", "url": None}
+
+        def read_file(self, _repo, _branch, _file_path):
+            return f"image: {current_image}\n"
+
+        def commit_to_branch(self, *_args, **_kwargs):
+            return {"branch": "branch", "commit_sha": "commit-sha", "tree_sha": "tree-sha", "files": []}
+
+        def open_pr(self, *_args, **_kwargs):
+            return {
+                "id": 60,
+                "number": 62,
+                "url": "https://github.com/example/homelab-workloads/pull/62",
+                "state": "open",
+            }
+
+        def close_pr(self, repo, pr_id):
+            captured["closed_pr"] = (repo, pr_id)
+            return {"id": pr_id, "number": pr_id, "url": f"https://github.com/example/homelab-workloads/pull/{pr_id}", "state": "closed"}
+
+    monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
+    monkeypatch.setattr(
+        "app.main._resolve_latest_portal_image_candidate",
+        lambda _service_id: {
+            "tag": f"sha-{next_sha}",
+            "imageRef": next_image,
+            "sourceCommitSha": next_sha,
+            "workflowRunId": 103,
+            "workflowRunUrl": "https://github.com/wlodzimierrr/homelab-portal/actions/runs/103",
+        },
+    )
+    monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
+
+    active_lock = {
+        "serviceId": "homelab-api",
+        "env": "dev",
+        "deploymentId": "dep-lock",
+        "requestKey": "existing",
+        "action": "deploy",
+        "status": "pending",
+        "argoApp": "homelab-api-dev",
+        "requestedBy": "alice",
+        "requestedAt": "2026-03-12T12:00:00+00:00",
+        "gitPrUrl": "https://github.com/example/homelab-workloads/pull/99",
+        "gitPrNumber": 99,
+        "gitRef": "automation/dev-image-bump-lock",
+        "deployReason": "Existing mutation",
+        "lockedAt": "2026-03-12T12:00:00+00:00",
+        "expiresAt": "2026-03-12T12:30:00+00:00",
+        "metadata": {},
+    }
+
+    def _raise_lock_conflict(_payload, *, requested_by):
+        raise app_main.DeploymentLockConflictError(active_lock)
+
+    monkeypatch.setattr("app.main._upsert_deployment_record_row", _raise_lock_conflict)
+
+    response = client.post(
+        "/services/homelab-api/deploy-to-dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={"deployReason": "Try conflicting deploy."},
+    )
+
+    assert response.status_code == 409
+    assert captured["closed_pr"] == ("wlodzimierrr/homelab-workloads", 62)
+    assert response.json()["detail"]["activeLock"]["deploymentId"] == "dep-lock"
+
+
 def test_request_portal_rollback_endpoint_dispatches_workflow(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

@@ -45,6 +45,47 @@ def test_load_recent_gitops_deployment_events_parses_dev_autobump_pull_request()
     assert web_event.target_image == f"ghcr.io/wlodzimierrr/homelab-web:sha-{source_sha}"
 
 
+def test_load_recent_gitops_deployment_events_parses_manual_dev_deploy_pull_request() -> None:
+    source_sha = "b" * 40
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 60,
+                "title": f"Deploy homelab-api: sha-{source_sha} to dev",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/60",
+                "state": "open",
+                "created_at": "2026-03-12T10:00:00Z",
+                "closed_at": None,
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "body": "\n".join(
+                    [
+                        "Portal-requested dev deploy.",
+                        "- Service: `homelab-api`",
+                        f"- Target image: `ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}`",
+                        "- Reason: Ship login fix safely to dev.",
+                    ]
+                ),
+                "user": {"login": "wlodzimierrr"},
+                "head": {"ref": f"automation/dev-deploy-homelab-api-sha-{source_sha[:12]}-20260312100000"},
+            }
+        ]
+
+    events = deployment_reconciler.load_recent_gitops_deployment_events(
+        github_fetch_json=_fake_fetch,
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.service_id == "homelab-api"
+    assert event.env == "dev"
+    assert event.action == "deploy"
+    assert event.source_commit_sha == source_sha
+    assert event.target_image == f"ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}"
+    assert event.metadata["operatorReason"] == "Ship login fix safely to dev."
+
+
 def test_load_recent_gitops_deployment_events_parses_config_change_pull_request() -> None:
     def _fake_fetch(_path: str) -> object:
         return [
