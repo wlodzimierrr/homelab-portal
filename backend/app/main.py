@@ -1657,6 +1657,13 @@ def _github_metadata_token() -> str | None:
     return None
 
 
+def _github_api_token_for_path(path: str) -> str | None:
+    normalized = path.lstrip("/")
+    if "/packages/container/" in normalized:
+        return _ghcr_token()
+    return _github_metadata_token()
+
+
 def _github_api_base_url() -> str:
     return os.getenv("GITHUB_API_BASE_URL", "https://api.github.com").rstrip("/")
 
@@ -1669,7 +1676,7 @@ def _github_api_json(path: str, *, timeout_seconds: float = 10.0) -> object:
             "User-Agent": "homelab-portal-backend",
         },
     )
-    token = _github_metadata_token()
+    token = _github_api_token_for_path(path)
     if token:
         request.add_header("Authorization", f"Bearer {token}")
     try:
