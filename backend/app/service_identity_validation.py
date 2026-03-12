@@ -13,6 +13,26 @@ from app.service_observability import normalize_observability_mode
 from app.service_identity import default_argo_app_name, normalize_service_id, parse_source_ref_path
 
 
+def _expected_gitops_path(project_row: dict[str, Any], service_id: str, env: str) -> str:
+    del service_id, env
+    source_path = parse_source_ref_path(project_row.get("source_ref"))
+    if isinstance(source_path, str) and source_path.strip():
+        return source_path
+    return ""
+
+
+def _expected_argo_app_name(project_row: dict[str, Any], service_id: str, env: str) -> str | None:
+    source_path = parse_source_ref_path(project_row.get("source_ref"))
+    if isinstance(source_path, str) and source_path.strip():
+        parts = [part for part in source_path.split("/") if part]
+        if len(parts) >= 4 and parts[0] == "apps" and parts[2] == "envs":
+            source_service_id = normalize_service_id(parts[1])
+            source_env = parts[3].strip()
+            if source_env:
+                return default_argo_app_name(source_service_id, source_env)
+    return default_argo_app_name(service_id, env)
+
+
 class ServiceIdentityMonitoringSelector(TypedDict):
     namespace: str
     appLabel: str
@@ -134,7 +154,7 @@ def build_service_identity_diagnostics(
             str(project_row.get("app_label") or "").strip() if project_row is not None else None
         )
         expected_argo_app_name = (
-            default_argo_app_name(service_id, env) if project_row is not None else None
+            _expected_argo_app_name(project_row, service_id, env) if project_row is not None else None
         )
         observability_mode = (
             normalize_observability_mode(str(project_row.get("observability_mode") or "").strip())
@@ -142,7 +162,7 @@ def build_service_identity_diagnostics(
             else None
         )
         expected_gitops_path = (
-            f"apps/{str(project_row.get('project_id') or '').strip()}/envs/{env}"
+            _expected_gitops_path(project_row, service_id, env)
             if project_row is not None
             else None
         )

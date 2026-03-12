@@ -57,6 +57,25 @@ class ProjectRegistryRecord:
     last_synced_at: datetime
 
 
+@dataclass(frozen=True)
+class ServiceCatalogEnvRecord:
+    env: str
+    namespace: str
+    app_label: str
+    source_path: str | None
+
+
+@dataclass(frozen=True)
+class ServiceCatalogMetadata:
+    service_id: str
+    service_name: str
+    owner: str | None
+    repo_url: str | None
+    runbook_url: str | None
+    observability_mode: str | None
+    envs: tuple[ServiceCatalogEnvRecord, ...]
+
+
 def _utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -144,7 +163,7 @@ def _first_nonempty_string(*values: object) -> str | None:
 
 def _load_service_catalog_metadata(
     repo_path: Path,
-) -> tuple[dict[str, dict[str, str | None]], list[dict[str, str]]]:
+) -> tuple[dict[str, ServiceCatalogMetadata], list[dict[str, str]]]:
     catalog_path = repo_path / "services.yaml"
     if not catalog_path.exists():
         return {}, []
@@ -173,7 +192,7 @@ def _load_service_catalog_metadata(
             }
         ]
 
-    metadata_by_id: dict[str, dict[str, str | None]] = {}
+    metadata_by_id: dict[str, ServiceCatalogMetadata] = {}
     failures: list[dict[str, str]] = []
     for index, item in enumerate(entries):
         scope = f"services.yaml:services[{index}]"
@@ -215,12 +234,67 @@ def _load_service_catalog_metadata(
             )
             continue
 
-        metadata_by_id[service_id] = {
-            "owner": _first_nonempty_string(item.get("owner"), item.get("owner_email")),
-            "repo_url": _first_nonempty_string(item.get("repo_url"), item.get("repoUrl")),
-            "runbook_url": _first_nonempty_string(item.get("runbook_url"), item.get("runbookUrl")),
-            "observability_mode": None,
-        }
+        env_records: list[ServiceCatalogEnvRecord] = []
+        raw_envs = item.get("envs")
+        if isinstance(raw_envs, list):
+            seen_envs: set[str] = set()
+            for env_index, env_item in enumerate(raw_envs):
+                env_scope = f"{scope}.envs[{env_index}]"
+                if not isinstance(env_item, dict):
+                    failures.append(
+                        {
+                            "source": DEFAULT_SOURCE,
+                            "scope": env_scope,
+                            "error": "service catalog env entry must be a mapping",
+                        }
+                    )
+                    continue
+
+                env_name = _first_nonempty_string(env_item.get("name"), env_item.get("env"))
+                if env_name is None:
+                    failures.append(
+                        {
+                            "source": DEFAULT_SOURCE,
+                            "scope": env_scope,
+                            "error": "service catalog env entry is missing name",
+                        }
+                    )
+                    continue
+
+                if env_name in seen_envs:
+                    failures.append(
+                        {
+                            "source": DEFAULT_SOURCE,
+                            "scope": env_scope,
+                            "error": f"duplicate env entry for {service_id}/{env_name}",
+                        }
+                    )
+                    continue
+                seen_envs.add(env_name)
+
+                namespace = (
+                    _first_nonempty_string(env_item.get("namespace"))
+                    or service_id
+                )
+                app_label = (
+                    _first_nonempty_string(
+                        env_item.get("app_label"),
+                        env_item.get("appLabel"),
+                    )
+                    or service_id
+                )
+                source_path = _first_nonempty_string(
+                    env_item.get("workload_ref"),
+                    env_item.get("workloadRef"),
+                )
+                env_records.append(
+                    ServiceCatalogEnvRecord(
+                        env=env_name,
+                        namespace=namespace,
+                        app_label=app_label,
+                        source_path=source_path,
+                    )
+                )
 
         raw_mode = _first_nonempty_string(
             _nested_get(item, "observability", "mode"),
@@ -240,7 +314,16 @@ def _load_service_catalog_metadata(
                 }
             )
             continue
-        metadata_by_id[service_id]["observability_mode"] = normalized_mode
+
+        metadata_by_id[service_id] = ServiceCatalogMetadata(
+            service_id=service_id,
+            service_name=_first_nonempty_string(item.get("name")) or service_id,
+            owner=_first_nonempty_string(item.get("owner"), item.get("owner_email")),
+            repo_url=_first_nonempty_string(item.get("repo_url"), item.get("repoUrl")),
+            runbook_url=_first_nonempty_string(item.get("runbook_url"), item.get("runbookUrl")),
+            observability_mode=normalized_mode,
+            envs=tuple(env_records),
+        )
 
     return metadata_by_id, failures
 
@@ -299,6 +382,7 @@ def _discover_records_from_repo(
     failures: list[dict[str, str]] = []
     service_catalog, catalog_failures = _load_service_catalog_metadata(repo_path)
     failures.extend(catalog_failures)
+    discovered_keys: set[tuple[str, str]] = set()
 
     env_kustomizations = sorted(repo_path.glob("apps/*/envs/*/kustomization.yaml"))
     for kustomization_path in env_kustomizations:
@@ -329,21 +413,63 @@ def _discover_records_from_repo(
         records.append(
             ProjectRegistryRecord(
                 project_id=project_id,
-                project_name=project_name,
+                project_name=service_metadata.service_name if service_metadata else project_name,
                 namespace=namespace,
                 env=env_value,
                 app_label=app_label,
-                owner=service_metadata.get("owner") if service_metadata else None,
-                repo_url=service_metadata.get("repo_url") if service_metadata else None,
-                runbook_url=service_metadata.get("runbook_url") if service_metadata else None,
+                owner=service_metadata.owner if service_metadata else None,
+                repo_url=service_metadata.repo_url if service_metadata else None,
+                runbook_url=service_metadata.runbook_url if service_metadata else None,
                 observability_mode=(
-                    service_metadata.get("observability_mode") if service_metadata else None
+                    service_metadata.observability_mode if service_metadata else None
                 ),
                 source=DEFAULT_SOURCE,
                 source_ref=_build_source_ref(repo_path, env_dir),
                 last_synced_at=synced_at,
             )
         )
+        discovered_keys.add((project_id, env_value))
+
+    for service_id, service_metadata in service_catalog.items():
+        for env_record in service_metadata.envs:
+            if env_name and env_record.env != env_name:
+                continue
+            key = (service_id, env_record.env)
+            if key in discovered_keys:
+                continue
+
+            source_target = repo_path / "services.yaml"
+            if env_record.source_path:
+                candidate = repo_path / env_record.source_path
+                if candidate.exists():
+                    source_target = candidate
+                else:
+                    failures.append(
+                        {
+                            "source": DEFAULT_SOURCE,
+                            "scope": f"services.yaml:{service_id}:{env_record.env}",
+                            "error": f"Declared workload_ref does not exist: {env_record.source_path}",
+                        }
+                    )
+                    continue
+
+            records.append(
+                ProjectRegistryRecord(
+                    project_id=service_id,
+                    project_name=service_metadata.service_name,
+                    namespace=env_record.namespace,
+                    env=env_record.env,
+                    app_label=env_record.app_label,
+                    owner=service_metadata.owner,
+                    repo_url=service_metadata.repo_url,
+                    runbook_url=service_metadata.runbook_url,
+                    observability_mode=service_metadata.observability_mode,
+                    source=DEFAULT_SOURCE,
+                    source_ref=_build_source_ref(repo_path, source_target),
+                    last_synced_at=synced_at,
+                )
+            )
+            discovered_keys.add(key)
 
     return records, failures
 

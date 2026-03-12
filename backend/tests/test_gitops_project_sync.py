@@ -108,6 +108,55 @@ def test_discover_gitops_project_records_joins_services_yaml_metadata(tmp_path: 
     assert rows[0].observability_mode == "app-native"
 
 
+def test_discover_gitops_project_records_synthesizes_support_service_rows_from_services_yaml(
+    tmp_path: Path,
+) -> None:
+    repo_path = tmp_path / "workloads"
+    _write(
+        repo_path / "services.yaml",
+        (
+            "services:\n"
+            "  - service_id: oauth2-proxy\n"
+            "    name: OAuth2 Proxy\n"
+            "    owner: wlodzimierrr\n"
+            "    repo_url: https://github.com/wlodzimierrr/homelab/tree/main/workloads/apps/homelab-web/envs/dev\n"
+            "    runbook_url: https://github.com/wlodzimierrr/homelab/blob/main/docs/runbooks/oidc-setup.md\n"
+            "    observability:\n"
+            "      mode: no-http\n"
+            "    envs:\n"
+            "      - name: dev\n"
+            "        namespace: homelab-web\n"
+            "        app_label: oauth2-proxy\n"
+            "        argo_app: homelab-web-dev\n"
+            "        workload_ref: apps/homelab-web/envs/dev/oauth2-proxy.yaml\n"
+        ),
+    )
+    _write(
+        repo_path / "apps" / "homelab-web" / "envs" / "dev" / "oauth2-proxy.yaml",
+        (
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
+            "  name: oauth2-proxy\n  namespace: homelab-web\n"
+        ),
+    )
+
+    rows, failures = gitops_project_sync.discover_gitops_project_records(
+        repo_path=repo_path,
+        env_name="dev",
+        synced_at=datetime(2026, 3, 11, tzinfo=timezone.utc),
+    )
+
+    assert failures == []
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.project_id == "oauth2-proxy"
+    assert row.project_name == "OAuth2 Proxy"
+    assert row.namespace == "homelab-web"
+    assert row.env == "dev"
+    assert row.app_label == "oauth2-proxy"
+    assert row.observability_mode == "no-http"
+    assert row.source_ref.endswith(":apps/homelab-web/envs/dev/oauth2-proxy.yaml")
+
+
 def test_resolve_default_workloads_repo_path_does_not_raise_for_shallow_container_layout() -> None:
     resolved = gitops_project_sync._resolve_default_workloads_repo_path(
         Path("/app/app/gitops_project_sync.py")

@@ -117,6 +117,15 @@ def test_build_service_identity_diagnostics_ignores_unknown_release_app_and_supp
                 "app_label": "homelab-web",
                 "source_ref": "repo@sha:apps/homelab-web/envs/dev",
                 "observability_mode": "ingress-derived",
+            },
+            {
+                "project_id": "oauth2-proxy",
+                "project_name": "OAuth2 Proxy",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "oauth2-proxy",
+                "source_ref": "repo@sha:apps/homelab-web/envs/dev/oauth2-proxy.yaml",
+                "observability_mode": "no-http",
             }
         ],
         service_rows=[
@@ -164,6 +173,7 @@ def test_build_service_identity_diagnostics_ignores_unknown_release_app_and_supp
     assert diagnostics["okCount"] == 2
     assert diagnostics["rows"][0]["violations"] == []
     assert diagnostics["rows"][1]["violations"] == []
+    assert diagnostics["rows"][1]["observabilityMode"] == "no-http"
 
 
 def test_build_service_identity_diagnostics_reports_missing_observability_mode() -> None:
