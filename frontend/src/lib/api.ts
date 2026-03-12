@@ -4,7 +4,7 @@ import type { ServiceIdentity } from '@/lib/service-identity'
 
 export const UNAUTHORIZED_EVENT = 'portal:unauthorized'
 const serviceEndpointMissingStatuses = new Set([404, 405, 501])
-const enableServiceApi = import.meta.env.VITE_ENABLE_SERVICE_API === 'true'
+const enableServiceApi = import.meta.env.VITE_ENABLE_SERVICE_API !== 'false'
 
 interface RequestOptions extends Omit<RequestInit, 'headers'> {
   headers?: HeadersInit

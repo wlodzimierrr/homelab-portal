@@ -746,11 +746,15 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [toastMessage, setToastMessage] = useState('')
   const [toastVariant, setToastVariant] = useState<'success' | 'error' | 'info'>('info')
 
-  const loadOverview = useCallback(async () => {
-    setIsLoading(true)
-    setError('')
-    setDeploymentHistoryUnavailable(false)
-    setDeploymentHistoryError('')
+  const loadOverview = useCallback(async (options?: { background?: boolean }) => {
+    const background = options?.background === true
+
+    if (!background) {
+      setIsLoading(true)
+      setError('')
+      setDeploymentHistoryUnavailable(false)
+      setDeploymentHistoryError('')
+    }
 
     try {
       const identity = await getServiceIdentity(decodedServiceId).catch(() =>
@@ -849,10 +853,15 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     } catch (requestError) {
       const message =
         requestError instanceof Error ? requestError.message : 'Failed to load service overview'
-      setDeploymentHistory([])
-      setError(message)
+
+      if (!background) {
+        setDeploymentHistory([])
+        setError(message)
+      }
     } finally {
-      setIsLoading(false)
+      if (!background) {
+        setIsLoading(false)
+      }
     }
   }, [decodedServiceId])
 
@@ -1193,7 +1202,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
           ? response.message ?? `Dev already points at ${response.newTag ?? 'the latest image'}.`
           : `Deploy request accepted for ${decodedServiceId}.`,
       )
-      void loadOverview()
+      void loadOverview({ background: true })
       void loadDeploymentInfo()
     } catch (requestError) {
       const message =
@@ -1223,7 +1232,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
           ? response.message ?? `Prod already matches ${response.newTag ?? 'the dev tag'}.`
           : `Promote request accepted for ${decodedServiceId}.`,
       )
-      void loadOverview()
+      void loadOverview({ background: true })
       void loadDeploymentInfo()
     } catch (requestError) {
       const message =
@@ -1255,7 +1264,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
           ? response.message ?? `Rollback not needed for ${rollbackTargetEnvironment}.`
           : `Rollback request accepted for ${decodedServiceId}.`,
       )
-      void loadOverview()
+      void loadOverview({ background: true })
       void loadDeploymentInfo()
     } catch (requestError) {
       const message =
@@ -1285,7 +1294,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      void loadOverview()
+      void loadOverview({ background: true })
       void loadDeploymentInfo()
     }, 30000)
     return () => window.clearInterval(interval)
