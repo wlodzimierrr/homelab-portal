@@ -2951,6 +2951,19 @@ def _resolve_window_end(start: datetime, end: datetime | None) -> datetime:
     return effective_end
 
 
+def _expand_observability_query_window(
+    start: datetime,
+    end: datetime,
+    *,
+    minimum_window: timedelta = timedelta(minutes=10),
+    padding: timedelta = timedelta(minutes=5),
+) -> tuple[datetime, datetime]:
+    effective_end = _resolve_window_end(start, end)
+    if effective_end - start >= minimum_window:
+        return start, effective_end
+    return start - padding, effective_end + padding
+
+
 def _resolve_record_window(
     record: dict[str, object],
 ) -> tuple[datetime | None, datetime | None]:
@@ -3728,6 +3741,10 @@ def _resolve_deployment_observability_context(
         evidence_message = None
         if evidence_status == "missing":
             evidence_message = "Deployment record does not have a usable deploy window yet."
+        resolved_start = window_start
+        resolved_end = window_end
+        if window_start is not None and window_end is not None:
+            resolved_start, resolved_end = _expand_observability_query_window(window_start, window_end)
         return (
             DeploymentObservabilityContextResponse(
                 serviceId=service_id,
@@ -3746,8 +3763,8 @@ def _resolve_deployment_observability_context(
                 deployReason=record.get("deployReason") if isinstance(record.get("deployReason"), str) else None,
             ),
             selected,
-            window_start,
-            window_end,
+            resolved_start,
+            resolved_end,
         )
 
     explicit_start = _parse_iso_datetime(window_start_value)
