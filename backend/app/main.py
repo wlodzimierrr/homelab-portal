@@ -1678,54 +1678,100 @@ def _ghcr_token() -> str | None:
     return None
 
 
-def _quote_registry_repo_path(image_repo: str) -> str:
-    if "/" not in image_repo:
+def _parse_ghcr_image_repo(image_repo: str) -> tuple[str, str]:
+    trimmed = image_repo.strip()
+    if not trimmed.startswith("ghcr.io/"):
         raise PortalPromoteToProdError(
             f"Image repository {image_repo!r} is not a valid GHCR image reference.",
             status_code=status.HTTP_409_CONFLICT,
         )
-    registry_path = image_repo.split("/", 1)[1]
-    return "/".join(urlparse.quote(part, safe="") for part in registry_path.split("/"))
+    parts = trimmed.split("/")
+    if len(parts) != 3 or not parts[1] or not parts[2]:
+        raise PortalPromoteToProdError(
+            f"Image repository {image_repo!r} is not a valid GHCR image reference.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    return parts[1], parts[2]
+
+
+def _github_package_version_paths(image_repo: str, *, page: int) -> list[str]:
+    owner, package_name = _parse_ghcr_image_repo(image_repo)
+    encoded_owner = urlparse.quote(owner, safe="")
+    encoded_package = urlparse.quote(package_name, safe="")
+    query = f"packages/container/{encoded_package}/versions?per_page=100&page={page}"
+    return [
+        f"users/{encoded_owner}/{query}",
+        f"orgs/{encoded_owner}/{query}",
+    ]
+
+
+def _package_version_has_tag(payload: object, expected_tag: str) -> bool:
+    if not isinstance(payload, list):
+        return False
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        container = metadata.get("container")
+        if not isinstance(container, dict):
+            continue
+        tags = container.get("tags")
+        if isinstance(tags, list) and expected_tag in tags:
+            return True
+    return False
 
 
 def _ensure_ghcr_tag_exists(image_repo: str, tag: str, *, timeout_seconds: float = 10.0) -> None:
-    manifest_url = f"https://ghcr.io/v2/{_quote_registry_repo_path(image_repo)}/manifests/{urlparse.quote(tag, safe='')}"
-    request = urlrequest.Request(
-        manifest_url,
-        method="HEAD",
-        headers={
-            "Accept": ",".join(
-                [
-                    "application/vnd.oci.image.index.v1+json",
-                    "application/vnd.oci.image.manifest.v1+json",
-                    "application/vnd.docker.distribution.manifest.list.v2+json",
-                    "application/vnd.docker.distribution.manifest.v2+json",
-                ]
-            ),
-            "User-Agent": "homelab-portal-backend",
-        },
-    )
     token = _ghcr_token()
+    github_api_base = _github_api_base_url()
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "homelab-portal-backend",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
     if token:
-        request.add_header("Authorization", f"Bearer {token}")
+        headers["Authorization"] = f"Bearer {token}"
 
-    try:
-        with urlrequest.urlopen(request, timeout=timeout_seconds):
+    for page in range(1, 11):
+        found_on_page = False
+        exhausted = True
+        for path in _github_package_version_paths(image_repo, page=page):
+            request = urlrequest.Request(
+                f"{github_api_base}/{path.lstrip('/')}",
+                headers=headers,
+            )
+            try:
+                with urlrequest.urlopen(request, timeout=timeout_seconds) as response:
+                    raw = response.read()
+            except urlerror.HTTPError as exc:
+                if exc.code == 404:
+                    continue
+                body = exc.read().decode("utf-8", errors="replace").strip()
+                message = body or exc.reason or "GitHub Packages lookup failed"
+                raise PortalPromoteToProdError(message, status_code=status.HTTP_502_BAD_GATEWAY) from exc
+            except urlerror.URLError as exc:
+                raise PortalPromoteToProdError(
+                    f"GitHub Packages lookup failed: {exc.reason}",
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                ) from exc
+
+            payload = json.loads(raw) if raw else []
+            if isinstance(payload, list) and payload:
+                exhausted = False
+            if _package_version_has_tag(payload, tag):
+                found_on_page = True
+                break
+        if found_on_page:
             return
-    except urlerror.HTTPError as exc:
-        if exc.code == 404:
-            raise PortalPromoteToProdError(
-                f"Promoted image tag {tag!r} was not found in GHCR for {image_repo}.",
-                status_code=status.HTTP_409_CONFLICT,
-            ) from exc
-        body = exc.read().decode("utf-8", errors="replace").strip()
-        message = body or exc.reason or "GHCR manifest lookup failed"
-        raise PortalPromoteToProdError(message, status_code=status.HTTP_502_BAD_GATEWAY) from exc
-    except urlerror.URLError as exc:
-        raise PortalPromoteToProdError(
-            f"GHCR manifest lookup failed: {exc.reason}",
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        ) from exc
+        if exhausted:
+            break
+
+    raise PortalPromoteToProdError(
+        f"Promoted image tag {tag!r} was not found in GitHub Packages for {image_repo}.",
+        status_code=status.HTTP_409_CONFLICT,
+    )
 
 
 def _safe_branch_fragment(value: str) -> str:
