@@ -1035,7 +1035,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   return (
     <PageShell
       title={`Service: ${decodedServiceId || 'unknown'}`}
-      description="Overview for deployment status, endpoints, and recent release activity."
+      description="Overview for deployment status, endpoints, and recent deployment activity."
     >
       <div className="space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
