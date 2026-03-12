@@ -12,16 +12,18 @@ import { Button } from '@/components/ui/button'
 import {
   getProjects,
   getReleaseTraceability,
+  getServiceRollbackCandidates,
   getService,
-  requestPortalRollback,
   type MonitoringProviderStatus,
-  type PortalRollbackResponse,
   type Project,
   type ReleaseTraceabilityRow,
+  requestServiceRollback,
   type ServiceDetails,
   type ServiceDeployment,
   type ServiceDeploymentLock,
   type ServiceEndpoint,
+  type ServiceRollbackCandidatesResponse,
+  type ServiceRollbackResponse,
 } from '@/lib/api'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import {
@@ -65,7 +67,7 @@ interface ServiceDetailsPageProps {
 type HealthStatus = 'healthy' | 'degraded' | 'unknown'
 type SyncStatus = 'synced' | 'out_of_sync' | 'unknown'
 
-function supportsPortalRollback(serviceId: string) {
+function supportsServiceRollback(serviceId: string) {
   return serviceId === 'homelab-api' || serviceId === 'homelab-web'
 }
 
@@ -661,12 +663,15 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [logsError, setLogsError] = useState('')
   const [deploymentHistoryUnavailable, setDeploymentHistoryUnavailable] = useState(false)
   const [deploymentHistoryError, setDeploymentHistoryError] = useState('')
-  const [rollbackApiTag, setRollbackApiTag] = useState('')
-  const [rollbackWebTag, setRollbackWebTag] = useState('')
+  const [rollbackTargetEnvironment, setRollbackTargetEnvironment] = useState<'dev' | 'prod'>('dev')
+  const [rollbackCandidates, setRollbackCandidates] = useState<ServiceRollbackCandidatesResponse | null>(null)
+  const [rollbackCandidatesLoading, setRollbackCandidatesLoading] = useState(false)
+  const [rollbackCandidatesError, setRollbackCandidatesError] = useState('')
+  const [selectedRollbackTag, setSelectedRollbackTag] = useState('')
   const [rollbackReason, setRollbackReason] = useState('')
   const [rollbackSubmitting, setRollbackSubmitting] = useState(false)
   const [rollbackError, setRollbackError] = useState('')
-  const [rollbackResult, setRollbackResult] = useState<PortalRollbackResponse | null>(null)
+  const [rollbackResult, setRollbackResult] = useState<ServiceRollbackResponse | null>(null)
 
   const loadOverview = useCallback(async () => {
     setIsLoading(true)
@@ -985,7 +990,13 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       ),
     [logsError, logsLoading, logsResult],
   )
-  const rollbackSupported = useMemo(() => supportsPortalRollback(decodedServiceId), [decodedServiceId])
+  const rollbackSupported = useMemo(() => supportsServiceRollback(decodedServiceId), [decodedServiceId])
+
+  useEffect(() => {
+    if (serviceIdentity.env === 'dev' || serviceIdentity.env === 'prod') {
+      setRollbackTargetEnvironment(serviceIdentity.env)
+    }
+  }, [serviceIdentity.env])
 
   const loadQuickViewLogs = useCallback(async () => {
     setLogsLoading(true)
@@ -1006,31 +1017,66 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     }
   }, [activeLogsPreset, logsRange, serviceIdentity])
 
+  const loadRollbackCandidates = useCallback(async () => {
+    if (!rollbackSupported) {
+      setRollbackCandidates(null)
+      setRollbackCandidatesError('')
+      setSelectedRollbackTag('')
+      return
+    }
+
+    setRollbackCandidatesLoading(true)
+    setRollbackCandidatesError('')
+
+    try {
+      const response = await getServiceRollbackCandidates(decodedServiceId, rollbackTargetEnvironment)
+      setRollbackCandidates(response)
+      setSelectedRollbackTag((current) => {
+        if (current && response.candidates.some((candidate) => candidate.tag === current)) {
+          return current
+        }
+        return response.candidates[0]?.tag ?? ''
+      })
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : 'Failed to load rollback candidates.'
+      setRollbackCandidatesError(message)
+      setRollbackCandidates(null)
+      setSelectedRollbackTag('')
+    } finally {
+      setRollbackCandidatesLoading(false)
+    }
+  }, [decodedServiceId, rollbackSupported, rollbackTargetEnvironment])
+
   const submitRollbackRequest = useCallback(async () => {
     setRollbackSubmitting(true)
     setRollbackError('')
     setRollbackResult(null)
 
     try {
-      const response = await requestPortalRollback({
-        targetEnvironment: 'prod',
-        rollbackApiTag,
-        rollbackWebTag,
-        reason: rollbackReason,
+      const response = await requestServiceRollback(decodedServiceId, {
+        targetEnvironment: rollbackTargetEnvironment,
+        rollbackTag: selectedRollbackTag,
+        deployReason: rollbackReason,
       })
       setRollbackResult(response)
       setRollbackReason('')
     } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : 'Failed to request portal rollback.'
+      const message =
+        requestError instanceof Error ? requestError.message : 'Failed to request service rollback.'
       setRollbackError(message)
     } finally {
       setRollbackSubmitting(false)
     }
-  }, [rollbackApiTag, rollbackReason, rollbackWebTag])
+  }, [decodedServiceId, rollbackReason, rollbackTargetEnvironment, selectedRollbackTag])
 
   useEffect(() => {
     void loadQuickViewLogs()
   }, [loadQuickViewLogs])
+
+  useEffect(() => {
+    void loadRollbackCandidates()
+  }, [loadRollbackCandidates])
 
   return (
     <PageShell
@@ -1741,30 +1787,91 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 <div className="space-y-1">
                   <h2 className="text-sm font-semibold">Portal Rollback</h2>
                   <p className="text-xs text-muted-foreground">
-                    Request a coordinated prod rollback through the Git-backed promotion workflow. This action writes
-                    rollback deployment records for both portal services and the reconciler updates their outcome.
+                    Request a Git-backed rollback for this service. The portal lists previous deployable tags from
+                    GitHub Packages, opens a rollback PR, and records the request as a first-class deployment event.
                   </p>
                 </div>
-                <div className="grid gap-3 md:grid-cols-2">
+                <div className="grid gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
                   <label className="space-y-1">
-                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">API tag</span>
-                    <input
-                      value={rollbackApiTag}
-                      onChange={(event) => setRollbackApiTag(event.target.value)}
-                      placeholder="sha-<commit> or semver"
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Target environment
+                    </span>
+                    <select
+                      value={rollbackTargetEnvironment}
+                      onChange={(event) => setRollbackTargetEnvironment(event.target.value as 'dev' | 'prod')}
                       className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                    />
+                    >
+                      <option value="dev">dev</option>
+                      <option value="prod">prod</option>
+                    </select>
                   </label>
                   <label className="space-y-1">
-                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Web tag</span>
-                    <input
-                      value={rollbackWebTag}
-                      onChange={(event) => setRollbackWebTag(event.target.value)}
-                      placeholder="sha-<commit> or semver"
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Rollback target tag
+                    </span>
+                    <select
+                      value={selectedRollbackTag}
+                      onChange={(event) => setSelectedRollbackTag(event.target.value)}
                       className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                    />
+                      disabled={rollbackCandidatesLoading || (rollbackCandidates?.candidates.length ?? 0) === 0}
+                    >
+                      {(rollbackCandidates?.candidates ?? []).map((candidate) => (
+                        <option key={candidate.tag} value={candidate.tag}>
+                          {candidate.tag}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                 </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-md border border-border/70 bg-background/50 p-3 text-xs text-muted-foreground">
+                    <p className="font-medium text-foreground">Current tag</p>
+                    <p className="mt-1 break-all">{rollbackCandidates?.currentTag ?? 'Unavailable'}</p>
+                  </div>
+                  <div className="rounded-md border border-border/70 bg-background/50 p-3 text-xs text-muted-foreground">
+                    <p className="font-medium text-foreground">Recent deployed tags</p>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {overview.deployments.slice(0, 3).map((deployment) => (
+                        <code key={deployment.id} className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
+                          {deployment.version}
+                        </code>
+                      ))}
+                      {overview.deployments.length === 0 ? <span>Unavailable</span> : null}
+                    </div>
+                  </div>
+                </div>
+                {rollbackCandidatesError ? (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                    <p className="text-xs text-destructive">{rollbackCandidatesError}</p>
+                  </div>
+                ) : null}
+                {!rollbackCandidatesError && !rollbackCandidatesLoading && rollbackCandidates ? (
+                  <div className="rounded-md border border-border/70 bg-background/50 p-3 text-xs text-muted-foreground">
+                    <p className="font-medium text-foreground">Available rollback candidates</p>
+                    {rollbackCandidates.candidates.length > 0 ? (
+                      <div className="mt-2 space-y-2">
+                        {rollbackCandidates.candidates.slice(0, 5).map((candidate) => (
+                          <div key={candidate.tag} className="flex flex-wrap items-center gap-2">
+                            <code className="rounded bg-muted px-1.5 py-0.5 text-[11px]">{candidate.tag}</code>
+                            {candidate.publishedAt ? <span>published {candidate.publishedAt}</span> : null}
+                            {candidate.compareUrl ? (
+                              <a
+                                href={candidate.compareUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-medium text-primary hover:underline"
+                              >
+                                Compare
+                              </a>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-2">No previous deployable tags are available right now.</p>
+                    )}
+                  </div>
+                ) : null}
                 <label className="space-y-1">
                   <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Reason</span>
                   <textarea
@@ -1782,16 +1889,21 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 ) : null}
                 {rollbackResult ? (
                   <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
-                    <p className="font-medium">Rollback request accepted for prod.</p>
-                    <p className="mt-1">Workflow: <code>{rollbackResult.workflowFile}</code></p>
-                    <a
-                      href={rollbackResult.workflowUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-2 inline-flex font-medium underline underline-offset-2"
-                    >
-                      Open workflow runs
-                    </a>
+                    <p className="font-medium">
+                      {rollbackResult.status === 'noop'
+                        ? `Rollback not needed for ${rollbackResult.targetEnvironment}.`
+                        : `Rollback request accepted for ${rollbackResult.targetEnvironment}.`}
+                    </p>
+                    {rollbackResult.gitPrUrl ? (
+                      <a
+                        href={rollbackResult.gitPrUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-2 inline-flex font-medium underline underline-offset-2"
+                      >
+                        Open GitOps PR #{rollbackResult.gitPrNumber ?? 'link'}
+                      </a>
+                    ) : null}
                   </div>
                 ) : null}
                 <div className="flex flex-wrap items-center gap-3">
@@ -1800,12 +1912,12 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                     onClick={() => void submitRollbackRequest()}
                     disabled={
                       rollbackSubmitting ||
-                      rollbackApiTag.trim().length === 0 ||
-                      rollbackWebTag.trim().length === 0 ||
+                      rollbackCandidatesLoading ||
+                      selectedRollbackTag.trim().length === 0 ||
                       rollbackReason.trim().length < 5
                     }
                   >
-                    {rollbackSubmitting ? 'Requesting rollback...' : 'Request prod rollback'}
+                    {rollbackSubmitting ? 'Requesting rollback...' : `Request ${rollbackTargetEnvironment} rollback`}
                   </Button>
                   <p className="text-xs text-muted-foreground">
                     Existing rollback records remain visible in the deployment history view for operator audit.

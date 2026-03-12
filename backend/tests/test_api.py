@@ -2296,7 +2296,7 @@ def test_request_portal_promote_to_prod_opens_pr_and_creates_record(monkeypatch)
         }
 
     monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
-    monkeypatch.setattr("app.main._ensure_ghcr_tag_exists", lambda _repo, _tag: None)
+    monkeypatch.setattr("app.main._ensure_ghcr_tag_exists", lambda _repo, _tag, **_kwargs: None)
     monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("app.main._upsert_deployment_record_row", _fake_upsert)
 
@@ -2359,7 +2359,7 @@ def test_request_portal_promote_to_prod_returns_noop_when_prod_already_matches_d
             raise AssertionError("close_pr should not be called for noop")
 
     monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
-    monkeypatch.setattr("app.main._ensure_ghcr_tag_exists", lambda _repo, _tag: None)
+    monkeypatch.setattr("app.main._ensure_ghcr_tag_exists", lambda _repo, _tag, **_kwargs: None)
 
     response = client.post(
         "/services/homelab-web/promote-to-prod",
@@ -2420,7 +2420,7 @@ def test_request_portal_promote_to_prod_closes_pr_when_lock_conflict_happens_aft
             return {"id": pr_id, "number": pr_id, "url": f"https://github.com/example/homelab-workloads/pull/{pr_id}", "state": "closed"}
 
     monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
-    monkeypatch.setattr("app.main._ensure_ghcr_tag_exists", lambda _repo, _tag: None)
+    monkeypatch.setattr("app.main._ensure_ghcr_tag_exists", lambda _repo, _tag, **_kwargs: None)
     monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
 
     active_lock = {
@@ -2455,6 +2455,301 @@ def test_request_portal_promote_to_prod_closes_pr_when_lock_conflict_happens_aft
 
     assert response.status_code == 409
     assert captured["closed_pr"] == ("wlodzimierrr/homelab-workloads", 82)
+    assert response.json()["detail"]["activeLock"]["deploymentId"] == "dep-lock"
+
+
+def test_list_service_rollback_candidates_returns_current_tag_and_candidates(monkeypatch) -> None:
+    current_sha = "1" * 40
+    current_image = f"ghcr.io/wlodzimierrr/homelab-web:sha-{current_sha}"
+
+    class _FakeGitProvider:
+        def read_file(self, _repo, _branch, file_path):
+            assert file_path == "apps/homelab-web/envs/dev/patch-deployment.yaml"
+            return f"image: {current_image}\n"
+
+    monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
+    monkeypatch.setattr(
+        "app.main._list_service_rollback_candidates",
+        lambda **_kwargs: [
+            {
+                "tag": "sha-2222222222222222222222222222222222222222",
+                "imageRef": "ghcr.io/wlodzimierrr/homelab-web:sha-2222222222222222222222222222222222222222",
+                "compareUrl": "https://github.com/example/compare/one...two",
+                "sourceCommitSha": "2" * 40,
+                "publishedAt": "2026-03-12T14:00:00Z",
+            }
+        ],
+    )
+
+    response = client.get(
+        "/services/homelab-web/rollback-candidates?targetEnvironment=dev",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["serviceId"] == "homelab-web"
+    assert body["targetEnvironment"] == "dev"
+    assert body["currentTag"] == f"sha-{current_sha}"
+    assert body["currentImageRef"] == current_image
+    assert len(body["candidates"]) == 1
+    assert body["candidates"][0]["tag"] == "sha-2222222222222222222222222222222222222222"
+
+
+def test_request_service_rollback_opens_pr_and_creates_record(monkeypatch) -> None:
+    current_sha = "a" * 40
+    rollback_sha = "b" * 40
+    current_image = f"ghcr.io/wlodzimierrr/homelab-web:sha-{current_sha}"
+    rollback_image = f"ghcr.io/wlodzimierrr/homelab-web:sha-{rollback_sha}"
+    file_path = "apps/homelab-web/envs/dev/patch-deployment.yaml"
+    captured: dict[str, object] = {}
+
+    class _FakeGitProvider:
+        def create_branch(self, repo, from_branch, new_branch):
+            captured["create_branch"] = (repo, from_branch, new_branch)
+            return {"branch": new_branch, "ref": f"refs/heads/{new_branch}", "sha": "head-sha", "url": None}
+
+        def read_file(self, _repo, _branch, requested_file_path):
+            assert requested_file_path == file_path
+            return f"image: {current_image}\n"
+
+        def commit_to_branch(self, repo, branch, updated_files, message):
+            captured["commit"] = {
+                "repo": repo,
+                "branch": branch,
+                "files": dict(updated_files),
+                "message": message,
+            }
+            return {"branch": branch, "commit_sha": "commit-sha", "tree_sha": "tree-sha", "files": sorted(updated_files)}
+
+        def open_pr(self, repo, from_branch, to_branch, title, description):
+            captured["pr"] = {
+                "repo": repo,
+                "from_branch": from_branch,
+                "to_branch": to_branch,
+                "title": title,
+                "description": description,
+            }
+            return {
+                "id": 83,
+                "number": 84,
+                "url": "https://github.com/example/homelab-workloads/pull/84",
+                "state": "open",
+            }
+
+        def close_pr(self, *_args, **_kwargs):
+            raise AssertionError("close_pr should not be called")
+
+    def _fake_upsert(payload, *, requested_by):
+        captured["record"] = {
+            "service_id": payload.service_id,
+            "env": payload.env,
+            "action": payload.action,
+            "status": payload.status,
+            "request_key": payload.request_key,
+            "target_image": payload.target_image,
+            "previous_image": payload.previous_image,
+            "compare_url": payload.compare_url,
+            "deploy_reason": payload.deploy_reason,
+            "metadata": payload.metadata,
+            "requested_by": requested_by,
+        }
+        return {
+            "deploymentId": "dep-rollback-1",
+            "serviceId": payload.service_id,
+            "env": payload.env,
+            "action": payload.action,
+            "status": payload.status,
+            "requestedAt": "2026-03-12T14:00:00Z",
+            "requestedBy": requested_by,
+            "prUrl": "https://github.com/example/homelab-workloads/pull/84",
+            "prNumber": 84,
+            "mergeSha": None,
+            "targetImage": payload.target_image,
+            "previousImage": payload.previous_image,
+            "argoApp": "homelab-web-dev",
+            "syncStatus": None,
+            "healthStatus": None,
+            "startedAt": None,
+            "finishedAt": None,
+            "deployWindowStart": None,
+            "deployWindowEnd": None,
+            "deployReason": payload.deploy_reason,
+            "compareUrl": payload.compare_url,
+            "gitRef": payload.git_ref,
+            "metadata": payload.metadata or {},
+        }
+
+    monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
+    monkeypatch.setattr("app.main._ensure_ghcr_tag_exists", lambda _repo, _tag, **_kwargs: None)
+    monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.main._upsert_deployment_record_row", _fake_upsert)
+
+    response = client.post(
+        "/services/homelab-web/rollback",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={
+            "targetEnvironment": "dev",
+            "rollbackTag": f"sha-{rollback_sha}",
+            "deployReason": "Rollback homelab-web dev to the previous known-good image.",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "accepted"
+    assert body["action"] == "rollback"
+    assert body["serviceId"] == "homelab-web"
+    assert body["targetEnvironment"] == "dev"
+    assert body["deploymentId"] == "dep-rollback-1"
+    assert body["gitPrNumber"] == 84
+    assert body["gitPrUrl"] == "https://github.com/example/homelab-workloads/pull/84"
+    assert body["previousTag"] == f"sha-{current_sha}"
+    assert body["newTag"] == f"sha-{rollback_sha}"
+    assert body["previousImageRef"] == current_image
+    assert body["newImageRef"] == rollback_image
+    assert body["compareUrl"] == f"https://github.com/wlodzimierrr/homelab-portal/compare/{current_sha}...{rollback_sha}"
+    assert body["sourceCommitSha"] == rollback_sha
+    assert captured["pr"]["title"] == f"Rollback homelab-web: sha-{rollback_sha} in dev"
+    assert "- Reason: Rollback homelab-web dev to the previous known-good image." in captured["pr"]["description"]
+    assert "- Target environment: `dev`" in captured["pr"]["description"]
+    committed_files = captured["commit"]["files"]
+    assert set(committed_files) == {file_path}
+    assert committed_files[file_path] == f"image: {rollback_image}\n"
+    assert captured["record"]["request_key"] == "gitops-pr:84:homelab-web:dev:rollback"
+    assert captured["record"]["requested_by"] == "dev-static-token"
+    assert captured["record"]["metadata"]["targetEnvironment"] == "dev"
+    assert captured["record"]["metadata"]["newTag"] == f"sha-{rollback_sha}"
+
+
+def test_request_service_rollback_returns_noop_when_target_tag_is_already_deployed(monkeypatch) -> None:
+    rollback_sha = "c" * 40
+    rollback_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{rollback_sha}"
+    called: dict[str, bool] = {}
+
+    class _FakeGitProvider:
+        def create_branch(self, *_args, **_kwargs):
+            called["create_branch"] = True
+            raise AssertionError("create_branch should not be called for noop")
+
+        def read_file(self, _repo, _branch, _file_path):
+            return f"image: {rollback_image}\n"
+
+        def commit_to_branch(self, *_args, **_kwargs):
+            raise AssertionError("commit_to_branch should not be called for noop")
+
+        def open_pr(self, *_args, **_kwargs):
+            raise AssertionError("open_pr should not be called for noop")
+
+        def close_pr(self, *_args, **_kwargs):
+            raise AssertionError("close_pr should not be called for noop")
+
+    monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
+    monkeypatch.setattr("app.main._ensure_ghcr_tag_exists", lambda _repo, _tag, **_kwargs: None)
+
+    response = client.post(
+        "/services/homelab-api/rollback",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={
+            "targetEnvironment": "dev",
+            "rollbackTag": f"sha-{rollback_sha}",
+            "deployReason": "No-op rollback request.",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "noop"
+    assert body["gitPrUrl"] is None
+    assert body["deploymentId"] is None
+    assert body["previousImageRef"] == rollback_image
+    assert body["newImageRef"] == rollback_image
+    assert "already matches the requested rollback tag" in body["message"]
+    assert "create_branch" not in called
+
+
+def test_request_service_rollback_validates_tag_and_reason() -> None:
+    response = client.post(
+        "/services/homelab-api/rollback",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={
+            "targetEnvironment": "dev",
+            "rollbackTag": "latest",
+            "deployReason": "bad",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_request_service_rollback_closes_pr_when_lock_conflict_happens_after_pr_creation(monkeypatch) -> None:
+    current_sha = "d" * 40
+    rollback_sha = "e" * 40
+    current_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{current_sha}"
+    captured: dict[str, object] = {}
+
+    class _FakeGitProvider:
+        def create_branch(self, repo, from_branch, new_branch):
+            return {"branch": new_branch, "ref": f"refs/heads/{new_branch}", "sha": "head", "url": None}
+
+        def read_file(self, _repo, _branch, _file_path):
+            return f"image: {current_image}\n"
+
+        def commit_to_branch(self, *_args, **_kwargs):
+            return {"branch": "branch", "commit_sha": "commit-sha", "tree_sha": "tree-sha", "files": []}
+
+        def open_pr(self, *_args, **_kwargs):
+            return {
+                "id": 91,
+                "number": 92,
+                "url": "https://github.com/example/homelab-workloads/pull/92",
+                "state": "open",
+            }
+
+        def close_pr(self, repo, pr_id):
+            captured["closed_pr"] = (repo, pr_id)
+            return {"id": pr_id, "number": pr_id, "url": f"https://github.com/example/homelab-workloads/pull/{pr_id}", "state": "closed"}
+
+    monkeypatch.setattr("app.main.build_default_git_provider", lambda: _FakeGitProvider())
+    monkeypatch.setattr("app.main._ensure_ghcr_tag_exists", lambda _repo, _tag, **_kwargs: None)
+    monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
+
+    active_lock = {
+        "serviceId": "homelab-api",
+        "env": "dev",
+        "deploymentId": "dep-lock",
+        "requestKey": "existing",
+        "action": "rollback",
+        "status": "pending",
+        "argoApp": "homelab-api-dev",
+        "requestedBy": "alice",
+        "requestedAt": "2026-03-12T12:00:00+00:00",
+        "gitPrUrl": "https://github.com/example/homelab-workloads/pull/99",
+        "gitPrNumber": 99,
+        "gitRef": "automation/dev-rollback-lock",
+        "deployReason": "Existing rollback",
+        "lockedAt": "2026-03-12T12:00:00+00:00",
+        "expiresAt": "2026-03-12T12:30:00+00:00",
+        "metadata": {},
+    }
+
+    def _raise_lock_conflict(_payload, *, requested_by):
+        raise app_main.DeploymentLockConflictError(active_lock)
+
+    monkeypatch.setattr("app.main._upsert_deployment_record_row", _raise_lock_conflict)
+
+    response = client.post(
+        "/services/homelab-api/rollback",
+        headers={"Authorization": "Bearer dev-static-token"},
+        json={
+            "targetEnvironment": "dev",
+            "rollbackTag": f"sha-{rollback_sha}",
+            "deployReason": "Try conflicting rollback.",
+        },
+    )
+
+    assert response.status_code == 409
+    assert captured["closed_pr"] == ("wlodzimierrr/homelab-workloads", 92)
     assert response.json()["detail"]["activeLock"]["deploymentId"] == "dep-lock"
 
 

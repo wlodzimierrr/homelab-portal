@@ -190,6 +190,51 @@ export interface PortalRollbackResponse {
   initiatedAt: string
 }
 
+export interface ServiceRollbackCandidate {
+  tag: string
+  imageRef: string
+  compareUrl?: string
+  sourceCommitSha?: string
+  publishedAt?: string
+}
+
+export interface ServiceRollbackCandidatesResponse {
+  serviceId: string
+  targetEnvironment: 'dev' | 'prod'
+  currentTag?: string
+  currentImageRef?: string
+  candidates: ServiceRollbackCandidate[]
+  generatedAt: string
+}
+
+export interface ServiceRollbackRequest {
+  targetEnvironment?: 'dev' | 'prod'
+  rollbackTag: string
+  deployReason: string
+}
+
+export interface ServiceRollbackResponse {
+  status: 'accepted' | 'noop'
+  action: 'rollback'
+  serviceId: string
+  targetEnvironment: 'dev' | 'prod'
+  requestedBy: string
+  repository: string
+  baseBranch: string
+  branchName?: string | null
+  deploymentId?: string | null
+  gitPrUrl?: string | null
+  gitPrNumber?: number | null
+  previousTag?: string | null
+  newTag?: string | null
+  previousImageRef?: string | null
+  newImageRef?: string | null
+  compareUrl?: string | null
+  sourceCommitSha?: string | null
+  message?: string | null
+  initiatedAt: string
+}
+
 export interface ReleaseTraceabilityArgoState {
   appName?: string | null
   syncStatus?: string | null
@@ -559,6 +604,27 @@ export function requestPortalRollback(payload: PortalRollbackRequest) {
       rollbackApiTag: payload.rollbackApiTag,
       rollbackWebTag: payload.rollbackWebTag,
       reason: payload.reason,
+    }),
+  })
+}
+
+export function getServiceRollbackCandidates(
+  serviceId: string,
+  targetEnvironment: 'dev' | 'prod' = 'dev',
+) {
+  const query = new URLSearchParams({ targetEnvironment })
+  return request<ServiceRollbackCandidatesResponse>(
+    `/services/${encodeURIComponent(serviceId)}/rollback-candidates?${query.toString()}`,
+  )
+}
+
+export function requestServiceRollback(serviceId: string, payload: ServiceRollbackRequest) {
+  return request<ServiceRollbackResponse>(`/services/${encodeURIComponent(serviceId)}/rollback`, {
+    method: 'POST',
+    body: JSON.stringify({
+      targetEnvironment: payload.targetEnvironment ?? 'dev',
+      rollbackTag: payload.rollbackTag,
+      deployReason: payload.deployReason,
     }),
   })
 }

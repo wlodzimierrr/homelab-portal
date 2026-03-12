@@ -591,6 +591,81 @@ class PortalPromoteToProdResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class PortalServiceRollbackError(Exception):
+    def __init__(self, message: str, *, status_code: int = status.HTTP_502_BAD_GATEWAY):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PortalServiceRollbackCandidate(BaseModel):
+    tag: str
+    image_ref: str = Field(alias="imageRef")
+    compare_url: str | None = Field(default=None, alias="compareUrl")
+    source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
+    published_at: str | None = Field(default=None, alias="publishedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class PortalServiceRollbackCandidatesResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    target_environment: Literal["dev", "prod"] = Field(alias="targetEnvironment")
+    current_tag: str | None = Field(default=None, alias="currentTag")
+    current_image_ref: str | None = Field(default=None, alias="currentImageRef")
+    candidates: list[PortalServiceRollbackCandidate]
+    generated_at: str = Field(alias="generatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class PortalServiceRollbackRequest(BaseModel):
+    target_environment: Literal["dev", "prod"] = Field(default="dev", alias="targetEnvironment")
+    rollback_tag: str = Field(..., alias="rollbackTag", min_length=1)
+    deploy_reason: str = Field(..., alias="deployReason", min_length=5, max_length=500)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("rollback_tag")
+    @classmethod
+    def validate_rollback_tag(cls, value: str) -> str:
+        normalized = value.strip()
+        if not ROLLBACK_TAG_RE.fullmatch(normalized):
+            raise ValueError("rollbackTag must use sha-<40 hex> or semver format")
+        return normalized
+
+    @field_validator("deploy_reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 5:
+            raise ValueError("deployReason must be at least 5 characters long")
+        return normalized
+
+
+class PortalServiceRollbackResponse(BaseModel):
+    status: Literal["accepted", "noop"]
+    action: Literal["rollback"]
+    service_id: str = Field(alias="serviceId")
+    target_environment: Literal["dev", "prod"] = Field(alias="targetEnvironment")
+    requested_by: str = Field(alias="requestedBy")
+    repository: str
+    base_branch: str = Field(alias="baseBranch")
+    branch_name: str | None = Field(default=None, alias="branchName")
+    deployment_id: str | None = Field(default=None, alias="deploymentId")
+    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
+    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
+    previous_tag: str | None = Field(default=None, alias="previousTag")
+    new_tag: str | None = Field(default=None, alias="newTag")
+    previous_image_ref: str | None = Field(default=None, alias="previousImageRef")
+    new_image_ref: str | None = Field(default=None, alias="newImageRef")
+    compare_url: str | None = Field(default=None, alias="compareUrl")
+    source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
+    message: str | None = None
+    initiated_at: str = Field(alias="initiatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ServiceRegistrySyncFailure(BaseModel):
     source: str
     scope: str
@@ -1635,6 +1710,31 @@ def _promote_to_prod_target(service_id: str) -> dict[str, object]:
     return target
 
 
+def _rollback_target(service_id: str, target_environment: str) -> dict[str, object]:
+    if target_environment == "dev":
+        target = _dev_deploy_target(service_id)
+        return {
+            "image_repo": str(target["image_repo"]),
+            "patch_files": [str(path) for path in target["patch_files"]],
+            "argo_app": str(target["argo_app"]),
+            "target_environment": "dev",
+        }
+
+    if target_environment == "prod":
+        target = _promote_to_prod_target(service_id)
+        return {
+            "image_repo": str(target["image_repo"]),
+            "patch_files": [str(path) for path in target["patch_files"]],
+            "argo_app": str(target["argo_app"]),
+            "target_environment": "prod",
+        }
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Unsupported rollback target environment {target_environment!r}.",
+    )
+
+
 def _build_service_image_ref(service_id: str, tag: str) -> str:
     target = _dev_deploy_target(service_id)
     image_repo = str(target["image_repo"])
@@ -1723,7 +1823,13 @@ def _package_version_has_tag(payload: object, expected_tag: str) -> bool:
     return False
 
 
-def _ensure_ghcr_tag_exists(image_repo: str, tag: str, *, timeout_seconds: float = 10.0) -> None:
+def _ensure_ghcr_tag_exists(
+    image_repo: str,
+    tag: str,
+    *,
+    purpose: str = "Requested image tag",
+    timeout_seconds: float = 10.0,
+) -> None:
     token = _ghcr_token()
     github_api_base = _github_api_base_url()
     headers = {
@@ -1769,7 +1875,7 @@ def _ensure_ghcr_tag_exists(image_repo: str, tag: str, *, timeout_seconds: float
             break
 
     raise PortalPromoteToProdError(
-        f"Promoted image tag {tag!r} was not found in GitHub Packages for {image_repo}.",
+        f"{purpose} {tag!r} was not found in GitHub Packages for {image_repo}.",
         status_code=status.HTTP_409_CONFLICT,
     )
 
@@ -1796,6 +1902,22 @@ def _build_prod_promote_branch_name(service_id: str, tag: str, requested_at: dat
         tag_fragment = f"sha-{tag[4:16]}"
     return (
         f"automation/prod-promote-{service_id}-"
+        f"{_safe_branch_fragment(tag_fragment)}-"
+        f"{requested_at.strftime('%Y%m%d%H%M%S')}"
+    )
+
+
+def _build_service_rollback_branch_name(
+    service_id: str,
+    target_environment: str,
+    tag: str,
+    requested_at: datetime,
+) -> str:
+    tag_fragment = tag
+    if tag.startswith("sha-") and len(tag) > 20:
+        tag_fragment = f"sha-{tag[4:16]}"
+    return (
+        f"automation/{target_environment}-rollback-{service_id}-"
         f"{_safe_branch_fragment(tag_fragment)}-"
         f"{requested_at.strftime('%Y%m%d%H%M%S')}"
     )
@@ -1967,6 +2089,99 @@ def _load_promote_to_prod_update_plan(
     return image_repo, previous_image_ref, source_image_ref, new_tag, updated_files
 
 
+def _load_service_rollback_update_plan(
+    git_provider: GitProvider,
+    *,
+    service_id: str,
+    repo_slug: str,
+    branch: str,
+    target_environment: str,
+    rollback_tag: str,
+) -> tuple[str, str | None, str, dict[str, str]]:
+    target = _rollback_target(service_id, target_environment)
+    image_repo = str(target["image_repo"])
+    patch_files = [str(path) for path in target["patch_files"]]
+    rollback_image_ref = f"{image_repo}:{rollback_tag}"
+
+    previous_image_ref: str | None = None
+    updated_files: dict[str, str] = {}
+    for file_path in patch_files:
+        current_content = git_provider.read_file(repo_slug, branch, file_path)
+        file_image_ref = _extract_image_ref_from_overlay(
+            current_content,
+            image_repo=image_repo,
+            file_path=file_path,
+        )
+        if previous_image_ref is None:
+            previous_image_ref = file_image_ref
+        elif previous_image_ref != file_image_ref:
+            raise PortalServiceRollbackError(
+                f"GitOps {target_environment} overlay for {service_id} is inconsistent across image patch files.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        updated_files[file_path] = _replace_image_ref_in_overlay(
+            current_content,
+            image_repo=image_repo,
+            new_image_ref=rollback_image_ref,
+            file_path=file_path,
+        )
+
+    return image_repo, previous_image_ref, rollback_image_ref, updated_files
+
+
+def _list_service_rollback_candidates(
+    *,
+    image_repo: str,
+    current_tag: str | None,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    excluded_tags = {current_tag} if isinstance(current_tag, str) and current_tag else set()
+    seen: set[str] = set()
+    candidates: list[dict[str, object]] = []
+
+    for page in range(1, 6):
+        exhausted = True
+        for path in _github_package_version_paths(image_repo, page=page):
+            payload = _github_api_json(path)
+            if isinstance(payload, list) and payload:
+                exhausted = False
+            if not isinstance(payload, list):
+                continue
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                metadata = item.get("metadata")
+                container = metadata.get("container") if isinstance(metadata, dict) else None
+                tags = container.get("tags") if isinstance(container, dict) else None
+                if not isinstance(tags, list):
+                    continue
+                published_at = item.get("created_at") if isinstance(item.get("created_at"), str) else None
+                for raw_tag in tags:
+                    if not isinstance(raw_tag, str):
+                        continue
+                    tag = raw_tag.strip()
+                    if not tag or tag in excluded_tags or tag in seen:
+                        continue
+                    if not ROLLBACK_TAG_RE.fullmatch(tag):
+                        continue
+                    seen.add(tag)
+                    candidates.append(
+                        {
+                            "tag": tag,
+                            "imageRef": f"{image_repo}:{tag}",
+                            "compareUrl": _build_compare_url_for_portal_tags(current_tag, tag),
+                            "sourceCommitSha": _extract_sha_from_tag(tag),
+                            "publishedAt": published_at,
+                        }
+                    )
+                    if len(candidates) >= limit:
+                        return candidates
+        if exhausted:
+            break
+
+    return candidates
+
+
 def _build_dev_deploy_pr_body(
     *,
     service_id: str,
@@ -2033,6 +2248,39 @@ def _build_promote_to_prod_pr_body(
         [
             "",
             "This pull request updates only the prod overlay image reference(s) for the selected service to match dev.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_service_rollback_pr_body(
+    *,
+    service_id: str,
+    target_environment: str,
+    requested_by: str,
+    deploy_reason: str,
+    previous_tag: str | None,
+    rollback_tag: str,
+    rollback_image_ref: str,
+    compare_url: str | None,
+) -> str:
+    lines = [
+        "Portal-requested rollback.",
+        "",
+        f"- Service: `{service_id}`",
+        f"- Target environment: `{target_environment}`",
+        f"- Requested by: `{requested_by}`",
+        f"- Reason: {deploy_reason}",
+        f"- Current tag: `{previous_tag or 'unknown'}`",
+        f"- Rollback tag: `{rollback_tag}`",
+        f"- Target image: `{rollback_image_ref}`",
+    ]
+    if compare_url:
+        lines.append(f"- Compare: {compare_url}")
+    lines.extend(
+        [
+            "",
+            "This pull request updates only the selected service image reference(s) for the chosen environment.",
         ]
     )
     return "\n".join(lines)
@@ -4516,6 +4764,270 @@ def request_portal_promote_to_prod(
         gitPrNumber=pr["number"],
         previousTag=previous_tag,
         newTag=new_tag,
+        previousImageRef=previous_image_ref,
+        newImageRef=new_image_ref,
+        compareUrl=compare_url,
+        sourceCommitSha=source_commit_sha,
+        message=None,
+        initiatedAt=initiated_at.isoformat(),
+    )
+
+
+@app.get(
+    "/services/{service_id}/rollback-candidates",
+    response_model=PortalServiceRollbackCandidatesResponse,
+    tags=["metadata"],
+)
+def list_service_rollback_candidates(
+    service_id: str,
+    target_environment: Literal["dev", "prod"] = Query(default="dev", alias="targetEnvironment"),
+    identity: tuple[str, set[str]] = Depends(get_current_user),
+) -> PortalServiceRollbackCandidatesResponse:
+    _requested_by, _groups = identity
+    initiated_at = datetime.now(tz=timezone.utc)
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+
+    try:
+        git_provider = build_default_git_provider()
+        target = _rollback_target(service_id, target_environment)
+        image_repo = str(target["image_repo"])
+        patch_files = [str(path) for path in target["patch_files"]]
+        previous_image_ref: str | None = None
+        for file_path in patch_files:
+            current_content = git_provider.read_file(workloads_repo, base_branch, file_path)
+            file_image_ref = _extract_image_ref_from_overlay(
+                current_content,
+                image_repo=image_repo,
+                file_path=file_path,
+            )
+            if previous_image_ref is None:
+                previous_image_ref = file_image_ref
+            elif previous_image_ref != file_image_ref:
+                raise PortalServiceRollbackError(
+                    f"GitOps {target_environment} overlay for {service_id} is inconsistent across image patch files.",
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+        current_tag = _extract_version_from_image_ref(previous_image_ref)
+        candidates = _list_service_rollback_candidates(image_repo=image_repo, current_tag=current_tag)
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except (PortalDeployToDevError, PortalPromoteToProdError, PortalServiceRollbackError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    return PortalServiceRollbackCandidatesResponse(
+        serviceId=service_id,
+        targetEnvironment=target_environment,
+        currentTag=current_tag,
+        currentImageRef=previous_image_ref,
+        candidates=candidates,
+        generatedAt=initiated_at.isoformat(),
+    )
+
+
+@app.post(
+    "/services/{service_id}/rollback",
+    response_model=PortalServiceRollbackResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["metadata"],
+)
+def request_service_rollback(
+    service_id: str,
+    payload: PortalServiceRollbackRequest,
+    response: Response,
+    identity: tuple[str, set[str]] = Depends(get_current_user),
+) -> PortalServiceRollbackResponse:
+    requested_by, _groups = identity
+    initiated_at = datetime.now(tz=timezone.utc)
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+
+    try:
+        git_provider = build_default_git_provider()
+        target = _rollback_target(service_id, payload.target_environment)
+        image_repo, previous_image_ref, new_image_ref, updated_files = _load_service_rollback_update_plan(
+            git_provider,
+            service_id=service_id,
+            repo_slug=workloads_repo,
+            branch=base_branch,
+            target_environment=payload.target_environment,
+            rollback_tag=payload.rollback_tag,
+        )
+        _ensure_ghcr_tag_exists(image_repo, payload.rollback_tag, purpose="Rollback image tag")
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except (PortalPromoteToProdError, PortalServiceRollbackError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    previous_tag = _extract_version_from_image_ref(previous_image_ref)
+    compare_url = _build_compare_url_for_portal_tags(previous_tag, payload.rollback_tag)
+    source_commit_sha = _extract_sha_from_tag(payload.rollback_tag)
+
+    if previous_image_ref == new_image_ref:
+        response.status_code = status.HTTP_200_OK
+        return PortalServiceRollbackResponse(
+            status="noop",
+            action="rollback",
+            serviceId=service_id,
+            targetEnvironment=payload.target_environment,
+            requestedBy=requested_by,
+            repository=workloads_repo,
+            baseBranch=base_branch,
+            branchName=None,
+            deploymentId=None,
+            gitPrUrl=None,
+            gitPrNumber=None,
+            previousTag=previous_tag,
+            newTag=payload.rollback_tag,
+            previousImageRef=previous_image_ref,
+            newImageRef=new_image_ref,
+            compareUrl=compare_url,
+            sourceCommitSha=source_commit_sha,
+            message=f"{payload.target_environment.title()} overlay already matches the requested rollback tag.",
+            initiatedAt=initiated_at.isoformat(),
+        )
+
+    active_lock = _get_active_deployment_lock(service_id, payload.target_environment)
+    if active_lock is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    f"Active deployment lock already exists for {service_id}/{payload.target_environment}. "
+                    "Wait for the in-flight mutation to finish or clear its stale lock."
+                ),
+                "activeLock": _build_deployment_lock_response(active_lock).model_dump(by_alias=True),
+            },
+        )
+
+    branch_name = _build_service_rollback_branch_name(
+        service_id,
+        payload.target_environment,
+        payload.rollback_tag,
+        initiated_at,
+    )
+    pr_title = f"Rollback {service_id}: {payload.rollback_tag} in {payload.target_environment}"
+    pr_body = _build_service_rollback_pr_body(
+        service_id=service_id,
+        target_environment=payload.target_environment,
+        requested_by=requested_by,
+        deploy_reason=payload.deploy_reason,
+        previous_tag=previous_tag,
+        rollback_tag=payload.rollback_tag,
+        rollback_image_ref=new_image_ref,
+        compare_url=compare_url,
+    )
+
+    try:
+        git_provider.create_branch(workloads_repo, base_branch, branch_name)
+        git_provider.commit_to_branch(
+            workloads_repo,
+            branch_name,
+            updated_files,
+            pr_title,
+        )
+        pr = git_provider.open_pr(
+            workloads_repo,
+            branch_name,
+            base_branch,
+            pr_title,
+            pr_body,
+        )
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    request_key = f"gitops-pr:{pr['number']}:{service_id}:{payload.target_environment}:rollback"
+    record_payload = CreateDeploymentRecordRequest(
+        serviceId=service_id,
+        env=payload.target_environment,
+        action="rollback",
+        status="pending",
+        requestedAt=initiated_at,
+        requestedBy=requested_by,
+        gitPrUrl=pr["url"],
+        gitPrNumber=pr["number"],
+        imageRef=new_image_ref,
+        previousImageRef=previous_image_ref,
+        argoApp=str(target["argo_app"]),
+        gitRef=branch_name,
+        deployReason=payload.deploy_reason,
+        compareUrl=compare_url,
+        requestKey=request_key,
+        metadata={
+            "source": "portal-service-rollback",
+            "previousTag": previous_tag,
+            "newTag": payload.rollback_tag,
+            "patchFiles": sorted(updated_files),
+            "targetEnvironment": payload.target_environment,
+        },
+    )
+
+    try:
+        record = _upsert_deployment_record_row(record_payload, requested_by=requested_by)
+    except DeploymentLockConflictError as exc:
+        try:
+            git_provider.close_pr(workloads_repo, pr["number"])
+        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
+            logger.warning(
+                "service_rollback_failed_to_close_pr service_id=%s pr_number=%s error=%s",
+                service_id,
+                pr["number"],
+                close_exc,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    f"Active deployment lock already exists for {service_id}/{payload.target_environment}. "
+                    "Wait for the in-flight mutation to finish or clear its stale lock."
+                ),
+                "activeLock": _build_deployment_lock_response(exc.active_lock).model_dump(by_alias=True),
+            },
+        ) from exc
+    except Exception:
+        try:
+            git_provider.close_pr(workloads_repo, pr["number"])
+        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
+            logger.warning(
+                "service_rollback_failed_to_close_pr service_id=%s pr_number=%s error=%s",
+                service_id,
+                pr["number"],
+                close_exc,
+            )
+        raise
+
+    return PortalServiceRollbackResponse(
+        status="accepted",
+        action="rollback",
+        serviceId=service_id,
+        targetEnvironment=payload.target_environment,
+        requestedBy=requested_by,
+        repository=workloads_repo,
+        baseBranch=base_branch,
+        branchName=branch_name,
+        deploymentId=record.get("deploymentId") if isinstance(record.get("deploymentId"), str) else None,
+        gitPrUrl=pr["url"],
+        gitPrNumber=pr["number"],
+        previousTag=previous_tag,
+        newTag=payload.rollback_tag,
         previousImageRef=previous_image_ref,
         newImageRef=new_image_ref,
         compareUrl=compare_url,

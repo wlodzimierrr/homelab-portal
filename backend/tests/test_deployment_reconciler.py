@@ -206,6 +206,50 @@ def test_load_recent_gitops_deployment_events_extracts_rollback_reason_from_pull
     assert web_event.metadata["operatorReason"] == reason
 
 
+def test_load_recent_gitops_deployment_events_parses_manual_service_rollback_pull_request() -> None:
+    rollback_sha = "f" * 40
+    reason = "Rollback homelab-web dev to a previously verified image."
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 74,
+                "title": f"Rollback homelab-web: sha-{rollback_sha} in dev",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/74",
+                "state": "open",
+                "created_at": "2026-03-12T13:57:31Z",
+                "closed_at": None,
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "body": "\n".join(
+                    [
+                        "Portal-requested rollback.",
+                        "- Service: `homelab-web`",
+                        "- Target environment: `dev`",
+                        f"- Target image: `ghcr.io/wlodzimierrr/homelab-web:sha-{rollback_sha}`",
+                        f"- Reason: {reason}",
+                    ]
+                ),
+                "user": {"login": "wlodzimierrr"},
+                "head": {"ref": f"automation/dev-rollback-homelab-web-sha-{rollback_sha[:12]}-20260312135731"},
+            }
+        ]
+
+    events = deployment_reconciler.load_recent_gitops_deployment_events(
+        github_fetch_json=_fake_fetch,
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.service_id == "homelab-web"
+    assert event.env == "dev"
+    assert event.action == "rollback"
+    assert event.source_commit_sha == rollback_sha
+    assert event.target_image == f"ghcr.io/wlodzimierrr/homelab-web:sha-{rollback_sha}"
+    assert event.request_key == "gitops-pr:74:homelab-web:dev:rollback"
+    assert event.metadata["operatorReason"] == reason
+
+
 def test_reconcile_recent_gitops_deployments_marks_merged_pull_request_live(monkeypatch) -> None:
     source_sha = "b" * 40
     target_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}"

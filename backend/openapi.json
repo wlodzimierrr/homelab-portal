@@ -975,6 +975,188 @@
         }
       }
     },
+    "/services/{service_id}/rollback-candidates": {
+      "get": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "List Service Rollback Candidates",
+        "operationId": "list_service_rollback_candidates_services__service_id__rollback_candidates_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "targetEnvironment",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "dev",
+                "prod"
+              ],
+              "type": "string",
+              "default": "dev",
+              "title": "Targetenvironment"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortalServiceRollbackCandidatesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/services/{service_id}/rollback": {
+      "post": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Request Service Rollback",
+        "operationId": "request_service_rollback_services__service_id__rollback_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortalServiceRollbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortalServiceRollbackResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/rollbacks": {
       "post": {
         "tags": [
@@ -5107,6 +5289,322 @@
           "initiatedAt"
         ],
         "title": "PortalRollbackResponse"
+      },
+      "PortalServiceRollbackCandidate": {
+        "properties": {
+          "tag": {
+            "type": "string",
+            "title": "Tag"
+          },
+          "imageRef": {
+            "type": "string",
+            "title": "Imageref"
+          },
+          "compareUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compareurl"
+          },
+          "sourceCommitSha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourcecommitsha"
+          },
+          "publishedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publishedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tag",
+          "imageRef"
+        ],
+        "title": "PortalServiceRollbackCandidate"
+      },
+      "PortalServiceRollbackCandidatesResponse": {
+        "properties": {
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "targetEnvironment": {
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod"
+            ],
+            "title": "Targetenvironment"
+          },
+          "currentTag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currenttag"
+          },
+          "currentImageRef": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currentimageref"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/PortalServiceRollbackCandidate"
+            },
+            "type": "array",
+            "title": "Candidates"
+          },
+          "generatedAt": {
+            "type": "string",
+            "title": "Generatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "serviceId",
+          "targetEnvironment",
+          "candidates",
+          "generatedAt"
+        ],
+        "title": "PortalServiceRollbackCandidatesResponse"
+      },
+      "PortalServiceRollbackRequest": {
+        "properties": {
+          "targetEnvironment": {
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod"
+            ],
+            "title": "Targetenvironment",
+            "default": "dev"
+          },
+          "rollbackTag": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Rollbacktag"
+          },
+          "deployReason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 5,
+            "title": "Deployreason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rollbackTag",
+          "deployReason"
+        ],
+        "title": "PortalServiceRollbackRequest"
+      },
+      "PortalServiceRollbackResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "noop"
+            ],
+            "title": "Status"
+          },
+          "action": {
+            "type": "string",
+            "const": "rollback",
+            "title": "Action"
+          },
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "targetEnvironment": {
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod"
+            ],
+            "title": "Targetenvironment"
+          },
+          "requestedBy": {
+            "type": "string",
+            "title": "Requestedby"
+          },
+          "repository": {
+            "type": "string",
+            "title": "Repository"
+          },
+          "baseBranch": {
+            "type": "string",
+            "title": "Basebranch"
+          },
+          "branchName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branchname"
+          },
+          "deploymentId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deploymentid"
+          },
+          "gitPrUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprurl"
+          },
+          "gitPrNumber": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprnumber"
+          },
+          "previousTag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previoustag"
+          },
+          "newTag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newtag"
+          },
+          "previousImageRef": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previousimageref"
+          },
+          "newImageRef": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newimageref"
+          },
+          "compareUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compareurl"
+          },
+          "sourceCommitSha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourcecommitsha"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "initiatedAt": {
+            "type": "string",
+            "title": "Initiatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "action",
+          "serviceId",
+          "targetEnvironment",
+          "requestedBy",
+          "repository",
+          "baseBranch",
+          "initiatedAt"
+        ],
+        "title": "PortalServiceRollbackResponse"
       },
       "Project": {
         "properties": {
