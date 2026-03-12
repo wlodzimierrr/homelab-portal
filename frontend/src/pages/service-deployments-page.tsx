@@ -111,6 +111,25 @@ function formatWindowRange(start?: string, end?: string) {
   return `${formatTimestamp(start)} -> ${formatTimestamp(end)}`
 }
 
+function isDeploymentRecordId(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+function buildDeploymentObservabilityRequest(item: DeploymentHistoryItem) {
+  if (isDeploymentRecordId(item.id)) {
+    return { deploymentId: item.id }
+  }
+
+  const windowStart = item.requestedAt ?? item.deployedAt
+  const windowEnd = item.deployedAt ?? item.requestedAt
+
+  if (windowStart && windowEnd) {
+    return { windowStart, windowEnd }
+  }
+
+  return { deploymentId: item.id }
+}
+
 function ObservabilityStatusBadge({
   status,
 }: {
@@ -297,7 +316,7 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
     setObservabilityError('')
     try {
       const response = await getDeploymentObservability(serviceIdentity, {
-        deploymentId: selectedDeployment.id,
+        ...buildDeploymentObservabilityRequest(selectedDeployment),
         logsPreset,
         logsLimit: 50,
       })

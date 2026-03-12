@@ -1377,126 +1377,6 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               </div>
             ) : null}
 
-            <section className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold">Deploy Info</h2>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void loadDeploymentInfo()}
-                  disabled={deploymentInfoLoading}
-                >
-                  Refresh deploy info
-                </Button>
-              </div>
-              {deploymentInfoError ? (
-                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
-                  <p className="text-xs text-amber-900 dark:text-amber-200">{deploymentInfoError}</p>
-                </div>
-              ) : null}
-              {deploymentInfoLoading ? (
-                <LoadingState label="Loading deploy info..." rows={2} />
-              ) : deploymentInfo ? (
-                <div className="grid gap-3 xl:grid-cols-2">
-                  <article className="rounded-md border border-border bg-background p-4">
-                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Current deployment</p>
-                    <div className="mt-2 space-y-2 text-sm">
-                      <p>
-                        <span className="font-medium">Action:</span> {formatDeploymentAction(deploymentInfo.action)}
-                      </p>
-                      <p>
-                        <span className="font-medium">Result:</span>{' '}
-                        <span
-                          className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${getDeploymentOutcomeTone(
-                            deploymentInfo.result,
-                          )}`}
-                        >
-                          {deploymentInfo.result ?? 'unknown'}
-                        </span>
-                      </p>
-                      <p>
-                        <span className="font-medium">Deployed:</span>{' '}
-                        {formatDate(deploymentInfo.deployedTimestamp ?? undefined)}
-                      </p>
-                      <p className="break-all">
-                        <span className="font-medium">Image:</span>{' '}
-                        {deploymentInfo.imageUrl ? (
-                          <a href={deploymentInfo.imageUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            {deploymentInfo.deployedImage ?? 'N/A'}
-                          </a>
-                        ) : (
-                          deploymentInfo.deployedImage ?? 'N/A'
-                        )}
-                      </p>
-                      {deploymentInfo.previousImage ? (
-                        <p className="break-all">
-                          <span className="font-medium">Previous image:</span> {deploymentInfo.previousImage}
-                        </p>
-                      ) : null}
-                      {deploymentInfo.imageDigest ? (
-                        <p className="break-all">
-                          <span className="font-medium">Digest:</span> {deploymentInfo.imageDigest}
-                        </p>
-                      ) : null}
-                    </div>
-                  </article>
-                  <article className="rounded-md border border-border bg-background p-4">
-                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Traceability</p>
-                    <div className="mt-2 space-y-2 text-sm">
-                      <p>
-                        <span className="font-medium">Commit:</span>{' '}
-                        {deploymentInfo.commitUrl ? (
-                          <a href={deploymentInfo.commitUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            {deploymentInfo.gitCommit ?? 'N/A'}
-                          </a>
-                        ) : (
-                          deploymentInfo.gitCommit ?? 'N/A'
-                        )}
-                      </p>
-                      <p>
-                        <span className="font-medium">Argo:</span> {deploymentInfo.argoApp ?? 'N/A'}
-                      </p>
-                      <p>
-                        <span className="font-medium">Sync/health:</span> {deploymentInfo.syncStatus ?? 'unknown'} /{' '}
-                        {deploymentInfo.healthStatus ?? 'unknown'}
-                      </p>
-                      {deploymentInfo.gitPrUrl ? (
-                        <p>
-                          <span className="font-medium">PR:</span>{' '}
-                          <a href={deploymentInfo.gitPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            #{deploymentInfo.gitPrNumber ?? 'link'}
-                          </a>
-                        </p>
-                      ) : null}
-                      {deploymentInfo.compareUrl ? (
-                        <p>
-                          <span className="font-medium">Compare:</span>{' '}
-                          <a href={deploymentInfo.compareUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            Open compare view
-                          </a>
-                        </p>
-                      ) : null}
-                      {deploymentInfo.deployReason ? (
-                        <p>
-                          <span className="font-medium">Reason:</span> {deploymentInfo.deployReason}
-                        </p>
-                      ) : null}
-                      {deploymentInfo.resultReason ? (
-                        <p>
-                          <span className="font-medium">Result reason:</span> {deploymentInfo.resultReason}
-                        </p>
-                      ) : null}
-                    </div>
-                  </article>
-                </div>
-              ) : (
-                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
-                  No deployment info is available for this service yet.
-                </p>
-              )}
-            </section>
-
             {rollbackSupported ? (
               <section className="space-y-3 rounded-md border border-border bg-card p-4">
                 <div className="space-y-1">
@@ -2422,6 +2302,126 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 </div>
               </section>
             ) : null}
+
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold">Deploy Info</h2>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void loadDeploymentInfo()}
+                  disabled={deploymentInfoLoading}
+                >
+                  Refresh deploy info
+                </Button>
+              </div>
+              {deploymentInfoError ? (
+                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                  <p className="text-xs text-amber-900 dark:text-amber-200">{deploymentInfoError}</p>
+                </div>
+              ) : null}
+              {deploymentInfoLoading ? (
+                <LoadingState label="Loading deploy info..." rows={2} />
+              ) : deploymentInfo ? (
+                <div className="grid gap-3 xl:grid-cols-2">
+                  <article className="rounded-md border border-border bg-background p-4">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Current deployment</p>
+                    <div className="mt-2 space-y-2 text-sm">
+                      <p>
+                        <span className="font-medium">Action:</span> {formatDeploymentAction(deploymentInfo.action)}
+                      </p>
+                      <p>
+                        <span className="font-medium">Result:</span>{' '}
+                        <span
+                          className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${getDeploymentOutcomeTone(
+                            deploymentInfo.result,
+                          )}`}
+                        >
+                          {deploymentInfo.result ?? 'unknown'}
+                        </span>
+                      </p>
+                      <p>
+                        <span className="font-medium">Deployed:</span>{' '}
+                        {formatDate(deploymentInfo.deployedTimestamp ?? undefined)}
+                      </p>
+                      <p className="break-all">
+                        <span className="font-medium">Image:</span>{' '}
+                        {deploymentInfo.imageUrl ? (
+                          <a href={deploymentInfo.imageUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            {deploymentInfo.deployedImage ?? 'N/A'}
+                          </a>
+                        ) : (
+                          deploymentInfo.deployedImage ?? 'N/A'
+                        )}
+                      </p>
+                      {deploymentInfo.previousImage ? (
+                        <p className="break-all">
+                          <span className="font-medium">Previous image:</span> {deploymentInfo.previousImage}
+                        </p>
+                      ) : null}
+                      {deploymentInfo.imageDigest ? (
+                        <p className="break-all">
+                          <span className="font-medium">Digest:</span> {deploymentInfo.imageDigest}
+                        </p>
+                      ) : null}
+                    </div>
+                  </article>
+                  <article className="rounded-md border border-border bg-background p-4">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Traceability</p>
+                    <div className="mt-2 space-y-2 text-sm">
+                      <p>
+                        <span className="font-medium">Commit:</span>{' '}
+                        {deploymentInfo.commitUrl ? (
+                          <a href={deploymentInfo.commitUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            {deploymentInfo.gitCommit ?? 'N/A'}
+                          </a>
+                        ) : (
+                          deploymentInfo.gitCommit ?? 'N/A'
+                        )}
+                      </p>
+                      <p>
+                        <span className="font-medium">Argo:</span> {deploymentInfo.argoApp ?? 'N/A'}
+                      </p>
+                      <p>
+                        <span className="font-medium">Sync/health:</span> {deploymentInfo.syncStatus ?? 'unknown'} /{' '}
+                        {deploymentInfo.healthStatus ?? 'unknown'}
+                      </p>
+                      {deploymentInfo.gitPrUrl ? (
+                        <p>
+                          <span className="font-medium">PR:</span>{' '}
+                          <a href={deploymentInfo.gitPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            #{deploymentInfo.gitPrNumber ?? 'link'}
+                          </a>
+                        </p>
+                      ) : null}
+                      {deploymentInfo.compareUrl ? (
+                        <p>
+                          <span className="font-medium">Compare:</span>{' '}
+                          <a href={deploymentInfo.compareUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            Open compare view
+                          </a>
+                        </p>
+                      ) : null}
+                      {deploymentInfo.deployReason ? (
+                        <p>
+                          <span className="font-medium">Reason:</span> {deploymentInfo.deployReason}
+                        </p>
+                      ) : null}
+                      {deploymentInfo.resultReason ? (
+                        <p>
+                          <span className="font-medium">Result reason:</span> {deploymentInfo.resultReason}
+                        </p>
+                      ) : null}
+                    </div>
+                  </article>
+                </div>
+              ) : (
+                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                  No deployment info is available for this service yet.
+                </p>
+              )}
+            </section>
 
             <section className="space-y-3">
               <div className="flex items-center justify-between gap-2">
