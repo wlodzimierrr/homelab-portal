@@ -97,6 +97,14 @@ from app.observability_config import (
     parse_duration_token,
     render_query_template,
 )
+from app.secret_editing import (
+    SecretEditingError,
+    decrypt_secret_manifest,
+    encrypt_secret_manifest,
+    enforce_secret_edit_rate_limit,
+    resolve_secret_edit_target,
+    update_secret_manifest_document,
+)
 
 app = FastAPI(title="Homelab Backend API", version="0.1.0")
 logger = logging.getLogger("homelab.backend.monitoring")
@@ -610,6 +618,47 @@ class PortalPromoteToProdResponse(BaseModel):
     new_image_ref: str | None = Field(default=None, alias="newImageRef")
     compare_url: str | None = Field(default=None, alias="compareUrl")
     source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
+    message: str | None = None
+    initiated_at: str = Field(alias="initiatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class PortalSetSecretRequest(BaseModel):
+    env: Literal["dev", "prod"]
+    secret_key: str = Field(..., alias="secretKey", min_length=1, max_length=128)
+    secret_value: str = Field(..., alias="secretValue", min_length=1, max_length=10_000)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("secret_key")
+    @classmethod
+    def validate_secret_key(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("secretKey must not be empty")
+        return normalized
+
+    @field_validator("secret_value")
+    @classmethod
+    def validate_secret_value(cls, value: str) -> str:
+        if value == "":
+            raise ValueError("secretValue must not be empty")
+        return value
+
+
+class PortalSetSecretResponse(BaseModel):
+    status: Literal["accepted"]
+    service_id: str = Field(alias="serviceId")
+    env: Literal["dev", "prod"]
+    secret_key: str = Field(alias="secretKey")
+    requested_by: str = Field(alias="requestedBy")
+    repository: str
+    base_branch: str = Field(alias="baseBranch")
+    branch_name: str = Field(alias="branchName")
+    git_pr_url: str = Field(alias="gitPrUrl")
+    git_pr_number: int = Field(alias="gitPrNumber")
+    secret_file_path: str = Field(alias="secretFilePath")
     message: str | None = None
     initiated_at: str = Field(alias="initiatedAt")
 
@@ -2373,6 +2422,42 @@ def _build_service_rollback_pr_body(
         ]
     )
     return "\n".join(lines)
+
+
+def _build_secret_edit_branch_name(
+    service_id: str,
+    env: str,
+    secret_key: str,
+    requested_at: datetime,
+) -> str:
+    return (
+        f"automation/{env}-secret-{_safe_branch_fragment(service_id)}-"
+        f"{_safe_branch_fragment(secret_key)}-{requested_at.strftime('%Y%m%d%H%M%S')}"
+    )
+
+
+def _build_secret_edit_pr_body(
+    *,
+    service_id: str,
+    env: str,
+    secret_key: str,
+    requested_by: str,
+    secret_file_path: str,
+) -> str:
+    return "\n".join(
+        [
+            "Portal-requested secret update.",
+            "",
+            f"- Service: `{service_id}`",
+            f"- Environment: `{env}`",
+            f"- Secret key: `{secret_key}`",
+            f"- Requested by: `{requested_by}`",
+            f"- Secret manifest: `{secret_file_path}`",
+            "",
+            "This pull request updates only the encrypted secret manifest for the selected service and environment.",
+            "The secret value is intentionally not included in the pull request body.",
+        ]
+    )
 
 
 def _select_preferred_service_row(
@@ -4969,6 +5054,99 @@ def request_portal_promote_to_prod(
         compareUrl=compare_url,
         sourceCommitSha=source_commit_sha,
         message=None,
+        initiatedAt=initiated_at.isoformat(),
+    )
+
+
+@app.post(
+    "/services/{service_id}/config/set-secret",
+    response_model=PortalSetSecretResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["metadata"],
+)
+def request_portal_set_secret(
+    service_id: str,
+    payload: PortalSetSecretRequest,
+    admin_user: str = Depends(require_admin),
+) -> PortalSetSecretResponse:
+    initiated_at = datetime.now(tz=timezone.utc)
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+
+    try:
+        enforce_secret_edit_rate_limit(
+            identity_key=f"secret-edit:{admin_user}",
+            now=initiated_at,
+        )
+        target = resolve_secret_edit_target(service_id, payload.env, payload.secret_key)
+        git_provider = build_default_git_provider()
+        encrypted_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
+        decrypted_manifest = decrypt_secret_manifest(encrypted_contents)
+        updated_manifest = update_secret_manifest_document(
+            decrypted_manifest,
+            target=target,
+            secret_key=payload.secret_key,
+            secret_value=payload.secret_value,
+        )
+        encrypted_manifest = encrypt_secret_manifest(updated_manifest)
+    except SecretEditingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    branch_name = _build_secret_edit_branch_name(service_id, payload.env, payload.secret_key, initiated_at)
+    pr_title = f"Secret: {service_id} {payload.env} {payload.secret_key} updated"
+    pr_body = _build_secret_edit_pr_body(
+        service_id=service_id,
+        env=payload.env,
+        secret_key=payload.secret_key,
+        requested_by=admin_user,
+        secret_file_path=target.file_path,
+    )
+
+    try:
+        git_provider.create_branch(workloads_repo, base_branch, branch_name)
+        git_provider.commit_to_branch(
+            workloads_repo,
+            branch_name,
+            {target.file_path: encrypted_manifest},
+            pr_title,
+        )
+        pr = git_provider.open_pr(
+            workloads_repo,
+            branch_name,
+            base_branch,
+            pr_title,
+            pr_body,
+        )
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return PortalSetSecretResponse(
+        status="accepted",
+        serviceId=service_id,
+        env=payload.env,
+        secretKey=payload.secret_key,
+        requestedBy=admin_user,
+        repository=workloads_repo,
+        baseBranch=base_branch,
+        branchName=branch_name,
+        gitPrUrl=pr["url"],
+        gitPrNumber=pr["number"],
+        secretFilePath=target.file_path,
+        message="Encrypted secret update pull request created.",
         initiatedAt=initiated_at.isoformat(),
     )
 

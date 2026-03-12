@@ -1,10 +1,14 @@
 FROM python:3.11-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    SOPS_VERSION=3.9.4
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends git \
+    && apt-get install --yes --no-install-recommends ca-certificates curl git \
+    && curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64" \
+      -o /usr/local/bin/sops \
+    && chmod +x /usr/local/bin/sops \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
