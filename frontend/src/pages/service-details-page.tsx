@@ -7,25 +7,32 @@ import { ServiceMetricTrendChart } from '@/components/service-metric-trend-chart
 import { ServiceHealthTimeline } from '@/components/service-health-timeline'
 import { ServiceMetricCard, type MetricSeverity } from '@/components/service-metric-card'
 import { StatusCard } from '@/components/status-card'
+import { ToastMessage } from '@/components/toast-message'
 import { UptimeIndicator } from '@/components/uptime-indicator'
 import { Button } from '@/components/ui/button'
 import {
   getProjects,
   getReleaseTraceability,
+  getServiceDeploymentInfo,
   getServiceRollbackCandidates,
   getService,
   type MonitoringProviderStatus,
   type Project,
   type ReleaseTraceabilityRow,
+  requestServiceDeployToDev,
+  requestServicePromoteToProd,
   requestServiceRollback,
+  type ServiceDeploymentInfo,
   type ServiceDetails,
   type ServiceDeployment,
   type ServiceDeploymentLock,
+  type ServiceDeployToDevResponse,
   type ServiceEndpoint,
+  type ServicePromoteToProdResponse,
   type ServiceRollbackCandidatesResponse,
   type ServiceRollbackResponse,
 } from '@/lib/api'
-import { getDeploymentHistory } from '@/lib/adapters/deployments'
+import { getDeploymentHistory, type DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import {
   createEmptyServiceMetricsSummary,
   createEmptyServiceMetricsTrends,
@@ -592,6 +599,58 @@ function IncidentServiceBadge({ alert }: { alert: ServiceIncidentBadge }) {
   )
 }
 
+function formatDeploymentAction(action?: string | null) {
+  switch ((action ?? '').trim().toLowerCase()) {
+    case 'deploy':
+      return 'Deploy'
+    case 'promote':
+      return 'Promote'
+    case 'rollback':
+      return 'Rollback'
+    case 'config-change':
+      return 'Config change'
+    default:
+      return action || 'Unknown'
+  }
+}
+
+function getDeploymentOutcomeTone(outcome?: string | null) {
+  const normalized = (outcome ?? '').trim().toLowerCase()
+  if (normalized === 'live') {
+    return 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+  }
+  if (normalized === 'deploying' || normalized === 'pending') {
+    return 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
+  }
+  if (normalized === 'failed') {
+    return 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+  }
+  return 'bg-muted text-muted-foreground'
+}
+
+function getLatestDeploymentForEnv(deployments: DeploymentHistoryItem[], env: 'dev' | 'prod') {
+  return deployments.find((deployment) => deployment.identity.env === env)
+}
+
+function getRecentDeploymentTags(deployments: DeploymentHistoryItem[], env: 'dev' | 'prod', limit = 3) {
+  const seen = new Set<string>()
+  const items: string[] = []
+  for (const deployment of deployments) {
+    if (deployment.identity.env !== env || !deployment.version || deployment.version === 'N/A') {
+      continue
+    }
+    if (seen.has(deployment.version)) {
+      continue
+    }
+    seen.add(deployment.version)
+    items.push(deployment.version)
+    if (items.length >= limit) {
+      break
+    }
+  }
+  return items
+}
+
 const logsPresets: LogsPreset[] = [
   {
     id: 'all',
@@ -637,6 +696,10 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     createServiceIdentity({ serviceId: decodedServiceId }),
   )
   const [overview, setOverview] = useState<ServiceOverviewData | null>(null)
+  const [deploymentHistory, setDeploymentHistory] = useState<DeploymentHistoryItem[]>([])
+  const [deploymentInfo, setDeploymentInfo] = useState<ServiceDeploymentInfo | null>(null)
+  const [deploymentInfoLoading, setDeploymentInfoLoading] = useState(true)
+  const [deploymentInfoError, setDeploymentInfoError] = useState('')
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
   const [metricsRange, setMetricsRange] = useState<ServiceMetricsRange>('24h')
@@ -672,6 +735,16 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [rollbackSubmitting, setRollbackSubmitting] = useState(false)
   const [rollbackError, setRollbackError] = useState('')
   const [rollbackResult, setRollbackResult] = useState<ServiceRollbackResponse | null>(null)
+  const [deployReason, setDeployReason] = useState('')
+  const [deploySubmitting, setDeploySubmitting] = useState(false)
+  const [deployError, setDeployError] = useState('')
+  const [deployResult, setDeployResult] = useState<ServiceDeployToDevResponse | null>(null)
+  const [promoteReason, setPromoteReason] = useState('')
+  const [promoteSubmitting, setPromoteSubmitting] = useState(false)
+  const [promoteError, setPromoteError] = useState('')
+  const [promoteResult, setPromoteResult] = useState<ServicePromoteToProdResponse | null>(null)
+  const [toastMessage, setToastMessage] = useState('')
+  const [toastVariant, setToastVariant] = useState<'success' | 'error' | 'info'>('info')
 
   const loadOverview = useCallback(async () => {
     setIsLoading(true)
@@ -749,6 +822,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       }
 
       if (deploymentsResult.status === 'fulfilled') {
+        setDeploymentHistory(deploymentsResult.value)
         finalOverview.deployments = deploymentsResult.value.map((deployment) => ({
           id: deployment.id,
           version: deployment.version,
@@ -759,8 +833,10 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
           finalOverview.deployments = releaseFallback.deployments
         }
       } else if (releaseFallback.deployments?.length) {
+        setDeploymentHistory([])
         finalOverview.deployments = releaseFallback.deployments
       } else {
+        setDeploymentHistory([])
         setDeploymentHistoryUnavailable(true)
         setDeploymentHistoryError(
           deploymentsResult.reason instanceof Error
@@ -773,6 +849,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     } catch (requestError) {
       const message =
         requestError instanceof Error ? requestError.message : 'Failed to load service overview'
+      setDeploymentHistory([])
       setError(message)
     } finally {
       setIsLoading(false)
@@ -782,6 +859,27 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   useEffect(() => {
     void loadOverview()
   }, [loadOverview])
+
+  const loadDeploymentInfo = useCallback(async () => {
+    setDeploymentInfoLoading(true)
+    setDeploymentInfoError('')
+
+    try {
+      const response = await getServiceDeploymentInfo(decodedServiceId, serviceIdentity.env || undefined)
+      setDeploymentInfo(response)
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : 'Failed to load deployment info'
+      setDeploymentInfoError(message)
+      setDeploymentInfo(null)
+    } finally {
+      setDeploymentInfoLoading(false)
+    }
+  }, [decodedServiceId, serviceIdentity.env])
+
+  useEffect(() => {
+    void loadDeploymentInfo()
+  }, [loadDeploymentInfo])
 
   const loadMetrics = useCallback(async () => {
     setMetricsLoading(true)
@@ -991,6 +1089,36 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     [logsError, logsLoading, logsResult],
   )
   const rollbackSupported = useMemo(() => supportsServiceRollback(decodedServiceId), [decodedServiceId])
+  const latestDevDeployment = useMemo(
+    () => getLatestDeploymentForEnv(deploymentHistory, 'dev'),
+    [deploymentHistory],
+  )
+  const latestProdDeployment = useMemo(
+    () => getLatestDeploymentForEnv(deploymentHistory, 'prod'),
+    [deploymentHistory],
+  )
+  const recentDevTags = useMemo(() => getRecentDeploymentTags(deploymentHistory, 'dev'), [deploymentHistory])
+  const recentProdTags = useMemo(() => getRecentDeploymentTags(deploymentHistory, 'prod'), [deploymentHistory])
+  const devInFlight = useMemo(
+    () =>
+      deploymentHistory.some(
+        (deployment) =>
+          deployment.identity.env === 'dev' &&
+          (deployment.outcome === 'pending' || deployment.outcome === 'deploying'),
+      ),
+    [deploymentHistory],
+  )
+  const prodInFlight = useMemo(
+    () =>
+      deploymentHistory.some(
+        (deployment) =>
+          deployment.identity.env === 'prod' &&
+          (deployment.outcome === 'pending' || deployment.outcome === 'deploying'),
+      ),
+    [deploymentHistory],
+  )
+  const devLockActive = overview?.deploymentLock?.env === 'dev'
+  const prodLockActive = overview?.deploymentLock?.env === 'prod'
 
   useEffect(() => {
     if (serviceIdentity.env === 'dev' || serviceIdentity.env === 'prod') {
@@ -1048,6 +1176,66 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     }
   }, [decodedServiceId, rollbackSupported, rollbackTargetEnvironment])
 
+  const submitDeployRequest = useCallback(async () => {
+    setDeploySubmitting(true)
+    setDeployError('')
+    setDeployResult(null)
+
+    try {
+      const response = await requestServiceDeployToDev(decodedServiceId, {
+        deployReason,
+      })
+      setDeployResult(response)
+      setDeployReason('')
+      setToastVariant('success')
+      setToastMessage(
+        response.status === 'noop'
+          ? response.message ?? `Dev already points at ${response.newTag ?? 'the latest image'}.`
+          : `Deploy request accepted for ${decodedServiceId}.`,
+      )
+      void loadOverview()
+      void loadDeploymentInfo()
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : 'Failed to request deploy to dev.'
+      setDeployError(message)
+      setToastVariant('error')
+      setToastMessage(message)
+    } finally {
+      setDeploySubmitting(false)
+    }
+  }, [decodedServiceId, deployReason, loadDeploymentInfo, loadOverview])
+
+  const submitPromoteRequest = useCallback(async () => {
+    setPromoteSubmitting(true)
+    setPromoteError('')
+    setPromoteResult(null)
+
+    try {
+      const response = await requestServicePromoteToProd(decodedServiceId, {
+        deployReason: promoteReason,
+      })
+      setPromoteResult(response)
+      setPromoteReason('')
+      setToastVariant('success')
+      setToastMessage(
+        response.status === 'noop'
+          ? response.message ?? `Prod already matches ${response.newTag ?? 'the dev tag'}.`
+          : `Promote request accepted for ${decodedServiceId}.`,
+      )
+      void loadOverview()
+      void loadDeploymentInfo()
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : 'Failed to request promote to prod.'
+      setPromoteError(message)
+      setToastVariant('error')
+      setToastMessage(message)
+    } finally {
+      setPromoteSubmitting(false)
+    }
+  }, [decodedServiceId, loadDeploymentInfo, loadOverview, promoteReason])
+
   const submitRollbackRequest = useCallback(async () => {
     setRollbackSubmitting(true)
     setRollbackError('')
@@ -1061,14 +1249,31 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       })
       setRollbackResult(response)
       setRollbackReason('')
+      setToastVariant('success')
+      setToastMessage(
+        response.status === 'noop'
+          ? response.message ?? `Rollback not needed for ${rollbackTargetEnvironment}.`
+          : `Rollback request accepted for ${decodedServiceId}.`,
+      )
+      void loadOverview()
+      void loadDeploymentInfo()
     } catch (requestError) {
       const message =
         requestError instanceof Error ? requestError.message : 'Failed to request service rollback.'
       setRollbackError(message)
+      setToastVariant('error')
+      setToastMessage(message)
     } finally {
       setRollbackSubmitting(false)
     }
-  }, [decodedServiceId, rollbackReason, rollbackTargetEnvironment, selectedRollbackTag])
+  }, [
+    decodedServiceId,
+    loadDeploymentInfo,
+    loadOverview,
+    rollbackReason,
+    rollbackTargetEnvironment,
+    selectedRollbackTag,
+  ])
 
   useEffect(() => {
     void loadQuickViewLogs()
@@ -1078,12 +1283,27 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     void loadRollbackCandidates()
   }, [loadRollbackCandidates])
 
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void loadOverview()
+      void loadDeploymentInfo()
+    }, 30000)
+    return () => window.clearInterval(interval)
+  }, [loadDeploymentInfo, loadOverview])
+
   return (
     <PageShell
       title={`Service: ${decodedServiceId || 'unknown'}`}
       description="Overview for deployment status, endpoints, and recent deployment activity."
     >
       <div className="space-y-6">
+        {toastMessage ? (
+          <ToastMessage
+            message={toastMessage}
+            variant={toastVariant}
+            onClose={() => setToastMessage('')}
+          />
+        ) : null}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
           <div className="flex items-center gap-2">
             <span className="rounded-md bg-primary/10 px-2 py-1 text-xs font-medium text-primary">
@@ -1155,6 +1375,281 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                   ) : null}
                 </div>
               </div>
+            ) : null}
+
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold">Deploy Info</h2>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void loadDeploymentInfo()}
+                  disabled={deploymentInfoLoading}
+                >
+                  Refresh deploy info
+                </Button>
+              </div>
+              {deploymentInfoError ? (
+                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                  <p className="text-xs text-amber-900 dark:text-amber-200">{deploymentInfoError}</p>
+                </div>
+              ) : null}
+              {deploymentInfoLoading ? (
+                <LoadingState label="Loading deploy info..." rows={2} />
+              ) : deploymentInfo ? (
+                <div className="grid gap-3 xl:grid-cols-2">
+                  <article className="rounded-md border border-border bg-background p-4">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Current deployment</p>
+                    <div className="mt-2 space-y-2 text-sm">
+                      <p>
+                        <span className="font-medium">Action:</span> {formatDeploymentAction(deploymentInfo.action)}
+                      </p>
+                      <p>
+                        <span className="font-medium">Result:</span>{' '}
+                        <span
+                          className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${getDeploymentOutcomeTone(
+                            deploymentInfo.result,
+                          )}`}
+                        >
+                          {deploymentInfo.result ?? 'unknown'}
+                        </span>
+                      </p>
+                      <p>
+                        <span className="font-medium">Deployed:</span>{' '}
+                        {formatDate(deploymentInfo.deployedTimestamp ?? undefined)}
+                      </p>
+                      <p className="break-all">
+                        <span className="font-medium">Image:</span>{' '}
+                        {deploymentInfo.imageUrl ? (
+                          <a href={deploymentInfo.imageUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            {deploymentInfo.deployedImage ?? 'N/A'}
+                          </a>
+                        ) : (
+                          deploymentInfo.deployedImage ?? 'N/A'
+                        )}
+                      </p>
+                      {deploymentInfo.previousImage ? (
+                        <p className="break-all">
+                          <span className="font-medium">Previous image:</span> {deploymentInfo.previousImage}
+                        </p>
+                      ) : null}
+                      {deploymentInfo.imageDigest ? (
+                        <p className="break-all">
+                          <span className="font-medium">Digest:</span> {deploymentInfo.imageDigest}
+                        </p>
+                      ) : null}
+                    </div>
+                  </article>
+                  <article className="rounded-md border border-border bg-background p-4">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Traceability</p>
+                    <div className="mt-2 space-y-2 text-sm">
+                      <p>
+                        <span className="font-medium">Commit:</span>{' '}
+                        {deploymentInfo.commitUrl ? (
+                          <a href={deploymentInfo.commitUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            {deploymentInfo.gitCommit ?? 'N/A'}
+                          </a>
+                        ) : (
+                          deploymentInfo.gitCommit ?? 'N/A'
+                        )}
+                      </p>
+                      <p>
+                        <span className="font-medium">Argo:</span> {deploymentInfo.argoApp ?? 'N/A'}
+                      </p>
+                      <p>
+                        <span className="font-medium">Sync/health:</span> {deploymentInfo.syncStatus ?? 'unknown'} /{' '}
+                        {deploymentInfo.healthStatus ?? 'unknown'}
+                      </p>
+                      {deploymentInfo.gitPrUrl ? (
+                        <p>
+                          <span className="font-medium">PR:</span>{' '}
+                          <a href={deploymentInfo.gitPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            #{deploymentInfo.gitPrNumber ?? 'link'}
+                          </a>
+                        </p>
+                      ) : null}
+                      {deploymentInfo.compareUrl ? (
+                        <p>
+                          <span className="font-medium">Compare:</span>{' '}
+                          <a href={deploymentInfo.compareUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            Open compare view
+                          </a>
+                        </p>
+                      ) : null}
+                      {deploymentInfo.deployReason ? (
+                        <p>
+                          <span className="font-medium">Reason:</span> {deploymentInfo.deployReason}
+                        </p>
+                      ) : null}
+                      {deploymentInfo.resultReason ? (
+                        <p>
+                          <span className="font-medium">Result reason:</span> {deploymentInfo.resultReason}
+                        </p>
+                      ) : null}
+                    </div>
+                  </article>
+                </div>
+              ) : (
+                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                  No deployment info is available for this service yet.
+                </p>
+              )}
+            </section>
+
+            {rollbackSupported ? (
+              <section className="space-y-3 rounded-md border border-border bg-card p-4">
+                <div className="space-y-1">
+                  <h2 className="text-sm font-semibold">Portal Actions</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Request deploy and promote actions directly from the service page. Buttons are blocked while a
+                    deployment lock or in-flight deployment exists for the target environment.
+                  </p>
+                </div>
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <article className="space-y-3 rounded-md border border-border/70 bg-background/50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold">Deploy latest to dev</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Opens a GitOps PR that updates the dev overlay to the newest deployable image.
+                      </p>
+                    </div>
+                    {devLockActive || devInFlight ? (
+                      <span className="rounded-full bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-700 dark:text-sky-300">
+                        Dev locked
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                      <p className="font-medium text-foreground">Current dev tag</p>
+                      <p className="mt-1 break-all">{latestDevDeployment?.version ?? 'Unavailable'}</p>
+                    </div>
+                    <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                      <p className="font-medium text-foreground">Recent dev tags</p>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {recentDevTags.map((tag) => (
+                          <code key={tag} className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
+                            {tag}
+                          </code>
+                        ))}
+                        {recentDevTags.length === 0 ? <span>Unavailable</span> : null}
+                      </div>
+                    </div>
+                  </div>
+                  <label className="space-y-1">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Deploy reason</span>
+                    <textarea
+                      value={deployReason}
+                      onChange={(event) => setDeployReason(event.target.value)}
+                      rows={3}
+                      placeholder="Why the latest build should be deployed to dev."
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                  {deployError ? (
+                    <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                      <p className="text-xs text-destructive">{deployError}</p>
+                    </div>
+                  ) : null}
+                  {deployResult ? (
+                    <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
+                      <p className="font-medium">
+                        {deployResult.status === 'noop'
+                          ? deployResult.message ?? 'Dev already points at the latest deployable image.'
+                          : `Deploy request accepted for dev.`}
+                      </p>
+                      {deployResult.gitPrUrl ? (
+                        <a href={deployResult.gitPrUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex font-medium underline underline-offset-2">
+                          Open GitOps PR #{deployResult.gitPrNumber ?? 'link'}
+                        </a>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <Button
+                    type="button"
+                    onClick={() => void submitDeployRequest()}
+                    disabled={deploySubmitting || devLockActive || devInFlight || deployReason.trim().length < 5}
+                  >
+                    {deploySubmitting ? 'Requesting deploy...' : 'Deploy latest to dev'}
+                  </Button>
+                  </article>
+
+                  <article className="space-y-3 rounded-md border border-border/70 bg-background/50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold">Promote dev to prod</h3>
+                      <p className="text-xs text-muted-foreground">
+                        Opens a GitOps PR that copies the current dev tag into the prod overlay for this service.
+                      </p>
+                    </div>
+                    {prodLockActive || prodInFlight ? (
+                      <span className="rounded-full bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-700 dark:text-sky-300">
+                        Prod locked
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                      <p className="font-medium text-foreground">Current dev tag</p>
+                      <p className="mt-1 break-all">{latestDevDeployment?.version ?? 'Unavailable'}</p>
+                    </div>
+                    <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                      <p className="font-medium text-foreground">Current prod tag</p>
+                      <p className="mt-1 break-all">{latestProdDeployment?.version ?? 'Unavailable'}</p>
+                    </div>
+                  </div>
+                  <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                    <p className="font-medium text-foreground">Recent prod tags</p>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {recentProdTags.map((tag) => (
+                        <code key={tag} className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
+                          {tag}
+                        </code>
+                      ))}
+                      {recentProdTags.length === 0 ? <span>Unavailable</span> : null}
+                    </div>
+                  </div>
+                  <label className="space-y-1">
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Promote reason</span>
+                    <textarea
+                      value={promoteReason}
+                      onChange={(event) => setPromoteReason(event.target.value)}
+                      rows={3}
+                      placeholder="Why the current dev tag should be promoted to prod."
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                    />
+                  </label>
+                  {promoteError ? (
+                    <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                      <p className="text-xs text-destructive">{promoteError}</p>
+                    </div>
+                  ) : null}
+                  {promoteResult ? (
+                    <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
+                      <p className="font-medium">
+                        {promoteResult.status === 'noop'
+                          ? promoteResult.message ?? 'Prod already matches dev.'
+                          : `Promote request accepted for prod.`}
+                      </p>
+                      {promoteResult.gitPrUrl ? (
+                        <a href={promoteResult.gitPrUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex font-medium underline underline-offset-2">
+                          Open GitOps PR #{promoteResult.gitPrNumber ?? 'link'}
+                        </a>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <Button
+                    type="button"
+                    onClick={() => void submitPromoteRequest()}
+                    disabled={promoteSubmitting || prodLockActive || prodInFlight || promoteReason.trim().length < 5}
+                  >
+                    {promoteSubmitting ? 'Requesting promote...' : 'Promote to prod'}
+                  </Button>
+                  </article>
+                </div>
+              </section>
             ) : null}
 
             {import.meta.env.DEV ? (
@@ -1831,12 +2326,14 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                   <div className="rounded-md border border-border/70 bg-background/50 p-3 text-xs text-muted-foreground">
                     <p className="font-medium text-foreground">Recent deployed tags</p>
                     <div className="mt-1 flex flex-wrap gap-2">
-                      {overview.deployments.slice(0, 3).map((deployment) => (
-                        <code key={deployment.id} className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
-                          {deployment.version}
+                      {getRecentDeploymentTags(deploymentHistory, rollbackTargetEnvironment).map((tag) => (
+                        <code key={tag} className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
+                          {tag}
                         </code>
                       ))}
-                      {overview.deployments.length === 0 ? <span>Unavailable</span> : null}
+                      {getRecentDeploymentTags(deploymentHistory, rollbackTargetEnvironment).length === 0 ? (
+                        <span>Unavailable</span>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -1948,7 +2445,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                     Retry deployment history
                   </Button>
                 </div>
-              ) : overview.deployments.length === 0 ? (
+              ) : deploymentHistory.length === 0 ? (
                 <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
                   No deployments found for this service yet.
                 </p>
@@ -1957,21 +2454,58 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                   <table className="min-w-full text-left text-sm">
                     <thead>
                       <tr className="border-b border-border">
+                        <th className="px-3 py-2 font-medium text-muted-foreground">Env</th>
+                        <th className="px-3 py-2 font-medium text-muted-foreground">Action</th>
                         <th className="px-3 py-2 font-medium text-muted-foreground">Version</th>
-                        <th className="px-3 py-2 font-medium text-muted-foreground">Outcome</th>
+                        <th className="px-3 py-2 font-medium text-muted-foreground">Status</th>
+                        <th className="px-3 py-2 font-medium text-muted-foreground">Reason / links</th>
                         <th className="px-3 py-2 font-medium text-muted-foreground">Deployed At</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {overview.deployments.slice(0, 5).map((deployment) => (
+                      {deploymentHistory.slice(0, 5).map((deployment) => (
                         <tr key={deployment.id} className="border-b border-border/70">
-                          <td className="px-3 py-2">{deployment.version ?? 'N/A'}</td>
+                          <td className="px-3 py-2 align-top">{deployment.identity.env}</td>
+                          <td className="px-3 py-2 align-top">{formatDeploymentAction(deployment.action)}</td>
+                          <td className="px-3 py-2 align-top">{deployment.version ?? 'N/A'}</td>
                           <td className="px-3 py-2">
-                            <span className="inline-flex items-center rounded-full bg-muted px-2 py-1 text-xs font-medium text-muted-foreground">
-                              State: {deployment.status ?? 'unknown'}
+                            <span
+                              className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${getDeploymentOutcomeTone(
+                                deployment.outcome,
+                              )}`}
+                            >
+                              {deployment.outcome ?? 'unknown'}
                             </span>
                           </td>
-                          <td className="px-3 py-2 text-muted-foreground">{formatDate(deployment.deployedAt)}</td>
+                          <td className="px-3 py-2 align-top text-xs text-muted-foreground">
+                            {deployment.deployReason ? <p>{deployment.deployReason}</p> : <p>N/A</p>}
+                            <div className="mt-1 flex flex-wrap gap-2">
+                              {deployment.gitPrUrl ? (
+                                <a
+                                  href={deployment.gitPrUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-medium text-primary hover:underline"
+                                >
+                                  PR #{deployment.gitPrNumber ?? 'link'}
+                                </a>
+                              ) : null}
+                              {deployment.compareUrl ? (
+                                <a
+                                  href={deployment.compareUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-medium text-primary hover:underline"
+                                >
+                                  Compare
+                                </a>
+                              ) : null}
+                            </div>
+                            {deployment.failureReason ? <p className="mt-1 text-rose-400">{deployment.failureReason}</p> : null}
+                          </td>
+                          <td className="px-3 py-2 align-top text-muted-foreground">
+                            {formatDate(deployment.deployedAt ?? deployment.requestedAt)}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

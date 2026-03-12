@@ -190,6 +190,59 @@ export interface PortalRollbackResponse {
   initiatedAt: string
 }
 
+export interface ServiceDeployToDevRequest {
+  deployReason: string
+}
+
+export interface ServiceDeployToDevResponse {
+  status: 'accepted' | 'noop'
+  action: 'deploy'
+  serviceId: string
+  targetEnvironment: 'dev'
+  requestedBy: string
+  repository: string
+  baseBranch: string
+  branchName?: string | null
+  deploymentId?: string | null
+  gitPrUrl?: string | null
+  gitPrNumber?: number | null
+  previousTag?: string | null
+  newTag?: string | null
+  previousImageRef?: string | null
+  newImageRef?: string | null
+  compareUrl?: string | null
+  sourceCommitSha?: string | null
+  sourceWorkflowRunUrl?: string | null
+  message?: string | null
+  initiatedAt: string
+}
+
+export interface ServicePromoteToProdRequest {
+  deployReason: string
+}
+
+export interface ServicePromoteToProdResponse {
+  status: 'accepted' | 'noop'
+  action: 'promote'
+  serviceId: string
+  targetEnvironment: 'prod'
+  requestedBy: string
+  repository: string
+  baseBranch: string
+  branchName?: string | null
+  deploymentId?: string | null
+  gitPrUrl?: string | null
+  gitPrNumber?: number | null
+  previousTag?: string | null
+  newTag?: string | null
+  previousImageRef?: string | null
+  newImageRef?: string | null
+  compareUrl?: string | null
+  sourceCommitSha?: string | null
+  message?: string | null
+  initiatedAt: string
+}
+
 export interface ServiceRollbackCandidate {
   tag: string
   imageRef: string
@@ -233,6 +286,29 @@ export interface ServiceRollbackResponse {
   sourceCommitSha?: string | null
   message?: string | null
   initiatedAt: string
+}
+
+export interface ServiceDeploymentInfo {
+  deploymentId?: string | null
+  serviceId: string
+  env?: string | null
+  action?: string | null
+  deployedImage?: string | null
+  previousImage?: string | null
+  imageDigest?: string | null
+  gitCommit?: string | null
+  deployedTimestamp?: string | null
+  gitPrUrl?: string | null
+  gitPrNumber?: number | null
+  compareUrl?: string | null
+  deployReason?: string | null
+  result?: string | null
+  resultReason?: string | null
+  commitUrl?: string | null
+  imageUrl?: string | null
+  argoApp?: string | null
+  syncStatus?: string | null
+  healthStatus?: string | null
 }
 
 export interface ReleaseTraceabilityArgoState {
@@ -590,10 +666,44 @@ export function getMonitoringProvidersDiagnostics() {
   return request<MonitoringProvidersDiagnosticsResponse>('/monitoring/providers/diagnostics')
 }
 
-export function getServiceDeployments(serviceId: string) {
+export function getServiceDeployments(serviceId: string, env?: string) {
+  const query = new URLSearchParams()
+  if (env) {
+    query.set('env', env)
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : ''
   return requestServiceEndpoint<{ deployments: ServiceDeployment[] }>(
-    `/services/${encodeURIComponent(serviceId)}/deployments`,
+    `/services/${encodeURIComponent(serviceId)}/deployments${suffix}`,
   )
+}
+
+export function getServiceDeploymentInfo(serviceId: string, env?: string) {
+  const query = new URLSearchParams()
+  if (env) {
+    query.set('env', env)
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : ''
+  return requestServiceEndpoint<ServiceDeploymentInfo>(
+    `/services/${encodeURIComponent(serviceId)}/deployment-info${suffix}`,
+  )
+}
+
+export function requestServiceDeployToDev(serviceId: string, payload: ServiceDeployToDevRequest) {
+  return request<ServiceDeployToDevResponse>(`/services/${encodeURIComponent(serviceId)}/deploy-to-dev`, {
+    method: 'POST',
+    body: JSON.stringify({
+      deployReason: payload.deployReason,
+    }),
+  })
+}
+
+export function requestServicePromoteToProd(serviceId: string, payload: ServicePromoteToProdRequest) {
+  return request<ServicePromoteToProdResponse>(`/services/${encodeURIComponent(serviceId)}/promote-to-prod`, {
+    method: 'POST',
+    body: JSON.stringify({
+      deployReason: payload.deployReason,
+    }),
+  })
 }
 
 export function requestPortalRollback(payload: PortalRollbackRequest) {

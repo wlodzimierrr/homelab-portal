@@ -59,10 +59,18 @@ function normalizeDeployment(item: ServiceDeployment, identity: ServiceIdentity)
   const availability = getSnapshot(input, ['availabilityPct', 'availability'])
 
   const hasComparisonWindow = hasSnapshotValues(errorRate) || hasSnapshotValues(latency) || hasSnapshotValues(availability)
+  const deploymentIdentity = createServiceIdentity({
+    serviceId: item.serviceId ?? identity.serviceId,
+    serviceName: identity.serviceName,
+    namespace: identity.namespace,
+    env: item.env ?? identity.env,
+    appLabel: identity.appLabel,
+    argoAppName: item.argoApp ?? identity.argoAppName,
+  })
 
   return {
     id: item.id,
-    identity,
+    identity: deploymentIdentity,
     action: item.action ?? 'deploy',
     version: item.version ?? 'N/A',
     outcome: item.status ?? 'unknown',

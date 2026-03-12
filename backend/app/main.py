@@ -413,6 +413,31 @@ class ServiceDeploymentsResponse(BaseModel):
     deployments: list[DeploymentRecordResponse]
 
 
+class ServiceDeploymentInfoResponse(BaseModel):
+    deployment_id: str | None = Field(default=None, alias="deploymentId")
+    service_id: str = Field(alias="serviceId")
+    env: str | None = None
+    action: str | None = None
+    deployed_image: str | None = Field(default=None, alias="deployedImage")
+    previous_image: str | None = Field(default=None, alias="previousImage")
+    image_digest: str | None = Field(default=None, alias="imageDigest")
+    git_commit: str | None = Field(default=None, alias="gitCommit")
+    deployed_timestamp: str | None = Field(default=None, alias="deployedTimestamp")
+    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
+    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
+    compare_url: str | None = Field(default=None, alias="compareUrl")
+    deploy_reason: str | None = Field(default=None, alias="deployReason")
+    result: str | None = None
+    result_reason: str | None = Field(default=None, alias="resultReason")
+    commit_url: str | None = Field(default=None, alias="commitUrl")
+    image_url: str | None = Field(default=None, alias="imageUrl")
+    argo_app: str | None = Field(default=None, alias="argoApp")
+    sync_status: str | None = Field(default=None, alias="syncStatus")
+    health_status: str | None = Field(default=None, alias="healthStatus")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class DeploymentReconcileResponse(BaseModel):
     pull_requests_scanned: int = Field(alias="pullRequestsScanned")
     records_upserted: int = Field(alias="recordsUpserted")
@@ -1771,6 +1796,12 @@ def _build_compare_url_for_portal_tags(previous_tag: str | None, new_tag: str | 
     return f"https://github.com/{_portal_repo_slug()}/compare/{previous_sha}...{new_sha}"
 
 
+def _build_commit_url(commit_sha: str | None) -> str | None:
+    if not isinstance(commit_sha, str) or not commit_sha.strip():
+        return None
+    return f"https://github.com/{_portal_repo_slug()}/commit/{commit_sha.strip()}"
+
+
 def _ghcr_token() -> str | None:
     for name in (
         "GHCR_READ_TOKEN",
@@ -1799,6 +1830,57 @@ def _parse_ghcr_image_repo(image_repo: str) -> tuple[str, str]:
             status_code=status.HTTP_409_CONFLICT,
         )
     return parts[1], parts[2]
+
+
+def _build_package_url_from_image_ref(image_ref: str | None) -> str | None:
+    if not isinstance(image_ref, str) or not image_ref.strip():
+        return None
+    repo = image_ref.strip().split("@", 1)[0]
+    repo = repo.rsplit(":", 1)[0]
+    try:
+        owner, package_name = _parse_ghcr_image_repo(repo)
+    except PortalPromoteToProdError:
+        return None
+    encoded_owner = urlparse.quote(owner, safe="")
+    encoded_package = urlparse.quote(package_name, safe="")
+    return f"https://github.com/users/{encoded_owner}/packages/container/{encoded_package}"
+
+
+def _extract_image_digest(record: dict[str, object]) -> str | None:
+    image_ref = record.get("imageRef")
+    if isinstance(image_ref, str) and "@" in image_ref:
+        return image_ref.split("@", 1)[1].strip() or None
+    metadata = record.get("metadata")
+    if isinstance(metadata, dict):
+        value = metadata.get("imageDigest")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _deployment_record_timestamp(record: dict[str, object]) -> str | None:
+    for key in ("deployWindowEnd", "finishedAt", "deployedAt", "startedAt", "requestedAt"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _select_latest_deployment_info_record(
+    records: list[dict[str, object]],
+) -> dict[str, object] | None:
+    if not records:
+        return None
+
+    ordered = sorted(
+        records,
+        key=lambda record: _deployment_record_timestamp(record) or "",
+        reverse=True,
+    )
+    for record in ordered:
+        if str(record.get("status") or "").strip().lower() == "live":
+            return record
+    return ordered[0]
 
 
 def _github_package_version_paths(image_repo: str, *, page: int) -> list[str]:
@@ -5108,6 +5190,69 @@ def get_service_deployments(
     deployments = [_build_deployment_record_response(row, selected) for row in rows]
 
     return ServiceDeploymentsResponse(deployments=deployments)
+
+
+@app.get(
+    "/services/{service_id}/deployment-info",
+    response_model=ServiceDeploymentInfoResponse,
+    tags=["metadata"],
+)
+def get_service_deployment_info(
+    service_id: str,
+    env: str | None = Query(default=None),
+    _: tuple[str, set[str]] = Depends(get_current_user),
+) -> ServiceDeploymentInfoResponse:
+    selected_env = env or os.getenv("PORTAL_ENV", "dev")
+    _maybe_reconcile_recent_deployments(service_id=service_id, env=selected_env)
+    records = _list_deployment_records_for_service(service_id, env=env, limit=50)
+    record = _select_latest_deployment_info_record(records)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment info not found",
+        )
+
+    resolved_env = record.get("env") if isinstance(record.get("env"), str) else selected_env
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else None
+    deployed_image = record.get("targetImage") if isinstance(record.get("targetImage"), str) else None
+    previous_image = record.get("previousImage") if isinstance(record.get("previousImage"), str) else None
+    commit_sha = record.get("mergeSha") if isinstance(record.get("mergeSha"), str) else None
+    if commit_sha is None and isinstance(metadata, dict):
+        source_commit_sha = metadata.get("sourceCommitSha")
+        if isinstance(source_commit_sha, str) and source_commit_sha.strip():
+            commit_sha = source_commit_sha.strip()
+    result_reason = None
+    if isinstance(metadata, dict):
+        failure_reason = metadata.get("failureReason")
+        if isinstance(failure_reason, str) and failure_reason.strip():
+            result_reason = failure_reason.strip()
+    if result_reason is None:
+        deploy_reason = record.get("deployReason")
+        if isinstance(deploy_reason, str) and deploy_reason.strip():
+            result_reason = deploy_reason.strip() if str(record.get("status") or "").strip().lower() == "failed" else None
+
+    return ServiceDeploymentInfoResponse(
+        deploymentId=record.get("deploymentId") if isinstance(record.get("deploymentId"), str) else None,
+        serviceId=service_id,
+        env=resolved_env,
+        action=record.get("action") if isinstance(record.get("action"), str) else None,
+        deployedImage=deployed_image,
+        previousImage=previous_image,
+        imageDigest=_extract_image_digest(record),
+        gitCommit=commit_sha,
+        deployedTimestamp=_deployment_record_timestamp(record),
+        gitPrUrl=record.get("prUrl") if isinstance(record.get("prUrl"), str) else None,
+        gitPrNumber=record.get("prNumber") if isinstance(record.get("prNumber"), int) else None,
+        compareUrl=record.get("compareUrl") if isinstance(record.get("compareUrl"), str) else None,
+        deployReason=record.get("deployReason") if isinstance(record.get("deployReason"), str) else None,
+        result=record.get("status") if isinstance(record.get("status"), str) else None,
+        resultReason=result_reason,
+        commitUrl=_build_commit_url(commit_sha),
+        imageUrl=_build_package_url_from_image_ref(deployed_image),
+        argoApp=record.get("argoApp") if isinstance(record.get("argoApp"), str) else None,
+        syncStatus=record.get("syncStatus") if isinstance(record.get("syncStatus"), str) else None,
+        healthStatus=record.get("healthStatus") if isinstance(record.get("healthStatus"), str) else None,
+    )
 
 
 @app.get(
