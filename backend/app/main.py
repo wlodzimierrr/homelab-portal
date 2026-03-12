@@ -3856,6 +3856,100 @@ def _build_no_window_logs_response(
     )
 
 
+def _extract_provider_failure(exc: HTTPException) -> tuple[str, dict[str, object] | None]:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        message = detail.get("message")
+        provider_status = detail.get("providerStatus")
+        safe_message = message if isinstance(message, str) and message.strip() else "Monitoring provider query failed."
+        safe_status = provider_status if isinstance(provider_status, dict) else None
+        return safe_message, safe_status
+    return "Monitoring provider query failed.", None
+
+
+def _build_provider_error_metrics_response(
+    *,
+    message: str,
+    provider_status: dict[str, object] | None,
+    window_start: datetime,
+    window_end: datetime,
+) -> DeploymentObservabilityMetricsResponse:
+    return DeploymentObservabilityMetricsResponse(
+        queryStatus="no_data",
+        queryMessage=message,
+        windowStart=window_start.isoformat(),
+        windowEnd=window_end.isoformat(),
+        generatedAt=now_utc().isoformat(),
+        errorRatePct=None,
+        p95LatencyMs=None,
+        availabilityPct=None,
+        noData={
+            "errorRatePct": True,
+            "p95LatencyMs": True,
+            "availabilityPct": True,
+        },
+        providerStatus=(
+            MonitoringProviderStatusResponse(**provider_status)
+            if isinstance(provider_status, dict)
+            else None
+        ),
+    )
+
+
+def _build_provider_error_timeline_response(
+    *,
+    service_id: str,
+    message: str,
+    provider_status: dict[str, object] | None,
+    window_start: datetime,
+    window_end: datetime,
+) -> DeploymentObservabilityTimelineResponse:
+    return DeploymentObservabilityTimelineResponse(
+        queryStatus="no_data",
+        queryMessage=message,
+        serviceId=service_id,
+        windowStart=window_start.isoformat(),
+        windowEnd=window_end.isoformat(),
+        generatedAt=now_utc().isoformat(),
+        providerStatus=(
+            MonitoringProviderStatusResponse(**provider_status)
+            if isinstance(provider_status, dict)
+            else None
+        ),
+        segments=[],
+    )
+
+
+def _build_provider_error_logs_response(
+    *,
+    service_id: str,
+    preset: str,
+    limit: int,
+    message: str,
+    provider_status: dict[str, object] | None,
+    window_start: datetime,
+    window_end: datetime,
+) -> DeploymentObservabilityLogsResponse:
+    return DeploymentObservabilityLogsResponse(
+        queryStatus="no_data",
+        queryMessage=message,
+        serviceId=service_id,
+        preset=preset,
+        generatedAt=now_utc().isoformat(),
+        windowStart=window_start.isoformat(),
+        windowEnd=window_end.isoformat(),
+        limit=limit,
+        returned=0,
+        moreAvailable=False,
+        lines=[],
+        providerStatus=(
+            MonitoringProviderStatusResponse(**provider_status)
+            if isinstance(provider_status, dict)
+            else None
+        ),
+    )
+
+
 def _build_deployment_metrics_response(
     *,
     service_id: str,
@@ -5302,18 +5396,43 @@ def get_service_deployment_observability(
             ),
         )
 
-    metrics = _build_deployment_metrics_response(
-        service_id=service_id,
-        service_row=service_row,
-        window_start=resolved_start,
-        window_end=resolved_end,
-    )
-    timeline = _build_deployment_timeline_response(
-        service_id=service_id,
-        service_row=service_row,
-        window_start=resolved_start,
-        window_end=resolved_end,
-    )
+    try:
+        metrics = _build_deployment_metrics_response(
+            service_id=service_id,
+            service_row=service_row,
+            window_start=resolved_start,
+            window_end=resolved_end,
+        )
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_502_BAD_GATEWAY:
+            raise
+        message, provider_status = _extract_provider_failure(exc)
+        metrics = _build_provider_error_metrics_response(
+            message=message,
+            provider_status=provider_status,
+            window_start=resolved_start,
+            window_end=resolved_end,
+        )
+
+    try:
+        timeline = _build_deployment_timeline_response(
+            service_id=service_id,
+            service_row=service_row,
+            window_start=resolved_start,
+            window_end=resolved_end,
+        )
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_502_BAD_GATEWAY:
+            raise
+        message, provider_status = _extract_provider_failure(exc)
+        timeline = _build_provider_error_timeline_response(
+            service_id=service_id,
+            message=message,
+            provider_status=provider_status,
+            window_start=resolved_start,
+            window_end=resolved_end,
+        )
+
     try:
         logs = _build_deployment_logs_response(
             service_id=service_id,
@@ -5323,6 +5442,19 @@ def get_service_deployment_observability(
             window_start=resolved_start,
             window_end=resolved_end,
             identity_key=user,
+        )
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_502_BAD_GATEWAY:
+            raise
+        message, provider_status = _extract_provider_failure(exc)
+        logs = _build_provider_error_logs_response(
+            service_id=service_id,
+            preset=logs_preset,
+            limit=logs_limit,
+            message=message,
+            provider_status=provider_status,
+            window_start=resolved_start,
+            window_end=resolved_end,
         )
     except ValueError as exc:
         detail = str(exc)
