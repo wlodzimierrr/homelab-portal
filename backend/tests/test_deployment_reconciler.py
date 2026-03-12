@@ -86,6 +86,48 @@ def test_load_recent_gitops_deployment_events_parses_manual_dev_deploy_pull_requ
     assert event.metadata["operatorReason"] == "Ship login fix safely to dev."
 
 
+def test_load_recent_gitops_deployment_events_parses_manual_prod_promote_pull_request() -> None:
+    source_sha = "c" * 40
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 73,
+                "title": f"Promote homelab-web: sha-{source_sha} to prod",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/73",
+                "state": "open",
+                "created_at": "2026-03-12T11:00:00Z",
+                "closed_at": None,
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "body": "\n".join(
+                    [
+                        "Portal-requested promote-to-prod.",
+                        "- Service: `homelab-web`",
+                        f"- Target image: `ghcr.io/wlodzimierrr/homelab-web:sha-{source_sha}`",
+                        "- Reason: Promote the verified dev release to prod.",
+                    ]
+                ),
+                "user": {"login": "wlodzimierrr"},
+                "head": {"ref": f"automation/prod-promote-homelab-web-sha-{source_sha[:12]}-20260312110000"},
+            }
+        ]
+
+    events = deployment_reconciler.load_recent_gitops_deployment_events(
+        github_fetch_json=_fake_fetch,
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.service_id == "homelab-web"
+    assert event.env == "prod"
+    assert event.action == "promote"
+    assert event.source_commit_sha == source_sha
+    assert event.target_image == f"ghcr.io/wlodzimierrr/homelab-web:sha-{source_sha}"
+    assert event.request_key == "gitops-pr:73:homelab-web:prod:promote"
+    assert event.metadata["operatorReason"] == "Promote the verified dev release to prod."
+
+
 def test_load_recent_gitops_deployment_events_parses_config_change_pull_request() -> None:
     def _fake_fetch(_path: str) -> object:
         return [

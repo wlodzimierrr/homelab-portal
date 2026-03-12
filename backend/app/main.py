@@ -149,6 +149,26 @@ DEV_DEPLOY_TARGETS: dict[str, dict[str, object]] = {
         ],
     },
 }
+PROMOTE_TO_PROD_TARGETS: dict[str, dict[str, object]] = {
+    "homelab-api": {
+        "image_repo": "ghcr.io/wlodzimierrr/homelab-api",
+        "source_file": "apps/homelab-api/envs/dev/patch-deployment.yaml",
+        "argo_app": "homelab-api-prod",
+        "patch_files": [
+            "apps/homelab-api/envs/prod/patch-deployment.yaml",
+            "apps/homelab-api/envs/prod/patch-migration-job.yaml",
+            "apps/homelab-api/envs/prod/patch-catalog-sync-cronjob.yaml",
+        ],
+    },
+    "homelab-web": {
+        "image_repo": "ghcr.io/wlodzimierrr/homelab-web",
+        "source_file": "apps/homelab-web/envs/dev/patch-deployment.yaml",
+        "argo_app": "homelab-web-prod",
+        "patch_files": [
+            "apps/homelab-web/envs/prod/patch-deployment.yaml",
+        ],
+    },
+}
 
 
 def clear_observability_caches_for_tests() -> None:
@@ -521,6 +541,50 @@ class PortalDeployToDevResponse(BaseModel):
     compare_url: str | None = Field(default=None, alias="compareUrl")
     source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
     source_workflow_run_url: str | None = Field(default=None, alias="sourceWorkflowRunUrl")
+    message: str | None = None
+    initiated_at: str = Field(alias="initiatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class PortalPromoteToProdError(Exception):
+    def __init__(self, message: str, *, status_code: int = status.HTTP_502_BAD_GATEWAY):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PortalPromoteToProdRequest(BaseModel):
+    deploy_reason: str = Field(..., alias="deployReason", min_length=5, max_length=500)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("deploy_reason")
+    @classmethod
+    def validate_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 5:
+            raise ValueError("deployReason must be at least 5 characters long")
+        return normalized
+
+
+class PortalPromoteToProdResponse(BaseModel):
+    status: Literal["accepted", "noop"]
+    action: Literal["promote"]
+    service_id: str = Field(alias="serviceId")
+    target_environment: Literal["prod"] = Field(alias="targetEnvironment")
+    requested_by: str = Field(alias="requestedBy")
+    repository: str
+    base_branch: str = Field(alias="baseBranch")
+    branch_name: str | None = Field(default=None, alias="branchName")
+    deployment_id: str | None = Field(default=None, alias="deploymentId")
+    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
+    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
+    previous_tag: str | None = Field(default=None, alias="previousTag")
+    new_tag: str | None = Field(default=None, alias="newTag")
+    previous_image_ref: str | None = Field(default=None, alias="previousImageRef")
+    new_image_ref: str | None = Field(default=None, alias="newImageRef")
+    compare_url: str | None = Field(default=None, alias="compareUrl")
+    source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
     message: str | None = None
     initiated_at: str = Field(alias="initiatedAt")
 
@@ -1561,8 +1625,24 @@ def _dev_deploy_target(service_id: str) -> dict[str, object]:
     return target
 
 
+def _promote_to_prod_target(service_id: str) -> dict[str, object]:
+    target = PROMOTE_TO_PROD_TARGETS.get(service_id)
+    if target is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Service {service_id!r} does not support promote-to-prod.",
+        )
+    return target
+
+
 def _build_service_image_ref(service_id: str, tag: str) -> str:
     target = _dev_deploy_target(service_id)
+    image_repo = str(target["image_repo"])
+    return f"{image_repo}:{tag}"
+
+
+def _build_prod_service_image_ref(service_id: str, tag: str) -> str:
+    target = _promote_to_prod_target(service_id)
     image_repo = str(target["image_repo"])
     return f"{image_repo}:{tag}"
 
@@ -1584,6 +1664,70 @@ def _build_compare_url_for_portal_tags(previous_tag: str | None, new_tag: str | 
     return f"https://github.com/{_portal_repo_slug()}/compare/{previous_sha}...{new_sha}"
 
 
+def _ghcr_token() -> str | None:
+    for name in (
+        "GHCR_READ_TOKEN",
+        "GITHUB_API_TOKEN",
+        "GITHUB_READ_TOKEN",
+        "PORTAL_GITHUB_ACTIONS_TOKEN",
+        "GITHUB_TOKEN",
+    ):
+        token = os.getenv(name, "").strip()
+        if token:
+            return token
+    return None
+
+
+def _quote_registry_repo_path(image_repo: str) -> str:
+    if "/" not in image_repo:
+        raise PortalPromoteToProdError(
+            f"Image repository {image_repo!r} is not a valid GHCR image reference.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    registry_path = image_repo.split("/", 1)[1]
+    return "/".join(urlparse.quote(part, safe="") for part in registry_path.split("/"))
+
+
+def _ensure_ghcr_tag_exists(image_repo: str, tag: str, *, timeout_seconds: float = 10.0) -> None:
+    manifest_url = f"https://ghcr.io/v2/{_quote_registry_repo_path(image_repo)}/manifests/{urlparse.quote(tag, safe='')}"
+    request = urlrequest.Request(
+        manifest_url,
+        method="HEAD",
+        headers={
+            "Accept": ",".join(
+                [
+                    "application/vnd.oci.image.index.v1+json",
+                    "application/vnd.oci.image.manifest.v1+json",
+                    "application/vnd.docker.distribution.manifest.list.v2+json",
+                    "application/vnd.docker.distribution.manifest.v2+json",
+                ]
+            ),
+            "User-Agent": "homelab-portal-backend",
+        },
+    )
+    token = _ghcr_token()
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+
+    try:
+        with urlrequest.urlopen(request, timeout=timeout_seconds):
+            return
+    except urlerror.HTTPError as exc:
+        if exc.code == 404:
+            raise PortalPromoteToProdError(
+                f"Promoted image tag {tag!r} was not found in GHCR for {image_repo}.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from exc
+        body = exc.read().decode("utf-8", errors="replace").strip()
+        message = body or exc.reason or "GHCR manifest lookup failed"
+        raise PortalPromoteToProdError(message, status_code=status.HTTP_502_BAD_GATEWAY) from exc
+    except urlerror.URLError as exc:
+        raise PortalPromoteToProdError(
+            f"GHCR manifest lookup failed: {exc.reason}",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        ) from exc
+
+
 def _safe_branch_fragment(value: str) -> str:
     normalized = BRANCH_SAFE_FRAGMENT_RE.sub("-", value.strip().lower()).strip(".-")
     return normalized or "deploy"
@@ -1595,6 +1739,17 @@ def _build_dev_deploy_branch_name(service_id: str, tag: str, requested_at: datet
         tag_fragment = f"sha-{tag[4:16]}"
     return (
         f"automation/dev-deploy-{service_id}-"
+        f"{_safe_branch_fragment(tag_fragment)}-"
+        f"{requested_at.strftime('%Y%m%d%H%M%S')}"
+    )
+
+
+def _build_prod_promote_branch_name(service_id: str, tag: str, requested_at: datetime) -> str:
+    tag_fragment = tag
+    if tag.startswith("sha-") and len(tag) > 20:
+        tag_fragment = f"sha-{tag[4:16]}"
+    return (
+        f"automation/prod-promote-{service_id}-"
         f"{_safe_branch_fragment(tag_fragment)}-"
         f"{requested_at.strftime('%Y%m%d%H%M%S')}"
     )
@@ -1715,6 +1870,57 @@ def _load_dev_overlay_update_plan(
     return image_repo, previous_image_ref, updated_files
 
 
+def _load_promote_to_prod_update_plan(
+    git_provider: GitProvider,
+    *,
+    service_id: str,
+    repo_slug: str,
+    branch: str,
+) -> tuple[str, str | None, str, str | None, dict[str, str]]:
+    target = _promote_to_prod_target(service_id)
+    image_repo = str(target["image_repo"])
+    source_file = str(target["source_file"])
+    patch_files = [str(path) for path in target["patch_files"]]
+
+    source_content = git_provider.read_file(repo_slug, branch, source_file)
+    source_image_ref = _extract_image_ref_from_overlay(
+        source_content,
+        image_repo=image_repo,
+        file_path=source_file,
+    )
+    new_tag = _extract_version_from_image_ref(source_image_ref)
+    if not new_tag:
+        raise PortalPromoteToProdError(
+            f"GitOps dev overlay for {service_id} does not contain a deployable image tag.",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+    previous_image_ref: str | None = None
+    updated_files: dict[str, str] = {}
+    for file_path in patch_files:
+        current_content = git_provider.read_file(repo_slug, branch, file_path)
+        file_image_ref = _extract_image_ref_from_overlay(
+            current_content,
+            image_repo=image_repo,
+            file_path=file_path,
+        )
+        if previous_image_ref is None:
+            previous_image_ref = file_image_ref
+        elif previous_image_ref != file_image_ref:
+            raise PortalPromoteToProdError(
+                f"GitOps prod overlay for {service_id} is inconsistent across image patch files.",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        updated_files[file_path] = _replace_image_ref_in_overlay(
+            current_content,
+            image_repo=image_repo,
+            new_image_ref=source_image_ref,
+            file_path=file_path,
+        )
+
+    return image_repo, previous_image_ref, source_image_ref, new_tag, updated_files
+
+
 def _build_dev_deploy_pr_body(
     *,
     service_id: str,
@@ -1748,6 +1954,39 @@ def _build_dev_deploy_pr_body(
         [
             "",
             "This pull request updates only the dev overlay image reference(s) for the selected service.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_promote_to_prod_pr_body(
+    *,
+    service_id: str,
+    requested_by: str,
+    deploy_reason: str,
+    previous_tag: str | None,
+    new_tag: str,
+    new_image_ref: str,
+    compare_url: str | None,
+) -> str:
+    lines = [
+        "Portal-requested promote-to-prod.",
+        "",
+        f"- Service: `{service_id}`",
+        "- Source environment: `dev`",
+        "- Target environment: `prod`",
+        f"- Requested by: `{requested_by}`",
+        f"- Reason: {deploy_reason}",
+        f"- Previous prod tag: `{previous_tag or 'unknown'}`",
+        f"- Promoted tag: `{new_tag}`",
+        f"- Target image: `{new_image_ref}`",
+    ]
+    if compare_url:
+        lines.append(f"- Compare: {compare_url}")
+    lines.extend(
+        [
+            "",
+            "This pull request updates only the prod overlay image reference(s) for the selected service to match dev.",
         ]
     )
     return "\n".join(lines)
@@ -4036,6 +4275,205 @@ def request_portal_deploy_to_dev(
         compareUrl=compare_url,
         sourceCommitSha=latest_candidate.get("sourceCommitSha"),
         sourceWorkflowRunUrl=latest_candidate.get("workflowRunUrl"),
+        message=None,
+        initiatedAt=initiated_at.isoformat(),
+    )
+
+
+@app.post(
+    "/services/{service_id}/promote-to-prod",
+    response_model=PortalPromoteToProdResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["metadata"],
+)
+def request_portal_promote_to_prod(
+    service_id: str,
+    payload: PortalPromoteToProdRequest,
+    response: Response,
+    identity: tuple[str, set[str]] = Depends(get_current_user),
+) -> PortalPromoteToProdResponse:
+    requested_by, _groups = identity
+    target = _promote_to_prod_target(service_id)
+    initiated_at = datetime.now(tz=timezone.utc)
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+
+    try:
+        git_provider = build_default_git_provider()
+        image_repo, previous_image_ref, new_image_ref, new_tag, updated_files = _load_promote_to_prod_update_plan(
+            git_provider,
+            service_id=service_id,
+            repo_slug=workloads_repo,
+            branch=base_branch,
+        )
+        _ensure_ghcr_tag_exists(image_repo, new_tag)
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except PortalPromoteToProdError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    previous_tag = _extract_version_from_image_ref(previous_image_ref)
+    compare_url = _build_compare_url_for_portal_tags(previous_tag, new_tag)
+    source_commit_sha = _extract_sha_from_tag(new_tag)
+
+    if previous_image_ref == new_image_ref:
+        response.status_code = status.HTTP_200_OK
+        return PortalPromoteToProdResponse(
+            status="noop",
+            action="promote",
+            serviceId=service_id,
+            targetEnvironment="prod",
+            requestedBy=requested_by,
+            repository=workloads_repo,
+            baseBranch=base_branch,
+            branchName=None,
+            deploymentId=None,
+            gitPrUrl=None,
+            gitPrNumber=None,
+            previousTag=previous_tag,
+            newTag=new_tag,
+            previousImageRef=previous_image_ref,
+            newImageRef=new_image_ref,
+            compareUrl=compare_url,
+            sourceCommitSha=source_commit_sha,
+            message="Prod overlay already matches the current dev image tag.",
+            initiatedAt=initiated_at.isoformat(),
+        )
+
+    active_lock = _get_active_deployment_lock(service_id, "prod")
+    if active_lock is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    f"Active deployment lock already exists for {service_id}/prod. "
+                    "Wait for the in-flight mutation to finish or clear its stale lock."
+                ),
+                "activeLock": _build_deployment_lock_response(active_lock).model_dump(by_alias=True),
+            },
+        )
+
+    branch_name = _build_prod_promote_branch_name(service_id, new_tag, initiated_at)
+    pr_title = f"Promote {service_id}: {new_tag} to prod"
+    pr_body = _build_promote_to_prod_pr_body(
+        service_id=service_id,
+        requested_by=requested_by,
+        deploy_reason=payload.deploy_reason,
+        previous_tag=previous_tag,
+        new_tag=new_tag,
+        new_image_ref=new_image_ref,
+        compare_url=compare_url,
+    )
+
+    try:
+        git_provider.create_branch(workloads_repo, base_branch, branch_name)
+        git_provider.commit_to_branch(
+            workloads_repo,
+            branch_name,
+            updated_files,
+            pr_title,
+        )
+        pr = git_provider.open_pr(
+            workloads_repo,
+            branch_name,
+            base_branch,
+            pr_title,
+            pr_body,
+        )
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    request_key = f"gitops-pr:{pr['number']}:{service_id}:prod:promote"
+    record_payload = CreateDeploymentRecordRequest(
+        serviceId=service_id,
+        env="prod",
+        action="promote",
+        status="pending",
+        requestedAt=initiated_at,
+        requestedBy=requested_by,
+        gitPrUrl=pr["url"],
+        gitPrNumber=pr["number"],
+        imageRef=new_image_ref,
+        previousImageRef=previous_image_ref,
+        argoApp=str(target["argo_app"]),
+        gitRef=branch_name,
+        deployReason=payload.deploy_reason,
+        compareUrl=compare_url,
+        requestKey=request_key,
+        metadata={
+            "source": "portal-promote-to-prod",
+            "previousTag": previous_tag,
+            "newTag": new_tag,
+            "patchFiles": sorted(updated_files),
+            "sourceEnvironment": "dev",
+            "targetEnvironment": "prod",
+        },
+    )
+
+    try:
+        record = _upsert_deployment_record_row(record_payload, requested_by=requested_by)
+    except DeploymentLockConflictError as exc:
+        try:
+            git_provider.close_pr(workloads_repo, pr["number"])
+        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
+            logger.warning(
+                "promote_to_prod_failed_to_close_pr service_id=%s pr_number=%s error=%s",
+                service_id,
+                pr["number"],
+                close_exc,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": (
+                    f"Active deployment lock already exists for {service_id}/prod. "
+                    "Wait for the in-flight mutation to finish or clear its stale lock."
+                ),
+                "activeLock": _build_deployment_lock_response(exc.active_lock).model_dump(by_alias=True),
+            },
+        ) from exc
+    except Exception:
+        try:
+            git_provider.close_pr(workloads_repo, pr["number"])
+        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
+            logger.warning(
+                "promote_to_prod_failed_to_close_pr service_id=%s pr_number=%s error=%s",
+                service_id,
+                pr["number"],
+                close_exc,
+            )
+        raise
+
+    return PortalPromoteToProdResponse(
+        status="accepted",
+        action="promote",
+        serviceId=service_id,
+        targetEnvironment="prod",
+        requestedBy=requested_by,
+        repository=workloads_repo,
+        baseBranch=base_branch,
+        branchName=branch_name,
+        deploymentId=record.get("deploymentId") if isinstance(record.get("deploymentId"), str) else None,
+        gitPrUrl=pr["url"],
+        gitPrNumber=pr["number"],
+        previousTag=previous_tag,
+        newTag=new_tag,
+        previousImageRef=previous_image_ref,
+        newImageRef=new_image_ref,
+        compareUrl=compare_url,
+        sourceCommitSha=source_commit_sha,
         message=None,
         initiatedAt=initiated_at.isoformat(),
     )

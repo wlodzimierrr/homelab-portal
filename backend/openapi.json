@@ -886,6 +886,95 @@
         }
       }
     },
+    "/services/{service_id}/promote-to-prod": {
+      "post": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Request Portal Promote To Prod",
+        "operationId": "request_portal_promote_to_prod_services__service_id__promote_to_prod_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortalPromoteToProdRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortalPromoteToProdResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/rollbacks": {
       "post": {
         "tags": [
@@ -4725,6 +4814,196 @@
           "initiatedAt"
         ],
         "title": "PortalDeployToDevResponse"
+      },
+      "PortalPromoteToProdRequest": {
+        "properties": {
+          "deployReason": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 5,
+            "title": "Deployreason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "deployReason"
+        ],
+        "title": "PortalPromoteToProdRequest"
+      },
+      "PortalPromoteToProdResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "noop"
+            ],
+            "title": "Status"
+          },
+          "action": {
+            "type": "string",
+            "const": "promote",
+            "title": "Action"
+          },
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "targetEnvironment": {
+            "type": "string",
+            "const": "prod",
+            "title": "Targetenvironment"
+          },
+          "requestedBy": {
+            "type": "string",
+            "title": "Requestedby"
+          },
+          "repository": {
+            "type": "string",
+            "title": "Repository"
+          },
+          "baseBranch": {
+            "type": "string",
+            "title": "Basebranch"
+          },
+          "branchName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branchname"
+          },
+          "deploymentId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deploymentid"
+          },
+          "gitPrUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprurl"
+          },
+          "gitPrNumber": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprnumber"
+          },
+          "previousTag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previoustag"
+          },
+          "newTag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newtag"
+          },
+          "previousImageRef": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previousimageref"
+          },
+          "newImageRef": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Newimageref"
+          },
+          "compareUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compareurl"
+          },
+          "sourceCommitSha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourcecommitsha"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "initiatedAt": {
+            "type": "string",
+            "title": "Initiatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "action",
+          "serviceId",
+          "targetEnvironment",
+          "requestedBy",
+          "repository",
+          "baseBranch",
+          "initiatedAt"
+        ],
+        "title": "PortalPromoteToProdResponse"
       },
       "PortalRollbackRequest": {
         "properties": {

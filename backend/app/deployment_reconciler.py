@@ -31,6 +31,9 @@ DEV_AUTOBUMP_HEAD_RE = re.compile(r"^automation/dev-image-bump-([0-9a-f]{40})$")
 MANUAL_DEV_DEPLOY_HEAD_RE = re.compile(
     r"^automation/dev-deploy-(homelab-api|homelab-web)-([a-z0-9][a-z0-9.-]*)-[0-9]{14}$"
 )
+MANUAL_PROD_PROMOTE_HEAD_RE = re.compile(
+    r"^automation/prod-promote-(homelab-api|homelab-web)-([a-z0-9][a-z0-9.-]*)-[0-9]{14}$"
+)
 ENV_MUTATION_HEAD_RE = re.compile(r"^automation/([a-z0-9-]+)-(promote|rollback)-image-update-.+$")
 CONFIG_CHANGE_HEAD_RE = re.compile(
     r"^automation/([a-z0-9-]+)-config-change-(homelab-api|homelab-web)-replicas-.+$"
@@ -38,6 +41,9 @@ CONFIG_CHANGE_HEAD_RE = re.compile(
 DEV_AUTOBUMP_TITLE_RE = re.compile(r"^chore\(dev\): bump portal images to (sha-[0-9a-f]{40})$")
 MANUAL_DEV_DEPLOY_TITLE_RE = re.compile(
     r"^Deploy (homelab-api|homelab-web): (sha-[0-9a-f]{40}|v?[0-9]+(?:\.[0-9]+){2}(?:[.-][0-9A-Za-z.-]+)?) to dev$"
+)
+MANUAL_PROD_PROMOTE_TITLE_RE = re.compile(
+    r"^Promote (homelab-api|homelab-web): (sha-[0-9a-f]{40}|v?[0-9]+(?:\.[0-9]+){2}(?:[.-][0-9A-Za-z.-]+)?) to prod$"
 )
 PROMOTE_TITLE_RE = re.compile(r"^chore\(([a-z0-9-]+)\): promote portal images from dev \((sha-[0-9a-f]{40})\)$")
 ROLLBACK_TITLE_RE = re.compile(r"^chore\(([a-z0-9-]+)\): rollback portal images to requested tags$")
@@ -174,6 +180,14 @@ def _action_context_from_pull_request(pr: dict[str, object]) -> tuple[str, str, 
             source_sha = target_tag[4:]
         return ("dev", "deploy", source_sha)
 
+    manual_prod_promote_title = MANUAL_PROD_PROMOTE_TITLE_RE.match(title)
+    if manual_prod_promote_title:
+        target_tag = manual_prod_promote_title.group(2)
+        source_sha = None
+        if target_tag.startswith("sha-") and len(target_tag) == 44:
+            source_sha = target_tag[4:]
+        return ("prod", "promote", source_sha)
+
     if head_ref:
         head_match = DEV_AUTOBUMP_HEAD_RE.match(head_ref)
         if head_match:
@@ -184,6 +198,12 @@ def _action_context_from_pull_request(pr: dict[str, object]) -> tuple[str, str, 
             if target_tag.startswith("sha-") and len(target_tag) == 44:
                 return ("dev", "deploy", target_tag[4:])
             return ("dev", "deploy", None)
+        manual_promote_head_match = MANUAL_PROD_PROMOTE_HEAD_RE.match(head_ref)
+        if manual_promote_head_match:
+            target_tag = manual_promote_head_match.group(2)
+            if target_tag.startswith("sha-") and len(target_tag) == 44:
+                return ("prod", "promote", target_tag[4:])
+            return ("prod", "promote", None)
 
     promote = PROMOTE_TITLE_RE.match(title)
     if promote:
