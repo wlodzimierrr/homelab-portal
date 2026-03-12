@@ -6,9 +6,6 @@ export const UNAUTHORIZED_EVENT = 'portal:unauthorized'
 const serviceEndpointMissingStatuses = new Set([404, 405, 501])
 const enableServiceApi = import.meta.env.VITE_ENABLE_SERVICE_API === 'true'
 
-type ServiceApiAvailability = 'unknown' | 'available' | 'unavailable'
-let serviceApiAvailability: ServiceApiAvailability = enableServiceApi ? 'unknown' : 'unavailable'
-
 interface RequestOptions extends Omit<RequestInit, 'headers'> {
   headers?: HeadersInit
   skipUnauthorizedRedirect?: boolean
@@ -614,17 +611,15 @@ export async function request<T>(path: string, options: RequestOptions = {}) {
 }
 
 async function requestServiceEndpoint<T>(path: string) {
-  if (serviceApiAvailability === 'unavailable') {
+  if (!enableServiceApi) {
     throw new ApiRequestError('Service endpoint is not available in this backend.', 404)
   }
 
   try {
-    const response = await request<T>(path)
-    serviceApiAvailability = 'available'
-    return response
+    return await request<T>(path)
   } catch (error) {
     if (isApiRequestError(error) && serviceEndpointMissingStatuses.has(error.status)) {
-      serviceApiAvailability = 'unavailable'
+      throw error
     }
     throw error
   }
