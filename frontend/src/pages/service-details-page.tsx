@@ -1377,161 +1377,6 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               </div>
             ) : null}
 
-            {rollbackSupported ? (
-              <section className="space-y-3 rounded-md border border-border bg-card p-4">
-                <div className="space-y-1">
-                  <h2 className="text-sm font-semibold">Portal Actions</h2>
-                  <p className="text-xs text-muted-foreground">
-                    Request deploy and promote actions directly from the service page. Buttons are blocked while a
-                    deployment lock or in-flight deployment exists for the target environment.
-                  </p>
-                </div>
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <article className="space-y-3 rounded-md border border-border/70 bg-background/50 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-semibold">Deploy latest to dev</h3>
-                      <p className="text-xs text-muted-foreground">
-                        Opens a GitOps PR that updates the dev overlay to the newest deployable image.
-                      </p>
-                    </div>
-                    {devLockActive || devInFlight ? (
-                      <span className="rounded-full bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-700 dark:text-sky-300">
-                        Dev locked
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
-                      <p className="font-medium text-foreground">Current dev tag</p>
-                      <p className="mt-1 break-all">{latestDevDeployment?.version ?? 'Unavailable'}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
-                      <p className="font-medium text-foreground">Recent dev tags</p>
-                      <div className="mt-1 flex flex-wrap gap-2">
-                        {recentDevTags.map((tag) => (
-                          <code key={tag} className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
-                            {tag}
-                          </code>
-                        ))}
-                        {recentDevTags.length === 0 ? <span>Unavailable</span> : null}
-                      </div>
-                    </div>
-                  </div>
-                  <label className="space-y-1">
-                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Deploy reason</span>
-                    <textarea
-                      value={deployReason}
-                      onChange={(event) => setDeployReason(event.target.value)}
-                      rows={3}
-                      placeholder="Why the latest build should be deployed to dev."
-                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                    />
-                  </label>
-                  {deployError ? (
-                    <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
-                      <p className="text-xs text-destructive">{deployError}</p>
-                    </div>
-                  ) : null}
-                  {deployResult ? (
-                    <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
-                      <p className="font-medium">
-                        {deployResult.status === 'noop'
-                          ? deployResult.message ?? 'Dev already points at the latest deployable image.'
-                          : `Deploy request accepted for dev.`}
-                      </p>
-                      {deployResult.gitPrUrl ? (
-                        <a href={deployResult.gitPrUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex font-medium underline underline-offset-2">
-                          Open GitOps PR #{deployResult.gitPrNumber ?? 'link'}
-                        </a>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  <Button
-                    type="button"
-                    onClick={() => void submitDeployRequest()}
-                    disabled={deploySubmitting || devLockActive || devInFlight || deployReason.trim().length < 5}
-                  >
-                    {deploySubmitting ? 'Requesting deploy...' : 'Deploy latest to dev'}
-                  </Button>
-                  </article>
-
-                  <article className="space-y-3 rounded-md border border-border/70 bg-background/50 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h3 className="text-sm font-semibold">Promote dev to prod</h3>
-                      <p className="text-xs text-muted-foreground">
-                        Opens a GitOps PR that copies the current dev tag into the prod overlay for this service.
-                      </p>
-                    </div>
-                    {prodLockActive || prodInFlight ? (
-                      <span className="rounded-full bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-700 dark:text-sky-300">
-                        Prod locked
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
-                      <p className="font-medium text-foreground">Current dev tag</p>
-                      <p className="mt-1 break-all">{latestDevDeployment?.version ?? 'Unavailable'}</p>
-                    </div>
-                    <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
-                      <p className="font-medium text-foreground">Current prod tag</p>
-                      <p className="mt-1 break-all">{latestProdDeployment?.version ?? 'Unavailable'}</p>
-                    </div>
-                  </div>
-                  <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
-                    <p className="font-medium text-foreground">Recent prod tags</p>
-                    <div className="mt-1 flex flex-wrap gap-2">
-                      {recentProdTags.map((tag) => (
-                        <code key={tag} className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
-                          {tag}
-                        </code>
-                      ))}
-                      {recentProdTags.length === 0 ? <span>Unavailable</span> : null}
-                    </div>
-                  </div>
-                  <label className="space-y-1">
-                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Promote reason</span>
-                    <textarea
-                      value={promoteReason}
-                      onChange={(event) => setPromoteReason(event.target.value)}
-                      rows={3}
-                      placeholder="Why the current dev tag should be promoted to prod."
-                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                    />
-                  </label>
-                  {promoteError ? (
-                    <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
-                      <p className="text-xs text-destructive">{promoteError}</p>
-                    </div>
-                  ) : null}
-                  {promoteResult ? (
-                    <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
-                      <p className="font-medium">
-                        {promoteResult.status === 'noop'
-                          ? promoteResult.message ?? 'Prod already matches dev.'
-                          : `Promote request accepted for prod.`}
-                      </p>
-                      {promoteResult.gitPrUrl ? (
-                        <a href={promoteResult.gitPrUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex font-medium underline underline-offset-2">
-                          Open GitOps PR #{promoteResult.gitPrNumber ?? 'link'}
-                        </a>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  <Button
-                    type="button"
-                    onClick={() => void submitPromoteRequest()}
-                    disabled={promoteSubmitting || prodLockActive || prodInFlight || promoteReason.trim().length < 5}
-                  >
-                    {promoteSubmitting ? 'Requesting promote...' : 'Promote to prod'}
-                  </Button>
-                  </article>
-                </div>
-              </section>
-            ) : null}
-
             {import.meta.env.DEV ? (
               <section className="space-y-3">
                 <h2 className="text-sm font-semibold">Status Visual Checks</h2>
@@ -2157,6 +2002,281 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               )}
             </section>
 
+            <section className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold">Deploy Info</h2>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void loadDeploymentInfo()}
+                  disabled={deploymentInfoLoading}
+                >
+                  Refresh deploy info
+                </Button>
+              </div>
+              {deploymentInfoError ? (
+                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                  <p className="text-xs text-amber-900 dark:text-amber-200">{deploymentInfoError}</p>
+                </div>
+              ) : null}
+              {deploymentInfoLoading ? (
+                <LoadingState label="Loading deploy info..." rows={2} />
+              ) : deploymentInfo ? (
+                <div className="grid gap-3 xl:grid-cols-2">
+                  <article className="rounded-md border border-border bg-background p-4">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Current deployment</p>
+                    <div className="mt-2 space-y-2 text-sm">
+                      <p>
+                        <span className="font-medium">Action:</span> {formatDeploymentAction(deploymentInfo.action)}
+                      </p>
+                      <p>
+                        <span className="font-medium">Result:</span>{' '}
+                        <span
+                          className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${getDeploymentOutcomeTone(
+                            deploymentInfo.result,
+                          )}`}
+                        >
+                          {deploymentInfo.result ?? 'unknown'}
+                        </span>
+                      </p>
+                      <p>
+                        <span className="font-medium">Deployed:</span>{' '}
+                        {formatDate(deploymentInfo.deployedTimestamp ?? undefined)}
+                      </p>
+                      <p className="break-all">
+                        <span className="font-medium">Image:</span>{' '}
+                        {deploymentInfo.imageUrl ? (
+                          <a href={deploymentInfo.imageUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            {deploymentInfo.deployedImage ?? 'N/A'}
+                          </a>
+                        ) : (
+                          deploymentInfo.deployedImage ?? 'N/A'
+                        )}
+                      </p>
+                      {deploymentInfo.previousImage ? (
+                        <p className="break-all">
+                          <span className="font-medium">Previous image:</span> {deploymentInfo.previousImage}
+                        </p>
+                      ) : null}
+                      {deploymentInfo.imageDigest ? (
+                        <p className="break-all">
+                          <span className="font-medium">Digest:</span> {deploymentInfo.imageDigest}
+                        </p>
+                      ) : null}
+                    </div>
+                  </article>
+                  <article className="rounded-md border border-border bg-background p-4">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Traceability</p>
+                    <div className="mt-2 space-y-2 text-sm">
+                      <p>
+                        <span className="font-medium">Commit:</span>{' '}
+                        {deploymentInfo.commitUrl ? (
+                          <a href={deploymentInfo.commitUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            {deploymentInfo.gitCommit ?? 'N/A'}
+                          </a>
+                        ) : (
+                          deploymentInfo.gitCommit ?? 'N/A'
+                        )}
+                      </p>
+                      <p>
+                        <span className="font-medium">Argo:</span> {deploymentInfo.argoApp ?? 'N/A'}
+                      </p>
+                      <p>
+                        <span className="font-medium">Sync/health:</span> {deploymentInfo.syncStatus ?? 'unknown'} /{' '}
+                        {deploymentInfo.healthStatus ?? 'unknown'}
+                      </p>
+                      {deploymentInfo.gitPrUrl ? (
+                        <p>
+                          <span className="font-medium">PR:</span>{' '}
+                          <a href={deploymentInfo.gitPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            #{deploymentInfo.gitPrNumber ?? 'link'}
+                          </a>
+                        </p>
+                      ) : null}
+                      {deploymentInfo.compareUrl ? (
+                        <p>
+                          <span className="font-medium">Compare:</span>{' '}
+                          <a href={deploymentInfo.compareUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                            Open compare view
+                          </a>
+                        </p>
+                      ) : null}
+                      {deploymentInfo.deployReason ? (
+                        <p>
+                          <span className="font-medium">Reason:</span> {deploymentInfo.deployReason}
+                        </p>
+                      ) : null}
+                      {deploymentInfo.resultReason ? (
+                        <p>
+                          <span className="font-medium">Result reason:</span> {deploymentInfo.resultReason}
+                        </p>
+                      ) : null}
+                    </div>
+                  </article>
+                </div>
+              ) : (
+                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+                  No deployment info is available for this service yet.
+                </p>
+              )}
+            </section>
+
+            {rollbackSupported ? (
+              <section className="space-y-3 rounded-md border border-border bg-card p-4">
+                <div className="space-y-1">
+                  <h2 className="text-sm font-semibold">Portal Actions</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Request deploy and promote actions directly from the service page. Buttons are blocked while a
+                    deployment lock or in-flight deployment exists for the target environment.
+                  </p>
+                </div>
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <article className="space-y-3 rounded-md border border-border/70 bg-background/50 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-semibold">Deploy latest to dev</h3>
+                        <p className="text-xs text-muted-foreground">
+                          Opens a GitOps PR that updates the dev overlay to the newest deployable image.
+                        </p>
+                      </div>
+                      {devLockActive || devInFlight ? (
+                        <span className="rounded-full bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-700 dark:text-sky-300">
+                          Dev locked
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                        <p className="font-medium text-foreground">Current dev tag</p>
+                        <p className="mt-1 break-all">{latestDevDeployment?.version ?? 'Unavailable'}</p>
+                      </div>
+                      <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                        <p className="font-medium text-foreground">Recent dev tags</p>
+                        <div className="mt-1 flex flex-wrap gap-2">
+                          {recentDevTags.map((tag) => (
+                            <code key={tag} className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
+                              {tag}
+                            </code>
+                          ))}
+                          {recentDevTags.length === 0 ? <span>Unavailable</span> : null}
+                        </div>
+                      </div>
+                    </div>
+                    <label className="space-y-1">
+                      <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Deploy reason</span>
+                      <textarea
+                        value={deployReason}
+                        onChange={(event) => setDeployReason(event.target.value)}
+                        rows={3}
+                        placeholder="Why the latest build should be deployed to dev."
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                      />
+                    </label>
+                    {deployError ? (
+                      <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                        <p className="text-xs text-destructive">{deployError}</p>
+                      </div>
+                    ) : null}
+                    {deployResult ? (
+                      <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
+                        <p className="font-medium">
+                          {deployResult.status === 'noop'
+                            ? deployResult.message ?? 'Dev already points at the latest deployable image.'
+                            : `Deploy request accepted for dev.`}
+                        </p>
+                        {deployResult.gitPrUrl ? (
+                          <a href={deployResult.gitPrUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex font-medium underline underline-offset-2">
+                            Open GitOps PR #{deployResult.gitPrNumber ?? 'link'}
+                          </a>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <Button
+                      type="button"
+                      onClick={() => void submitDeployRequest()}
+                      disabled={deploySubmitting || devLockActive || devInFlight || deployReason.trim().length < 5}
+                    >
+                      {deploySubmitting ? 'Requesting deploy...' : 'Deploy latest to dev'}
+                    </Button>
+                  </article>
+
+                  <article className="space-y-3 rounded-md border border-border/70 bg-background/50 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-semibold">Promote dev to prod</h3>
+                        <p className="text-xs text-muted-foreground">
+                          Opens a GitOps PR that copies the current dev tag into the prod overlay for this service.
+                        </p>
+                      </div>
+                      {prodLockActive || prodInFlight ? (
+                        <span className="rounded-full bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-700 dark:text-sky-300">
+                          Prod locked
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                        <p className="font-medium text-foreground">Current dev tag</p>
+                        <p className="mt-1 break-all">{latestDevDeployment?.version ?? 'Unavailable'}</p>
+                      </div>
+                      <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                        <p className="font-medium text-foreground">Current prod tag</p>
+                        <p className="mt-1 break-all">{latestProdDeployment?.version ?? 'Unavailable'}</p>
+                      </div>
+                    </div>
+                    <div className="rounded-md border border-border/70 bg-background p-3 text-xs text-muted-foreground">
+                      <p className="font-medium text-foreground">Recent prod tags</p>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {recentProdTags.map((tag) => (
+                          <code key={tag} className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
+                            {tag}
+                          </code>
+                        ))}
+                        {recentProdTags.length === 0 ? <span>Unavailable</span> : null}
+                      </div>
+                    </div>
+                    <label className="space-y-1">
+                      <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Promote reason</span>
+                      <textarea
+                        value={promoteReason}
+                        onChange={(event) => setPromoteReason(event.target.value)}
+                        rows={3}
+                        placeholder="Why the current dev tag should be promoted to prod."
+                        className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                      />
+                    </label>
+                    {promoteError ? (
+                      <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                        <p className="text-xs text-destructive">{promoteError}</p>
+                      </div>
+                    ) : null}
+                    {promoteResult ? (
+                      <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
+                        <p className="font-medium">
+                          {promoteResult.status === 'noop'
+                            ? promoteResult.message ?? 'Prod already matches dev.'
+                            : `Promote request accepted for prod.`}
+                        </p>
+                        {promoteResult.gitPrUrl ? (
+                          <a href={promoteResult.gitPrUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex font-medium underline underline-offset-2">
+                            Open GitOps PR #{promoteResult.gitPrNumber ?? 'link'}
+                          </a>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <Button
+                      type="button"
+                      onClick={() => void submitPromoteRequest()}
+                      disabled={promoteSubmitting || prodLockActive || prodInFlight || promoteReason.trim().length < 5}
+                    >
+                      {promoteSubmitting ? 'Requesting promote...' : 'Promote to prod'}
+                    </Button>
+                  </article>
+                </div>
+              </section>
+            ) : null}
+
             {rollbackSupported ? (
               <section className="space-y-3 rounded-md border border-border bg-card p-4">
                 <div className="space-y-1">
@@ -2302,126 +2422,6 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 </div>
               </section>
             ) : null}
-
-            <section className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold">Deploy Info</h2>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void loadDeploymentInfo()}
-                  disabled={deploymentInfoLoading}
-                >
-                  Refresh deploy info
-                </Button>
-              </div>
-              {deploymentInfoError ? (
-                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
-                  <p className="text-xs text-amber-900 dark:text-amber-200">{deploymentInfoError}</p>
-                </div>
-              ) : null}
-              {deploymentInfoLoading ? (
-                <LoadingState label="Loading deploy info..." rows={2} />
-              ) : deploymentInfo ? (
-                <div className="grid gap-3 xl:grid-cols-2">
-                  <article className="rounded-md border border-border bg-background p-4">
-                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Current deployment</p>
-                    <div className="mt-2 space-y-2 text-sm">
-                      <p>
-                        <span className="font-medium">Action:</span> {formatDeploymentAction(deploymentInfo.action)}
-                      </p>
-                      <p>
-                        <span className="font-medium">Result:</span>{' '}
-                        <span
-                          className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${getDeploymentOutcomeTone(
-                            deploymentInfo.result,
-                          )}`}
-                        >
-                          {deploymentInfo.result ?? 'unknown'}
-                        </span>
-                      </p>
-                      <p>
-                        <span className="font-medium">Deployed:</span>{' '}
-                        {formatDate(deploymentInfo.deployedTimestamp ?? undefined)}
-                      </p>
-                      <p className="break-all">
-                        <span className="font-medium">Image:</span>{' '}
-                        {deploymentInfo.imageUrl ? (
-                          <a href={deploymentInfo.imageUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            {deploymentInfo.deployedImage ?? 'N/A'}
-                          </a>
-                        ) : (
-                          deploymentInfo.deployedImage ?? 'N/A'
-                        )}
-                      </p>
-                      {deploymentInfo.previousImage ? (
-                        <p className="break-all">
-                          <span className="font-medium">Previous image:</span> {deploymentInfo.previousImage}
-                        </p>
-                      ) : null}
-                      {deploymentInfo.imageDigest ? (
-                        <p className="break-all">
-                          <span className="font-medium">Digest:</span> {deploymentInfo.imageDigest}
-                        </p>
-                      ) : null}
-                    </div>
-                  </article>
-                  <article className="rounded-md border border-border bg-background p-4">
-                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Traceability</p>
-                    <div className="mt-2 space-y-2 text-sm">
-                      <p>
-                        <span className="font-medium">Commit:</span>{' '}
-                        {deploymentInfo.commitUrl ? (
-                          <a href={deploymentInfo.commitUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            {deploymentInfo.gitCommit ?? 'N/A'}
-                          </a>
-                        ) : (
-                          deploymentInfo.gitCommit ?? 'N/A'
-                        )}
-                      </p>
-                      <p>
-                        <span className="font-medium">Argo:</span> {deploymentInfo.argoApp ?? 'N/A'}
-                      </p>
-                      <p>
-                        <span className="font-medium">Sync/health:</span> {deploymentInfo.syncStatus ?? 'unknown'} /{' '}
-                        {deploymentInfo.healthStatus ?? 'unknown'}
-                      </p>
-                      {deploymentInfo.gitPrUrl ? (
-                        <p>
-                          <span className="font-medium">PR:</span>{' '}
-                          <a href={deploymentInfo.gitPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            #{deploymentInfo.gitPrNumber ?? 'link'}
-                          </a>
-                        </p>
-                      ) : null}
-                      {deploymentInfo.compareUrl ? (
-                        <p>
-                          <span className="font-medium">Compare:</span>{' '}
-                          <a href={deploymentInfo.compareUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            Open compare view
-                          </a>
-                        </p>
-                      ) : null}
-                      {deploymentInfo.deployReason ? (
-                        <p>
-                          <span className="font-medium">Reason:</span> {deploymentInfo.deployReason}
-                        </p>
-                      ) : null}
-                      {deploymentInfo.resultReason ? (
-                        <p>
-                          <span className="font-medium">Result reason:</span> {deploymentInfo.resultReason}
-                        </p>
-                      ) : null}
-                    </div>
-                  </article>
-                </div>
-              ) : (
-                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
-                  No deployment info is available for this service yet.
-                </p>
-              )}
-            </section>
 
             <section className="space-y-3">
               <div className="flex items-center justify-between gap-2">

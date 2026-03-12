@@ -115,6 +115,15 @@ function isDeploymentRecordId(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
+function shiftTimestamp(value: string, minutes: number) {
+  const timestamp = Date.parse(value)
+  if (Number.isNaN(timestamp)) {
+    return null
+  }
+
+  return new Date(timestamp + minutes * 60_000).toISOString()
+}
+
 function buildDeploymentObservabilityRequest(item: DeploymentHistoryItem) {
   if (isDeploymentRecordId(item.id)) {
     return { deploymentId: item.id }
@@ -124,7 +133,31 @@ function buildDeploymentObservabilityRequest(item: DeploymentHistoryItem) {
   const windowEnd = item.deployedAt ?? item.requestedAt
 
   if (windowStart && windowEnd) {
-    return { windowStart, windowEnd }
+    const startMs = Date.parse(windowStart)
+    const endMs = Date.parse(windowEnd)
+
+    if (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs > startMs) {
+      return { windowStart, windowEnd }
+    }
+
+    const widenedWindowEnd = shiftTimestamp(windowStart, 5)
+    if (widenedWindowEnd) {
+      return { windowStart, windowEnd: widenedWindowEnd }
+    }
+  }
+
+  if (windowStart) {
+    const widenedWindowEnd = shiftTimestamp(windowStart, 5)
+    if (widenedWindowEnd) {
+      return { windowStart, windowEnd: widenedWindowEnd }
+    }
+  }
+
+  if (windowEnd) {
+    const widenedWindowStart = shiftTimestamp(windowEnd, -5)
+    if (widenedWindowStart) {
+      return { windowStart: widenedWindowStart, windowEnd }
+    }
   }
 
   return { deploymentId: item.id }
