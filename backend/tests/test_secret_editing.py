@@ -6,10 +6,12 @@ from pathlib import Path
 import subprocess
 
 import pytest
+import yaml
 
 from app.secret_editing import (
     SecretEditingError,
     SECRET_EDIT_TARGETS,
+    _normalize_sops_config_contents,
     clear_secret_edit_rate_limit_state_for_tests,
     decrypt_secret_manifest,
     encrypt_secret_manifest,
@@ -226,3 +228,20 @@ def test_encrypt_secret_manifest_uses_inline_sops_config_when_provided(
     config_path = Path(args[config_index])
     assert config_path.name == ".sops.yaml"
     assert captured["cwd"] == str(config_path.parent)
+
+
+def test_normalize_sops_config_contents_flattens_age_list() -> None:
+    normalized = _normalize_sops_config_contents(
+        """
+creation_rules:
+  - path_regex: apps/.*/envs/.*/.*secret.*\\.enc\\.ya?ml$
+    encrypted_regex: "^(data|stringData)$"
+    age:
+      - age1firstrecipient
+      - age1secondrecipient
+"""
+    )
+
+    payload = yaml.safe_load(normalized)
+
+    assert payload["creation_rules"][0]["age"] == "age1firstrecipient,age1secondrecipient"

@@ -135,7 +135,7 @@ def _sops_config_path(*, config_contents: str | None = None, temp_dir: Path | No
                 status_code=500,
             )
         config_path = temp_dir / ".sops.yaml"
-        config_path.write_text(config_contents, encoding="utf-8")
+        config_path.write_text(_normalize_sops_config_contents(config_contents), encoding="utf-8")
         return config_path
 
     config_path = _workloads_repo_root() / ".sops.yaml"
@@ -145,6 +145,47 @@ def _sops_config_path(*, config_contents: str | None = None, temp_dir: Path | No
             status_code=503,
         )
     return config_path
+
+
+def _normalize_sops_config_contents(config_contents: str) -> str:
+    """Normalize repo config for the runtime sops binary used in-cluster.
+
+    Some runtime builds accept recipient lists in a narrower shape than the
+    local CLI. We normalize the real repo config into a conservative format
+    before writing the temporary config file.
+    """
+
+    try:
+        payload = yaml.safe_load(config_contents) or {}
+    except yaml.YAMLError as exc:
+        raise SecretEditingError(
+            f"Failed to parse SOPS config from workloads repository: {exc}",
+            status_code=502,
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise SecretEditingError(
+            "SOPS config from workloads repository is not a YAML mapping.",
+            status_code=502,
+        )
+
+    creation_rules = payload.get("creation_rules")
+    if isinstance(creation_rules, list):
+        normalized_rules: list[dict] = []
+        for rule in creation_rules:
+            if not isinstance(rule, dict):
+                normalized_rules.append(rule)
+                continue
+            normalized_rule = dict(rule)
+            age_value = normalized_rule.get("age")
+            if isinstance(age_value, list):
+                normalized_rule["age"] = ",".join(
+                    str(item).strip() for item in age_value if str(item).strip()
+                )
+            normalized_rules.append(normalized_rule)
+        payload["creation_rules"] = normalized_rules
+
+    return yaml.safe_dump(payload, sort_keys=False)
 
 
 def ensure_secret_edit_runtime_ready() -> None:
