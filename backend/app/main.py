@@ -5081,6 +5081,7 @@ def request_portal_set_secret(
         target = resolve_secret_edit_target(service_id, payload.env, payload.secret_key)
         git_provider = build_default_git_provider()
         encrypted_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
+        sops_config_contents = git_provider.read_file(workloads_repo, base_branch, ".sops.yaml")
         decrypted_manifest = decrypt_secret_manifest(encrypted_contents)
         updated_manifest = update_secret_manifest_document(
             decrypted_manifest,
@@ -5091,6 +5092,7 @@ def request_portal_set_secret(
         encrypted_manifest = encrypt_secret_manifest(
             updated_manifest,
             target_file_path=target.file_path,
+            sops_config_contents=sops_config_contents,
         )
     except SecretEditingError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -191,3 +192,37 @@ def test_encrypt_secret_manifest_passes_sops_config_and_filename_override(
     assert "apps/homelab-web/envs/dev/oauth2-proxy-secret.enc.yaml" in args
     assert "--encrypt" in args
     assert captured["cwd"] == str(workloads_root)
+
+
+def test_encrypt_secret_manifest_uses_inline_sops_config_when_provided(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    key_path = tmp_path / "keys.txt"
+    key_path.write_text("age-secret-key", encoding="utf-8")
+    monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(key_path))
+
+    captured: dict[str, object] = {}
+
+    def _run(args, check, capture_output, text, env, cwd=None):  # type: ignore[no-untyped-def]
+        if args[1] == "--version":
+            return subprocess.CompletedProcess(args, 0, stdout="sops 3.9.4", stderr="")
+        captured["args"] = args
+        captured["cwd"] = cwd
+        return subprocess.CompletedProcess(args, 0, stdout="encrypted", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = encrypt_secret_manifest(
+        {"kind": "Secret"},
+        target_file_path="apps/homelab-web/envs/dev/oauth2-proxy-secret.enc.yaml",
+        sops_config_contents="creation_rules:\n  - path_regex: .*\\.enc\\.yaml$\n",
+    )
+
+    assert result == "encrypted"
+    args = captured["args"]
+    assert isinstance(args, list)
+    config_index = args.index("--config") + 1
+    config_path = Path(args[config_index])
+    assert config_path.name == ".sops.yaml"
+    assert captured["cwd"] == str(config_path.parent)

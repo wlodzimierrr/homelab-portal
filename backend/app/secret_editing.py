@@ -127,7 +127,17 @@ def _sops_command() -> str:
     return os.getenv("SOPS_BIN", "sops")
 
 
-def _sops_config_path() -> Path:
+def _sops_config_path(*, config_contents: str | None = None, temp_dir: Path | None = None) -> Path:
+    if config_contents is not None:
+        if temp_dir is None:
+            raise SecretEditingError(
+                "Temporary directory is required when using inline SOPS config contents.",
+                status_code=500,
+            )
+        config_path = temp_dir / ".sops.yaml"
+        config_path.write_text(config_contents, encoding="utf-8")
+        return config_path
+
     config_path = _workloads_repo_root() / ".sops.yaml"
     if not config_path.exists():
         raise SecretEditingError(
@@ -225,12 +235,21 @@ def update_secret_manifest_document(
     return updated
 
 
-def encrypt_secret_manifest(payload: dict, *, target_file_path: str) -> str:
+def encrypt_secret_manifest(
+    payload: dict,
+    *,
+    target_file_path: str,
+    sops_config_contents: str | None = None,
+) -> str:
     ensure_secret_edit_runtime_ready()
-    workloads_repo_root = _workloads_repo_root()
-    config_path = _sops_config_path()
     with TemporaryDirectory(prefix="portal-secret-edit-") as tmp_dir:
-        plain_path = Path(tmp_dir) / "secret.yaml"
+        temp_dir = Path(tmp_dir)
+        workloads_repo_root = _workloads_repo_root() if sops_config_contents is None else temp_dir
+        config_path = _sops_config_path(
+            config_contents=sops_config_contents,
+            temp_dir=temp_dir,
+        )
+        plain_path = temp_dir / "secret.yaml"
         plain_path.write_text(
             yaml.safe_dump(payload, sort_keys=False),
             encoding="utf-8",
