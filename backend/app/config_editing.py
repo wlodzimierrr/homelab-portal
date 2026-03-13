@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
@@ -15,6 +17,7 @@ class ConfigEditTarget:
     file_path: str
     config_map_name: str
     allowed_keys: tuple[str, ...]
+    deployment_patch_file_path: str
 
 
 class ConfigEditingError(Exception):
@@ -30,6 +33,7 @@ CONFIG_EDIT_TARGETS: tuple[ConfigEditTarget, ...] = (
         file_path="apps/homelab-api/envs/dev/runtime-config.yaml",
         config_map_name="homelab-api-runtime-config",
         allowed_keys=("LOG_LEVEL",),
+        deployment_patch_file_path="apps/homelab-api/envs/dev/patch-deployment.yaml",
     ),
     ConfigEditTarget(
         service_id="homelab-api",
@@ -37,6 +41,7 @@ CONFIG_EDIT_TARGETS: tuple[ConfigEditTarget, ...] = (
         file_path="apps/homelab-api/envs/prod/runtime-config.yaml",
         config_map_name="homelab-api-runtime-config",
         allowed_keys=("LOG_LEVEL",),
+        deployment_patch_file_path="apps/homelab-api/envs/prod/patch-deployment.yaml",
     ),
 )
 
@@ -149,3 +154,49 @@ def update_config_map_manifest_document(
         ) from exc
 
     return updated_contents, str(previous_value) if previous_value is not None else ""
+
+
+def compute_config_checksum(data: dict) -> str:
+    """Return MD5 hex digest of a configmap data dict (keys sorted for stability)."""
+    serialized = json.dumps(data, sort_keys=True)
+    return hashlib.md5(serialized.encode()).hexdigest()
+
+
+def compute_config_checksum_from_manifest(config_map_contents: str) -> str:
+    """Parse a ConfigMap manifest YAML and return the checksum of its data section."""
+    try:
+        document = yaml.safe_load(config_map_contents)
+    except yaml.YAMLError as exc:
+        raise ConfigEditingError(
+            f"Failed to parse ConfigMap YAML for checksum: {exc}",
+            status_code=502,
+        ) from exc
+    data = document.get("data") or {}
+    return compute_config_checksum(data)
+
+
+def update_deployment_patch_checksum(patch_contents: str, checksum: str) -> str:
+    """Inject or update checksum/config annotation on the pod template in a Deployment patch YAML.
+
+    Argo CD applies the changed annotation to the live Deployment, which causes
+    Kubernetes to perform a rolling restart of the pods.
+    """
+    try:
+        document = yaml.safe_load(patch_contents)
+    except yaml.YAMLError as exc:
+        raise ConfigEditingError(
+            f"Failed to parse deployment patch YAML: {exc}",
+            status_code=502,
+        ) from exc
+    spec = document.setdefault("spec", {})
+    template = spec.setdefault("template", {})
+    metadata = template.setdefault("metadata", {})
+    annotations = metadata.setdefault("annotations", {})
+    annotations["checksum/config"] = checksum
+    try:
+        return yaml.safe_dump(document, sort_keys=False)
+    except yaml.YAMLError as exc:
+        raise ConfigEditingError(
+            f"Failed to serialize deployment patch YAML: {exc}",
+            status_code=500,
+        ) from exc

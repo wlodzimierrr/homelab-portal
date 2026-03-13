@@ -25,10 +25,12 @@ from app.alerts_feed import (
 from app.catalog_reconciliation import build_catalog_join
 from app.config_editing import (
     ConfigEditingError,
+    compute_config_checksum_from_manifest,
     enforce_config_edit_rate_limit,
     normalize_config_value,
     resolve_config_edit_target,
     update_config_map_manifest_document,
+    update_deployment_patch_checksum,
 )
 from app.db import get_psycopg_database_url
 from app.deployment_records import (
@@ -5178,6 +5180,11 @@ def request_portal_set_config(
             config_key=payload.config_key,
             config_value=normalized_value,
         )
+        patch_contents = git_provider.read_file(
+            workloads_repo, base_branch, target.deployment_patch_file_path
+        )
+        checksum = compute_config_checksum_from_manifest(updated_contents)
+        updated_patch_contents = update_deployment_patch_checksum(patch_contents, checksum)
     except ConfigEditingError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except GitServiceConfigurationError as exc:
@@ -5225,7 +5232,10 @@ def request_portal_set_config(
         git_provider.commit_to_branch(
             workloads_repo,
             branch_name,
-            {target.file_path: updated_contents},
+            {
+                target.file_path: updated_contents,
+                target.deployment_patch_file_path: updated_patch_contents,
+            },
             pr_title,
         )
         pr = git_provider.open_pr(
