@@ -6,6 +6,7 @@ import subprocess
 
 import pytest
 
+import app.secret_editing as secret_editing
 from app.secret_editing import (
     SecretEditingError,
     SECRET_EDIT_TARGETS,
@@ -101,7 +102,10 @@ def test_encrypt_secret_manifest_requires_runtime_ready(monkeypatch: pytest.Monk
     monkeypatch.delenv("SOPS_AGE_KEY_FILE", raising=False)
 
     with pytest.raises(SecretEditingError) as exc:
-        encrypt_secret_manifest({"kind": "Secret"})
+        encrypt_secret_manifest(
+            {"kind": "Secret"},
+            target_file_path="apps/homelab-web/envs/dev/oauth2-proxy-secret.enc.yaml",
+        )
 
     assert exc.value.status_code == 503
 
@@ -129,8 +133,12 @@ def test_encrypt_secret_manifest_wraps_sops_failure(monkeypatch: pytest.MonkeyPa
     key_path = tmp_path / "keys.txt"
     key_path.write_text("age-secret-key", encoding="utf-8")
     monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(key_path))
+    workloads_root = tmp_path / "workloads"
+    workloads_root.mkdir()
+    (workloads_root / ".sops.yaml").write_text("creation_rules:\n  - path_regex: .*\\.enc\\.yaml$\n", encoding="utf-8")
+    monkeypatch.setattr(secret_editing, "WORKLOADS_REPO_ROOT", workloads_root)
 
-    def _run(args, check, capture_output, text, env):  # type: ignore[no-untyped-def]
+    def _run(args, check, capture_output, text, env, cwd=None):  # type: ignore[no-untyped-def]
         if args[1] == "--version":
             return subprocess.CompletedProcess(args, 0, stdout="sops 3.9.4", stderr="")
         raise subprocess.CalledProcessError(1, args, stderr="encrypt failed")
@@ -138,7 +146,49 @@ def test_encrypt_secret_manifest_wraps_sops_failure(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(subprocess, "run", _run)
 
     with pytest.raises(SecretEditingError) as exc:
-        encrypt_secret_manifest({"kind": "Secret"})
+        encrypt_secret_manifest(
+            {"kind": "Secret"},
+            target_file_path="apps/homelab-web/envs/dev/oauth2-proxy-secret.enc.yaml",
+        )
 
     assert exc.value.status_code == 502
     assert "Failed to encrypt secret manifest with sops" in str(exc.value)
+
+
+def test_encrypt_secret_manifest_passes_sops_config_and_filename_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    key_path = tmp_path / "keys.txt"
+    key_path.write_text("age-secret-key", encoding="utf-8")
+    monkeypatch.setenv("SOPS_AGE_KEY_FILE", str(key_path))
+    workloads_root = tmp_path / "workloads"
+    workloads_root.mkdir()
+    (workloads_root / ".sops.yaml").write_text("creation_rules:\n  - path_regex: .*\\.enc\\.yaml$\n", encoding="utf-8")
+    monkeypatch.setattr(secret_editing, "WORKLOADS_REPO_ROOT", workloads_root)
+
+    captured: dict[str, object] = {}
+
+    def _run(args, check, capture_output, text, env, cwd=None):  # type: ignore[no-untyped-def]
+        if args[1] == "--version":
+            return subprocess.CompletedProcess(args, 0, stdout="sops 3.9.4", stderr="")
+        captured["args"] = args
+        captured["cwd"] = cwd
+        return subprocess.CompletedProcess(args, 0, stdout="encrypted", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = encrypt_secret_manifest(
+        {"kind": "Secret"},
+        target_file_path="apps/homelab-web/envs/dev/oauth2-proxy-secret.enc.yaml",
+    )
+
+    assert result == "encrypted"
+    args = captured["args"]
+    assert isinstance(args, list)
+    assert "--config" in args
+    assert str(workloads_root / ".sops.yaml") in args
+    assert "--filename-override" in args
+    assert "apps/homelab-web/envs/dev/oauth2-proxy-secret.enc.yaml" in args
+    assert "--encrypt" in args
+    assert captured["cwd"] == str(workloads_root)

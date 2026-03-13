@@ -5088,7 +5088,10 @@ def request_portal_set_secret(
             secret_key=payload.secret_key,
             secret_value=payload.secret_value,
         )
-        encrypted_manifest = encrypt_secret_manifest(updated_manifest)
+        encrypted_manifest = encrypt_secret_manifest(
+            updated_manifest,
+            target_file_path=target.file_path,
+        )
     except SecretEditingError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except GitServiceConfigurationError as exc:

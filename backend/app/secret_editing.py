@@ -57,6 +57,7 @@ SECRET_EDIT_TARGETS: tuple[SecretEditTarget, ...] = (
 )
 
 SECRET_EDIT_INTERVAL_SECONDS = 30
+WORKLOADS_REPO_ROOT = Path(__file__).resolve().parents[3] / "workloads"
 
 _secret_edit_state: dict[str, float] = {}
 _secret_edit_lock = Lock()
@@ -97,6 +98,16 @@ def clear_secret_edit_rate_limit_state_for_tests() -> None:
 
 def _sops_command() -> str:
     return os.getenv("SOPS_BIN", "sops")
+
+
+def _sops_config_path() -> Path:
+    config_path = WORKLOADS_REPO_ROOT / ".sops.yaml"
+    if not config_path.exists():
+        raise SecretEditingError(
+            "SOPS config file is missing from the workloads repository.",
+            status_code=503,
+        )
+    return config_path
 
 
 def ensure_secret_edit_runtime_ready() -> None:
@@ -187,8 +198,9 @@ def update_secret_manifest_document(
     return updated
 
 
-def encrypt_secret_manifest(payload: dict) -> str:
+def encrypt_secret_manifest(payload: dict, *, target_file_path: str) -> str:
     ensure_secret_edit_runtime_ready()
+    config_path = _sops_config_path()
     with TemporaryDirectory(prefix="portal-secret-edit-") as tmp_dir:
         plain_path = Path(tmp_dir) / "secret.yaml"
         plain_path.write_text(
@@ -197,11 +209,20 @@ def encrypt_secret_manifest(payload: dict) -> str:
         )
         try:
             completed = subprocess.run(
-                [_sops_command(), "--encrypt", str(plain_path)],
+                [
+                    _sops_command(),
+                    "--config",
+                    str(config_path),
+                    "--filename-override",
+                    target_file_path,
+                    "--encrypt",
+                    str(plain_path),
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
                 env=os.environ.copy(),
+                cwd=str(WORKLOADS_REPO_ROOT),
             )
         except subprocess.CalledProcessError as exc:
             raise SecretEditingError(
