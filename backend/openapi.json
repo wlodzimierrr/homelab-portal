@@ -975,6 +975,184 @@
         }
       }
     },
+    "/services/{service_id}/config/set": {
+      "post": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Request Portal Set Config",
+        "operationId": "request_portal_set_config_services__service_id__config_set_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortalSetConfigRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortalSetConfigResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/services/{service_id}/config/set-secret": {
+      "post": {
+        "tags": [
+          "metadata"
+        ],
+        "summary": "Request Portal Set Secret",
+        "operationId": "request_portal_set_secret_services__service_id__config_set_secret_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "X-Auth-Request-User",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-User"
+            }
+          },
+          {
+            "name": "X-Auth-Request-Groups",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Auth-Request-Groups"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortalSetSecretRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortalSetSecretResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/services/{service_id}/rollback-candidates": {
       "get": {
         "tags": [
@@ -5700,6 +5878,267 @@
           "initiatedAt"
         ],
         "title": "PortalServiceRollbackResponse"
+      },
+      "PortalSetConfigRequest": {
+        "properties": {
+          "env": {
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod"
+            ],
+            "title": "Env"
+          },
+          "configKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Configkey"
+          },
+          "configValue": {
+            "type": "string",
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Configvalue"
+          }
+        },
+        "type": "object",
+        "required": [
+          "env",
+          "configKey",
+          "configValue"
+        ],
+        "title": "PortalSetConfigRequest"
+      },
+      "PortalSetConfigResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "noop"
+            ],
+            "title": "Status"
+          },
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "env": {
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod"
+            ],
+            "title": "Env"
+          },
+          "configKey": {
+            "type": "string",
+            "title": "Configkey"
+          },
+          "previousValue": {
+            "type": "string",
+            "title": "Previousvalue"
+          },
+          "configValue": {
+            "type": "string",
+            "title": "Configvalue"
+          },
+          "requestedBy": {
+            "type": "string",
+            "title": "Requestedby"
+          },
+          "repository": {
+            "type": "string",
+            "title": "Repository"
+          },
+          "baseBranch": {
+            "type": "string",
+            "title": "Basebranch"
+          },
+          "branchName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branchname"
+          },
+          "gitPrUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprurl"
+          },
+          "gitPrNumber": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gitprnumber"
+          },
+          "configFilePath": {
+            "type": "string",
+            "title": "Configfilepath"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "initiatedAt": {
+            "type": "string",
+            "title": "Initiatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "serviceId",
+          "env",
+          "configKey",
+          "previousValue",
+          "configValue",
+          "requestedBy",
+          "repository",
+          "baseBranch",
+          "configFilePath",
+          "initiatedAt"
+        ],
+        "title": "PortalSetConfigResponse"
+      },
+      "PortalSetSecretRequest": {
+        "properties": {
+          "env": {
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod"
+            ],
+            "title": "Env"
+          },
+          "secretKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Secretkey"
+          },
+          "secretValue": {
+            "type": "string",
+            "maxLength": 10000,
+            "minLength": 1,
+            "title": "Secretvalue"
+          }
+        },
+        "type": "object",
+        "required": [
+          "env",
+          "secretKey",
+          "secretValue"
+        ],
+        "title": "PortalSetSecretRequest"
+      },
+      "PortalSetSecretResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "accepted",
+            "title": "Status"
+          },
+          "serviceId": {
+            "type": "string",
+            "title": "Serviceid"
+          },
+          "env": {
+            "type": "string",
+            "enum": [
+              "dev",
+              "prod"
+            ],
+            "title": "Env"
+          },
+          "secretKey": {
+            "type": "string",
+            "title": "Secretkey"
+          },
+          "requestedBy": {
+            "type": "string",
+            "title": "Requestedby"
+          },
+          "repository": {
+            "type": "string",
+            "title": "Repository"
+          },
+          "baseBranch": {
+            "type": "string",
+            "title": "Basebranch"
+          },
+          "branchName": {
+            "type": "string",
+            "title": "Branchname"
+          },
+          "gitPrUrl": {
+            "type": "string",
+            "title": "Gitprurl"
+          },
+          "gitPrNumber": {
+            "type": "integer",
+            "title": "Gitprnumber"
+          },
+          "secretFilePath": {
+            "type": "string",
+            "title": "Secretfilepath"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "initiatedAt": {
+            "type": "string",
+            "title": "Initiatedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "serviceId",
+          "env",
+          "secretKey",
+          "requestedBy",
+          "repository",
+          "baseBranch",
+          "branchName",
+          "gitPrUrl",
+          "gitPrNumber",
+          "secretFilePath",
+          "initiatedAt"
+        ],
+        "title": "PortalSetSecretResponse"
       },
       "Project": {
         "properties": {

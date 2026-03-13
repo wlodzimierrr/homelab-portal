@@ -23,6 +23,13 @@ from app.alerts_feed import (
     normalize_active_alerts,
 )
 from app.catalog_reconciliation import build_catalog_join
+from app.config_editing import (
+    ConfigEditingError,
+    enforce_config_edit_rate_limit,
+    normalize_config_value,
+    resolve_config_edit_target,
+    update_config_map_manifest_document,
+)
 from app.db import get_psycopg_database_url
 from app.deployment_records import (
     get_deployment_record,
@@ -659,6 +666,50 @@ class PortalSetSecretResponse(BaseModel):
     git_pr_url: str = Field(alias="gitPrUrl")
     git_pr_number: int = Field(alias="gitPrNumber")
     secret_file_path: str = Field(alias="secretFilePath")
+    message: str | None = None
+    initiated_at: str = Field(alias="initiatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class PortalSetConfigRequest(BaseModel):
+    env: Literal["dev", "prod"]
+    config_key: str = Field(..., alias="configKey", min_length=1, max_length=128)
+    config_value: str = Field(..., alias="configValue", min_length=1, max_length=10_000)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("config_key")
+    @classmethod
+    def validate_config_key(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("configKey must not be empty")
+        return normalized
+
+    @field_validator("config_value")
+    @classmethod
+    def validate_config_value(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("configValue must not be empty")
+        return normalized
+
+
+class PortalSetConfigResponse(BaseModel):
+    status: Literal["accepted", "noop"]
+    service_id: str = Field(alias="serviceId")
+    env: Literal["dev", "prod"]
+    config_key: str = Field(alias="configKey")
+    previous_value: str = Field(alias="previousValue")
+    config_value: str = Field(alias="configValue")
+    requested_by: str = Field(alias="requestedBy")
+    repository: str
+    base_branch: str = Field(alias="baseBranch")
+    branch_name: str | None = Field(default=None, alias="branchName")
+    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
+    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
+    config_file_path: str = Field(alias="configFilePath")
     message: str | None = None
     initiated_at: str = Field(alias="initiatedAt")
 
@@ -2433,6 +2484,45 @@ def _build_secret_edit_branch_name(
     return (
         f"automation/{env}-secret-{_safe_branch_fragment(service_id)}-"
         f"{_safe_branch_fragment(secret_key)}-{requested_at.strftime('%Y%m%d%H%M%S')}"
+    )
+
+
+def _build_config_edit_branch_name(
+    service_id: str,
+    env: str,
+    config_key: str,
+    requested_at: datetime,
+) -> str:
+    return (
+        f"automation/{env}-config-{_safe_branch_fragment(service_id)}-"
+        f"{_safe_branch_fragment(config_key)}-{requested_at.strftime('%Y%m%d%H%M%S')}"
+    )
+
+
+def _build_config_edit_pr_body(
+    *,
+    service_id: str,
+    env: str,
+    config_key: str,
+    config_value: str,
+    previous_value: str,
+    requested_by: str,
+    config_file_path: str,
+) -> str:
+    return "\n".join(
+        [
+            "Portal-requested config update.",
+            "",
+            f"- Service: `{service_id}`",
+            f"- Environment: `{env}`",
+            f"- Config key: `{config_key}`",
+            f"- Previous value: `{previous_value or 'unset'}`",
+            f"- New value: `{config_value}`",
+            f"- Requested by: `{requested_by}`",
+            f"- Config manifest: `{config_file_path}`",
+            "",
+            "This pull request updates only the selected ConfigMap-backed runtime setting.",
+        ]
     )
 
 
@@ -5054,6 +5144,121 @@ def request_portal_promote_to_prod(
         compareUrl=compare_url,
         sourceCommitSha=source_commit_sha,
         message=None,
+        initiatedAt=initiated_at.isoformat(),
+    )
+
+
+@app.post(
+    "/services/{service_id}/config/set",
+    response_model=PortalSetConfigResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["metadata"],
+)
+def request_portal_set_config(
+    service_id: str,
+    payload: PortalSetConfigRequest,
+    admin_user: str = Depends(require_admin),
+) -> PortalSetConfigResponse:
+    initiated_at = datetime.now(tz=timezone.utc)
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+
+    try:
+        enforce_config_edit_rate_limit(
+            identity_key=f"config-edit:{admin_user}",
+            now=initiated_at,
+        )
+        target = resolve_config_edit_target(service_id, payload.env, payload.config_key)
+        normalized_value = normalize_config_value(payload.config_key, payload.config_value)
+        git_provider = build_default_git_provider()
+        config_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
+        updated_contents, previous_value = update_config_map_manifest_document(
+            config_contents,
+            target=target,
+            config_key=payload.config_key,
+            config_value=normalized_value,
+        )
+    except ConfigEditingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    if previous_value == normalized_value:
+        return PortalSetConfigResponse(
+            status="noop",
+            serviceId=service_id,
+            env=payload.env,
+            configKey=payload.config_key,
+            previousValue=previous_value,
+            configValue=normalized_value,
+            requestedBy=admin_user,
+            repository=workloads_repo,
+            baseBranch=base_branch,
+            branchName=None,
+            gitPrUrl=None,
+            gitPrNumber=None,
+            configFilePath=target.file_path,
+            message="ConfigMap already contains the requested value.",
+            initiatedAt=initiated_at.isoformat(),
+        )
+
+    branch_name = _build_config_edit_branch_name(service_id, payload.env, payload.config_key, initiated_at)
+    pr_title = f"Config: {service_id} {payload.env} {payload.config_key} updated"
+    pr_body = _build_config_edit_pr_body(
+        service_id=service_id,
+        env=payload.env,
+        config_key=payload.config_key,
+        config_value=normalized_value,
+        previous_value=previous_value,
+        requested_by=admin_user,
+        config_file_path=target.file_path,
+    )
+
+    try:
+        git_provider.create_branch(workloads_repo, base_branch, branch_name)
+        git_provider.commit_to_branch(
+            workloads_repo,
+            branch_name,
+            {target.file_path: updated_contents},
+            pr_title,
+        )
+        pr = git_provider.open_pr(
+            workloads_repo,
+            branch_name,
+            base_branch,
+            pr_title,
+            pr_body,
+        )
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return PortalSetConfigResponse(
+        status="accepted",
+        serviceId=service_id,
+        env=payload.env,
+        configKey=payload.config_key,
+        previousValue=previous_value,
+        configValue=normalized_value,
+        requestedBy=admin_user,
+        repository=workloads_repo,
+        baseBranch=base_branch,
+        branchName=branch_name,
+        gitPrUrl=pr["url"],
+        gitPrNumber=pr["number"],
+        configFilePath=target.file_path,
+        message="Config update pull request created.",
         initiatedAt=initiated_at.isoformat(),
     )
 
