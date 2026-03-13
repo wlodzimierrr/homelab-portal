@@ -5177,7 +5177,7 @@ def request_portal_promote_to_prod(
 def get_service_config(
     service_id: str,
     env: Literal["dev", "prod"],
-    admin_user: str = Depends(require_admin),
+    current_user: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceConfigResponse:
     workloads_repo = _workloads_repo_slug()
     base_branch = _workloads_base_branch()

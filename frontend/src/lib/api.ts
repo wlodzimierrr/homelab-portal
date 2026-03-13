@@ -773,6 +773,7 @@ export interface ServiceSetConfigResponse {
 export function getServiceConfig(serviceId: string, env: 'dev' | 'prod') {
   return request<ServiceConfigResponse>(
     `/services/${encodeURIComponent(serviceId)}/config?env=${env}`,
+    { skipUnauthorizedRedirect: true },
   )
 }
 
