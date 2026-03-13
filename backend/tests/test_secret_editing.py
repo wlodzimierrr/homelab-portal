@@ -6,7 +6,6 @@ import subprocess
 
 import pytest
 
-import app.secret_editing as secret_editing
 from app.secret_editing import (
     SecretEditingError,
     SECRET_EDIT_TARGETS,
@@ -136,7 +135,7 @@ def test_encrypt_secret_manifest_wraps_sops_failure(monkeypatch: pytest.MonkeyPa
     workloads_root = tmp_path / "workloads"
     workloads_root.mkdir()
     (workloads_root / ".sops.yaml").write_text("creation_rules:\n  - path_regex: .*\\.enc\\.yaml$\n", encoding="utf-8")
-    monkeypatch.setattr(secret_editing, "WORKLOADS_REPO_ROOT", workloads_root)
+    monkeypatch.setenv("GITOPS_WORKLOADS_REPO_PATH", str(workloads_root))
 
     def _run(args, check, capture_output, text, env, cwd=None):  # type: ignore[no-untyped-def]
         if args[1] == "--version":
@@ -165,7 +164,7 @@ def test_encrypt_secret_manifest_passes_sops_config_and_filename_override(
     workloads_root = tmp_path / "workloads"
     workloads_root.mkdir()
     (workloads_root / ".sops.yaml").write_text("creation_rules:\n  - path_regex: .*\\.enc\\.yaml$\n", encoding="utf-8")
-    monkeypatch.setattr(secret_editing, "WORKLOADS_REPO_ROOT", workloads_root)
+    monkeypatch.setenv("GITOPS_WORKLOADS_REPO_PATH", str(workloads_root))
 
     captured: dict[str, object] = {}
 

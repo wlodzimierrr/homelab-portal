@@ -57,7 +57,34 @@ SECRET_EDIT_TARGETS: tuple[SecretEditTarget, ...] = (
 )
 
 SECRET_EDIT_INTERVAL_SECONDS = 30
-WORKLOADS_REPO_ROOT = Path(__file__).resolve().parents[3] / "workloads"
+
+
+def _resolve_default_workloads_repo_path(current_file: Path | None = None) -> Path:
+    source_file = (current_file or Path(__file__)).resolve()
+    candidates: list[Path] = []
+
+    for parent in [source_file.parent, *source_file.parents]:
+        candidate = parent / "workloads"
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    # Keep startup resilient when the container filesystem does not mirror the
+    # monorepo layout; callers can still override this path via env var.
+    return source_file.parent / "workloads"
+
+
+DEFAULT_WORKLOADS_REPO_ROOT = _resolve_default_workloads_repo_path()
+
+
+def _workloads_repo_root() -> Path:
+    configured = os.getenv("GITOPS_WORKLOADS_REPO_PATH")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return DEFAULT_WORKLOADS_REPO_ROOT.resolve()
 
 _secret_edit_state: dict[str, float] = {}
 _secret_edit_lock = Lock()
@@ -101,7 +128,7 @@ def _sops_command() -> str:
 
 
 def _sops_config_path() -> Path:
-    config_path = WORKLOADS_REPO_ROOT / ".sops.yaml"
+    config_path = _workloads_repo_root() / ".sops.yaml"
     if not config_path.exists():
         raise SecretEditingError(
             "SOPS config file is missing from the workloads repository.",
@@ -200,6 +227,7 @@ def update_secret_manifest_document(
 
 def encrypt_secret_manifest(payload: dict, *, target_file_path: str) -> str:
     ensure_secret_edit_runtime_ready()
+    workloads_repo_root = _workloads_repo_root()
     config_path = _sops_config_path()
     with TemporaryDirectory(prefix="portal-secret-edit-") as tmp_dir:
         plain_path = Path(tmp_dir) / "secret.yaml"
@@ -222,7 +250,7 @@ def encrypt_secret_manifest(payload: dict, *, target_file_path: str) -> str:
                 capture_output=True,
                 text=True,
                 env=os.environ.copy(),
-                cwd=str(WORKLOADS_REPO_ROOT),
+                cwd=str(workloads_repo_root),
             )
         except subprocess.CalledProcessError as exc:
             raise SecretEditingError(
