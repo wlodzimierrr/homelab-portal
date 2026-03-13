@@ -734,6 +734,55 @@ export function requestServiceRollback(serviceId: string, payload: ServiceRollba
   })
 }
 
+export interface ServiceConfigEntry {
+  key: string
+  value: string
+  allowedValues: string[]
+}
+
+export interface ServiceConfigResponse {
+  serviceId: string
+  env: 'dev' | 'prod'
+  entries: ServiceConfigEntry[]
+}
+
+export interface ServiceSetConfigRequest {
+  env: 'dev' | 'prod'
+  configKey: string
+  configValue: string
+}
+
+export interface ServiceSetConfigResponse {
+  status: 'accepted' | 'noop'
+  serviceId: string
+  env: string
+  configKey: string
+  previousValue: string
+  configValue: string
+  requestedBy: string
+  repository: string
+  baseBranch: string
+  branchName?: string | null
+  gitPrUrl?: string | null
+  gitPrNumber?: number | null
+  configFilePath: string
+  message?: string | null
+  initiatedAt: string
+}
+
+export function getServiceConfig(serviceId: string, env: 'dev' | 'prod') {
+  return request<ServiceConfigResponse>(
+    `/services/${encodeURIComponent(serviceId)}/config?env=${env}`,
+  )
+}
+
+export function setServiceConfig(serviceId: string, payload: ServiceSetConfigRequest) {
+  return request<ServiceSetConfigResponse>(`/services/${encodeURIComponent(serviceId)}/config/set`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export function getReleaseTraceability(params?: {
   env?: string
   serviceId?: string

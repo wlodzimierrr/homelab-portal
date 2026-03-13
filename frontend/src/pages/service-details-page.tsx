@@ -11,8 +11,10 @@ import { ToastMessage } from '@/components/toast-message'
 import { UptimeIndicator } from '@/components/uptime-indicator'
 import { Button } from '@/components/ui/button'
 import {
+  ApiRequestError,
   getProjects,
   getReleaseTraceability,
+  getServiceConfig,
   getServiceDeploymentInfo,
   getServiceRollbackCandidates,
   getService,
@@ -22,6 +24,8 @@ import {
   requestServiceDeployToDev,
   requestServicePromoteToProd,
   requestServiceRollback,
+  setServiceConfig,
+  type ServiceConfigEntry,
   type ServiceDeploymentInfo,
   type ServiceDetails,
   type ServiceDeployment,
@@ -31,6 +35,7 @@ import {
   type ServicePromoteToProdResponse,
   type ServiceRollbackCandidatesResponse,
   type ServiceRollbackResponse,
+  type ServiceSetConfigResponse,
 } from '@/lib/api'
 import { getDeploymentHistory, type DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import {
@@ -76,6 +81,10 @@ type SyncStatus = 'synced' | 'out_of_sync' | 'unknown'
 
 function supportsServiceRollback(serviceId: string) {
   return serviceId === 'homelab-api' || serviceId === 'homelab-web'
+}
+
+function supportsConfigEditing(serviceId: string) {
+  return serviceId === 'homelab-api'
 }
 
 interface ServiceOverviewData {
@@ -743,6 +752,14 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [promoteSubmitting, setPromoteSubmitting] = useState(false)
   const [promoteError, setPromoteError] = useState('')
   const [promoteResult, setPromoteResult] = useState<ServicePromoteToProdResponse | null>(null)
+  const [configEnv, setConfigEnv] = useState<'dev' | 'prod'>('dev')
+  const [configEntries, setConfigEntries] = useState<ServiceConfigEntry[]>([])
+  const [configLoading, setConfigLoading] = useState(false)
+  const [configError, setConfigError] = useState('')
+  const [configSelectedValues, setConfigSelectedValues] = useState<Record<string, string>>({})
+  const [configSubmitting, setConfigSubmitting] = useState(false)
+  const [configSubmitError, setConfigSubmitError] = useState('')
+  const [configSubmitResult, setConfigSubmitResult] = useState<ServiceSetConfigResponse | null>(null)
   const [toastMessage, setToastMessage] = useState('')
   const [toastVariant, setToastVariant] = useState<'success' | 'error' | 'info'>('info')
 
@@ -1299,6 +1316,58 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     }, 30000)
     return () => window.clearInterval(interval)
   }, [loadDeploymentInfo, loadOverview])
+
+  const configSupported = supportsConfigEditing(decodedServiceId)
+
+  const loadConfig = useCallback(async (env: 'dev' | 'prod') => {
+    setConfigLoading(true)
+    setConfigError('')
+    setConfigSubmitResult(null)
+    try {
+      const result = await getServiceConfig(decodedServiceId, env)
+      setConfigEntries(result.entries)
+      const initial: Record<string, string> = {}
+      for (const entry of result.entries) {
+        initial[entry.key] = entry.value
+      }
+      setConfigSelectedValues(initial)
+    } catch (err) {
+      setConfigError(err instanceof Error ? err.message : 'Failed to load config.')
+    } finally {
+      setConfigLoading(false)
+    }
+  }, [decodedServiceId])
+
+  const submitConfigEdit = useCallback(async (key: string) => {
+    const value = configSelectedValues[key]
+    if (!value) return
+    setConfigSubmitting(true)
+    setConfigSubmitError('')
+    setConfigSubmitResult(null)
+    try {
+      const result = await setServiceConfig(decodedServiceId, {
+        env: configEnv,
+        configKey: key,
+        configValue: value,
+      })
+      setConfigSubmitResult(result)
+      void loadConfig(configEnv)
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 429) {
+        setConfigSubmitError('Rate limited: config edits are limited to one every 30 seconds.')
+      } else {
+        setConfigSubmitError(err instanceof Error ? err.message : 'Failed to submit config change.')
+      }
+    } finally {
+      setConfigSubmitting(false)
+    }
+  }, [decodedServiceId, configEnv, configSelectedValues, loadConfig])
+
+  useEffect(() => {
+    if (configSupported) {
+      void loadConfig(configEnv)
+    }
+  }, [configSupported, configEnv, loadConfig])
 
   return (
     <PageShell
@@ -2522,6 +2591,117 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 </div>
               )}
             </section>
+
+            {configSupported ? (
+              <section className="space-y-3 rounded-md border border-border bg-card p-4">
+                <div className="space-y-1">
+                  <h2 className="text-sm font-semibold">Runtime Config</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Edit runtime ConfigMap values. Changes open a GitOps PR that triggers a pod restart on merge.
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  Environment
+                  <select
+                    value={configEnv}
+                    onChange={(event) => setConfigEnv(event.target.value as 'dev' | 'prod')}
+                    className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+                  >
+                    <option value="dev">dev</option>
+                    <option value="prod">prod</option>
+                  </select>
+                </label>
+                {configLoading ? (
+                  <p className="text-xs text-muted-foreground">Loading config...</p>
+                ) : configError ? (
+                  <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                    <p className="text-xs text-amber-900 dark:text-amber-200">{configError}</p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="mt-2"
+                      onClick={() => void loadConfig(configEnv)}
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {configEntries.map((entry) => (
+                      <article
+                        key={entry.key}
+                        className="space-y-3 rounded-md border border-border/70 bg-background/50 p-4"
+                      >
+                        <div>
+                          <h3 className="text-sm font-semibold">{entry.key}</h3>
+                          <p className="text-xs text-muted-foreground">
+                            Current value:{' '}
+                            <code className="rounded bg-muted px-1 py-0.5">{entry.value || '(unset)'}</code>
+                          </p>
+                        </div>
+                        <label className="space-y-1">
+                          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                            New value
+                          </span>
+                          <select
+                            value={configSelectedValues[entry.key] ?? entry.value}
+                            onChange={(event) =>
+                              setConfigSelectedValues((prev) => ({ ...prev, [entry.key]: event.target.value }))
+                            }
+                            className="block rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+                          >
+                            {entry.allowedValues.map((v) => (
+                              <option key={v} value={v}>
+                                {v}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {configSubmitError ? (
+                          <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                            <p className="text-xs text-destructive">{configSubmitError}</p>
+                          </div>
+                        ) : null}
+                        {configSubmitResult?.configKey === entry.key ? (
+                          <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
+                            <p className="font-medium">
+                              {configSubmitResult.status === 'noop'
+                                ? (configSubmitResult.message ?? 'Value already set.')
+                                : 'Config update PR created.'}
+                            </p>
+                            {configSubmitResult.gitPrUrl ? (
+                              <a
+                                href={configSubmitResult.gitPrUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="mt-2 inline-flex font-medium underline underline-offset-2"
+                              >
+                                Open GitOps PR #{configSubmitResult.gitPrNumber ?? 'link'}
+                              </a>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        <Button
+                          type="button"
+                          onClick={() => void submitConfigEdit(entry.key)}
+                          disabled={configSubmitting}
+                        >
+                          {configSubmitting ? 'Submitting...' : 'Update config'}
+                        </Button>
+                      </article>
+                    ))}
+                    {configEntries.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">No editable config keys for this service.</p>
+                    ) : null}
+                  </div>
+                )}
+                <div className="rounded-md border border-border/50 bg-muted/30 p-3">
+                  <p className="text-xs font-medium text-muted-foreground">Secrets editing</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Not yet available in the portal UI.</p>
+                </div>
+              </section>
+            ) : null}
           </>
         ) : null}
       </div>

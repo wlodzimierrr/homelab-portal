@@ -24,10 +24,13 @@ from app.alerts_feed import (
 )
 from app.catalog_reconciliation import build_catalog_join
 from app.config_editing import (
+    ALLOWED_CONFIG_VALUES,
     ConfigEditingError,
     compute_config_checksum_from_manifest,
     enforce_config_edit_rate_limit,
+    get_config_edit_target,
     normalize_config_value,
+    parse_config_map_data,
     resolve_config_edit_target,
     update_config_map_manifest_document,
     update_deployment_patch_checksum,
@@ -714,6 +717,22 @@ class PortalSetConfigResponse(BaseModel):
     config_file_path: str = Field(alias="configFilePath")
     message: str | None = None
     initiated_at: str = Field(alias="initiatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceConfigEntry(BaseModel):
+    key: str
+    value: str
+    allowed_values: list[str] = Field(alias="allowedValues")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceConfigResponse(BaseModel):
+    service_id: str = Field(alias="serviceId")
+    env: Literal["dev", "prod"]
+    entries: list[ServiceConfigEntry]
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -5148,6 +5167,43 @@ def request_portal_promote_to_prod(
         message=None,
         initiatedAt=initiated_at.isoformat(),
     )
+
+
+@app.get(
+    "/services/{service_id}/config",
+    response_model=ServiceConfigResponse,
+    tags=["metadata"],
+)
+def get_service_config(
+    service_id: str,
+    env: Literal["dev", "prod"],
+    admin_user: str = Depends(require_admin),
+) -> ServiceConfigResponse:
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+    try:
+        target = get_config_edit_target(service_id, env)
+        git_provider = build_default_git_provider()
+        config_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
+        data = parse_config_map_data(config_contents)
+    except ConfigEditingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    entries = [
+        ServiceConfigEntry(
+            key=key,
+            value=data.get(key, ""),
+            allowedValues=list(ALLOWED_CONFIG_VALUES.get(key, ())),
+        )
+        for key in target.allowed_keys
+    ]
+    return ServiceConfigResponse(serviceId=service_id, env=env, entries=entries)
 
 
 @app.post(

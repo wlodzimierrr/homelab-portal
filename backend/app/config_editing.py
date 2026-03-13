@@ -54,6 +54,29 @@ _config_edit_state: dict[str, float] = {}
 _config_edit_lock = Lock()
 
 
+def get_config_edit_target(service_id: str, env: str) -> ConfigEditTarget:
+    for target in CONFIG_EDIT_TARGETS:
+        if target.service_id == service_id and target.env == env:
+            return target
+    raise ConfigEditingError(
+        f"Service {service_id!r} does not support config editing for env {env!r}.",
+        status_code=404,
+    )
+
+
+def parse_config_map_data(config_map_contents: str) -> dict[str, str]:
+    """Parse a ConfigMap YAML and return the data section as a plain string dict."""
+    try:
+        document = yaml.safe_load(config_map_contents)
+    except yaml.YAMLError as exc:
+        raise ConfigEditingError(
+            f"Failed to parse ConfigMap YAML: {exc}",
+            status_code=502,
+        ) from exc
+    data = document.get("data") or {} if isinstance(document, dict) else {}
+    return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
 def resolve_config_edit_target(service_id: str, env: str, config_key: str) -> ConfigEditTarget:
     normalized_key = config_key.strip().upper()
     for target in CONFIG_EDIT_TARGETS:

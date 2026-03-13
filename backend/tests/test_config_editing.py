@@ -11,7 +11,9 @@ from app.config_editing import (
     compute_config_checksum,
     compute_config_checksum_from_manifest,
     enforce_config_edit_rate_limit,
+    get_config_edit_target,
     normalize_config_value,
+    parse_config_map_data,
     resolve_config_edit_target,
     update_config_map_manifest_document,
     update_deployment_patch_checksum,
@@ -159,3 +161,44 @@ spec:
     document = yaml.safe_load(updated)
     assert document["spec"]["template"]["metadata"]["annotations"]["checksum/config"] == "newvalue"
 
+
+def test_get_config_edit_target_returns_target_without_key_check() -> None:
+    target = get_config_edit_target("homelab-api", "dev")
+
+    assert target.service_id == "homelab-api"
+    assert target.env == "dev"
+
+
+def test_get_config_edit_target_raises_for_unknown_service() -> None:
+    with pytest.raises(ConfigEditingError) as exc:
+        get_config_edit_target("nonexistent-service", "dev")
+
+    assert exc.value.status_code == 404
+
+
+def test_parse_config_map_data_returns_data_section() -> None:
+    manifest = """\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: homelab-api-runtime-config
+  namespace: homelab-api
+data:
+  LOG_LEVEL: warning
+"""
+
+    data = parse_config_map_data(manifest)
+
+    assert data == {"LOG_LEVEL": "warning"}
+
+
+def test_parse_config_map_data_returns_empty_dict_when_no_data_section() -> None:
+    manifest = """\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: homelab-api-runtime-config
+  namespace: homelab-api
+"""
+
+    assert parse_config_map_data(manifest) == {}
