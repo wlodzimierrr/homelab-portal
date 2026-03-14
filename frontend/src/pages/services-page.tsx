@@ -4,6 +4,7 @@ import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
 import { AppLink } from '@/components/navigation/app-link'
+import { ScaffoldServiceWizard } from '@/components/scaffold-service-wizard'
 import {
   getCatalogReconciliation,
   getServiceRegistryDiagnostics,
@@ -216,6 +217,7 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [environmentFilter, setEnvironmentFilter] = useState('all')
+  const [wizardOpen, setWizardOpen] = useState(false)
 
   const loadServices = useCallback(async () => {
     setIsLoading(true)
@@ -373,9 +375,20 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
   )
 
   return (
+    <>
+    {wizardOpen && <ScaffoldServiceWizard onClose={() => setWizardOpen(false)} />}
     <PageShell
       title="Services"
       description="Git-backed service catalog with ownership metadata, runbooks, and environment status links."
+      action={
+        <button
+          type="button"
+          onClick={() => setWizardOpen(true)}
+          className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        >
+          New service
+        </button>
+      }
     >
       {!isLoading ? (
         <div className="mb-4 grid gap-3 md:grid-cols-4">
@@ -628,5 +641,6 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
         </div>
       ) : null}
     </PageShell>
+    </>
   )
 }

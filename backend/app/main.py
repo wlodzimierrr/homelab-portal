@@ -109,6 +109,15 @@ from app.observability_config import (
     parse_duration_token,
     render_query_template,
 )
+from app.scaffold_service import (
+    ScaffoldError,
+    ScaffoldServiceInput,
+    build_appproject_addition,
+    build_catalog_entry_addition,
+    generate_gitops_new_files,
+    update_kustomization_resources,
+    validate_service_name,
+)
 from app.secret_editing import (
     SecretEditingError,
     decrypt_secret_manifest,
@@ -6749,4 +6758,209 @@ def get_service_logs_quickview(
                 correlation_id=correlation_id,
             )
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# T6.4.3 — Service scaffold endpoints
+# ---------------------------------------------------------------------------
+
+_WORKLOADS_KUSTOMIZATION_PATH = "environments/dev/workloads/kustomization.yaml"
+_WORKLOADS_APPPROJECT_PATH = "bootstrap/project-homelab.yaml"
+_WORKLOADS_CATALOG_PATH = "services.yaml"
+
+
+class ScaffoldServiceRequest(BaseModel):
+    name: str
+    description: str
+    image_repo: str = Field(alias="imageRepo")
+    repo_url: str = Field(alias="repoUrl")
+    owner_email: str = Field(alias="ownerEmail")
+    owner: str = ""
+    template: Literal["python-fastapi", "static-nginx"] = "python-fastapi"
+    namespace: str = ""
+    dev_host: str = Field(alias="devHost", default="")
+    prod_host: str = Field(alias="prodHost", default="")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ScaffoldPreviewFile(BaseModel):
+    path: str
+    content: str
+    change_type: str = Field(alias="changeType")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ScaffoldPreviewResponse(BaseModel):
+    files: list[ScaffoldPreviewFile]
+
+
+class ScaffoldSubmitResponse(BaseModel):
+    pr_url: str = Field(alias="prUrl")
+    pr_number: int = Field(alias="prNumber")
+    branch_name: str = Field(alias="branchName")
+    files_committed: list[str] = Field(alias="filesCommitted")
+    initiated_at: str = Field(alias="initiatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+def _workloads_gitops_repo_url(repo_slug: str) -> str:
+    return f"https://github.com/{repo_slug}.git"
+
+
+def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInput:
+    repo_slug = _workloads_repo_slug()
+    name = payload.name.strip().lower()
+    namespace = payload.namespace.strip() or name
+    dev_host = payload.dev_host.strip() or f"{name}.dev.homelab.local"
+    prod_host = payload.prod_host.strip() or f"{name}.homelab.local"
+    return ScaffoldServiceInput(
+        name=name,
+        description=payload.description.strip(),
+        image_repo=payload.image_repo.strip(),
+        repo_url=payload.repo_url.strip(),
+        owner_email=payload.owner_email.strip(),
+        owner=payload.owner.strip(),
+        template=payload.template,
+        namespace=namespace,
+        dev_host=dev_host,
+        prod_host=prod_host,
+        workloads_repo_url=_workloads_gitops_repo_url(repo_slug),
+    )
+
+
+@app.post("/scaffold/preview", response_model=ScaffoldPreviewResponse, tags=["scaffold"])
+def scaffold_preview(
+    payload: ScaffoldServiceRequest,
+    admin_user: str = Depends(require_admin),
+) -> ScaffoldPreviewResponse:
+    del admin_user
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+
+    try:
+        inp = _build_scaffold_input(payload)
+        validate_service_name(inp.name)
+
+        git_provider = build_default_git_provider()
+        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_KUSTOMIZATION_PATH)
+        appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)
+        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
+
+        new_files = generate_gitops_new_files(inp)
+        updated_kustomization = update_kustomization_resources(kustomization_raw, f"{inp.name}-app.yaml")
+        updated_services_yaml = build_catalog_entry_addition(services_yaml_raw, inp)
+        updated_appproject = build_appproject_addition(appproject_raw, inp)
+    except ScaffoldError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    preview_files: list[ScaffoldPreviewFile] = [
+        ScaffoldPreviewFile(path=path, content=content, changeType="create")
+        for path, content in sorted(new_files.items())
+    ]
+    preview_files += [
+        ScaffoldPreviewFile(path=_WORKLOADS_KUSTOMIZATION_PATH, content=updated_kustomization, changeType="modify"),
+        ScaffoldPreviewFile(path=_WORKLOADS_APPPROJECT_PATH, content=updated_appproject, changeType="modify"),
+        ScaffoldPreviewFile(path=_WORKLOADS_CATALOG_PATH, content=updated_services_yaml, changeType="modify"),
+    ]
+    return ScaffoldPreviewResponse(files=preview_files)
+
+
+@app.post(
+    "/scaffold/submit",
+    response_model=ScaffoldSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["scaffold"],
+)
+def scaffold_submit(
+    payload: ScaffoldServiceRequest,
+    admin_user: str = Depends(require_admin),
+) -> ScaffoldSubmitResponse:
+    initiated_at = datetime.now(tz=timezone.utc)
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+
+    try:
+        inp = _build_scaffold_input(payload)
+        validate_service_name(inp.name)
+
+        git_provider = build_default_git_provider()
+        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_KUSTOMIZATION_PATH)
+        appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)
+        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
+
+        new_files = generate_gitops_new_files(inp)
+        updated_kustomization = update_kustomization_resources(kustomization_raw, f"{inp.name}-app.yaml")
+        updated_services_yaml = build_catalog_entry_addition(services_yaml_raw, inp)
+        updated_appproject = build_appproject_addition(appproject_raw, inp)
+    except ScaffoldError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    all_files: dict[str, str] = {
+        **new_files,
+        _WORKLOADS_KUSTOMIZATION_PATH: updated_kustomization,
+        _WORKLOADS_APPPROJECT_PATH: updated_appproject,
+        _WORKLOADS_CATALOG_PATH: updated_services_yaml,
+    }
+
+    timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
+    branch_name = f"scaffold/{inp.name}-{timestamp}"
+    pr_title = f"feat(scaffold): add {inp.name} service"
+    pr_body = (
+        f"## Scaffold: {inp.name}\n\n"
+        f"**Description:** {inp.description}\n"
+        f"**Template:** {inp.template}\n"
+        f"**Namespace:** {inp.namespace}\n"
+        f"**Image:** {inp.image_repo}\n"
+        f"**Repository:** {inp.repo_url}\n\n"
+        f"Generated by the homelab portal scaffold wizard.\n\n"
+        f"### Checklist\n"
+        f"- [ ] Review generated manifests\n"
+        f"- [ ] Create image pull secret in `{inp.namespace}` if using GHCR private images\n"
+        f"- [ ] Update `runbook_url` in `services.yaml` once a runbook exists\n"
+        f"- [ ] Verify kustomize renders without errors: "
+        f"`./scripts/render-kustomize.sh apps/{inp.name}/envs/dev`\n"
+    )
+
+    try:
+        git_provider.create_branch(workloads_repo, base_branch, branch_name)
+        git_provider.commit_to_branch(
+            workloads_repo,
+            branch_name,
+            all_files,
+            f"feat(scaffold): add {inp.name} service manifests and catalog entry",
+        )
+        pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return ScaffoldSubmitResponse(
+        prUrl=pr["url"],
+        prNumber=pr["number"],
+        branchName=branch_name,
+        filesCommitted=sorted(all_files),
+        initiatedAt=initiated_at.isoformat(),
     )

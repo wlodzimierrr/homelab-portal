@@ -803,3 +803,48 @@ export function getReleaseTraceability(params?: {
   const suffix = query.toString()
   return request<ReleaseTraceabilityRow[]>(suffix ? `/releases?${suffix}` : '/releases')
 }
+
+export interface ScaffoldServiceRequest {
+  name: string
+  description: string
+  imageRepo: string
+  repoUrl: string
+  ownerEmail: string
+  owner?: string
+  template: 'python-fastapi' | 'static-nginx'
+  namespace?: string
+  devHost?: string
+  prodHost?: string
+}
+
+export interface ScaffoldPreviewFile {
+  path: string
+  content: string
+  changeType: 'create' | 'modify'
+}
+
+export interface ScaffoldPreviewResponse {
+  files: ScaffoldPreviewFile[]
+}
+
+export interface ScaffoldSubmitResponse {
+  prUrl: string
+  prNumber: number
+  branchName: string
+  filesCommitted: string[]
+  initiatedAt: string
+}
+
+export function previewScaffold(payload: ScaffoldServiceRequest) {
+  return request<ScaffoldPreviewResponse>('/scaffold/preview', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function submitScaffold(payload: ScaffoldServiceRequest) {
+  return request<ScaffoldSubmitResponse>('/scaffold/submit', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
