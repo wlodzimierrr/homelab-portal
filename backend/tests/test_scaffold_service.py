@@ -140,7 +140,7 @@ def test_update_kustomization_resources_appends_new_resource() -> None:
 
 def test_update_kustomization_resources_result_sorted() -> None:
     result = update_kustomization_resources(_KUSTOMIZATION, "aaa-app.yaml")
-    lines = [l.strip() for l in result.splitlines() if l.strip().startswith("- ")]
+    lines = [line.strip() for line in result.splitlines() if line.strip().startswith("- ")]
     assert lines == sorted(lines)
 
 
