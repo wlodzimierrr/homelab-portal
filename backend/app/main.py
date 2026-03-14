@@ -6781,6 +6781,8 @@ class ScaffoldServiceRequest(BaseModel):
     namespace: str = ""
     dev_host: str = Field(alias="devHost", default="")
     prod_host: str = Field(alias="prodHost", default="")
+    addon_database: Literal["postgres", "mysql"] | None = Field(alias="addonDatabase", default=None)
+    addon_migration_command: str | None = Field(alias="addonMigrationCommand", default=None)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -6829,6 +6831,8 @@ def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInp
         dev_host=dev_host,
         prod_host=prod_host,
         workloads_repo_url=_workloads_gitops_repo_url(repo_slug),
+        addon_database=payload.addon_database,
+        addon_migration_command=payload.addon_migration_command.strip() if payload.addon_migration_command else None,
     )
 
 
