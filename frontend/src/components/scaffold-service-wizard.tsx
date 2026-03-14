@@ -10,20 +10,25 @@ import { cn } from '@/lib/utils'
 
 type Step = 'basic' | 'template' | 'config' | 'preview' | 'success'
 
+type TemplateId = 'python-fastapi' | 'static-nginx' | 'postgres' | 'mysql'
+
+const DB_TEMPLATES: TemplateId[] = ['postgres', 'mysql']
+
+function isDatabaseTemplate(template: TemplateId): boolean {
+  return DB_TEMPLATES.includes(template)
+}
+
 interface WizardFormState {
   name: string
   description: string
   ownerEmail: string
   owner: string
-  template: 'python-fastapi' | 'static-nginx'
+  template: TemplateId
   imageRepo: string
   repoUrl: string
   namespace: string
   devHost: string
   prodHost: string
-  addonDatabase: boolean
-  addonEngine: 'postgres' | 'mysql'
-  addonMigrationCommand: string
 }
 
 const EMPTY_FORM: WizardFormState = {
@@ -37,9 +42,6 @@ const EMPTY_FORM: WizardFormState = {
   namespace: '',
   devHost: '',
   prodHost: '',
-  addonDatabase: false,
-  addonEngine: 'postgres',
-  addonMigrationCommand: '',
 }
 
 const STEPS: Step[] = ['basic', 'template', 'config', 'preview']
@@ -186,7 +188,7 @@ function TemplateStep({
   form: WizardFormState
   onChange: (patch: Partial<WizardFormState>) => void
 }) {
-  const options: { key: 'python-fastapi' | 'static-nginx'; title: string; description: string }[] = [
+  const options: { key: TemplateId; title: string; description: string }[] = [
     {
       key: 'python-fastapi',
       title: 'Python + FastAPI',
@@ -199,91 +201,38 @@ function TemplateStep({
       description:
         'Frontend or static asset server on port 80. Observability via ingress metrics (ingress-derived mode).',
     },
+    {
+      key: 'postgres',
+      title: 'PostgreSQL 17',
+      description:
+        'Standalone PostgreSQL 17 database. StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials stub. No ingress — connects to other services in-cluster.',
+    },
+    {
+      key: 'mysql',
+      title: 'MySQL 8.0',
+      description:
+        'Standalone MySQL 8.0 database. StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials stub. No ingress — connects to other services in-cluster.',
+    },
   ]
 
   return (
-    <div className="space-y-6">
-      <div className="space-y-3">
-        {options.map((opt) => (
-          <button
-            key={opt.key}
-            type="button"
-            onClick={() => onChange({ template: opt.key })}
-            className={cn(
-              'w-full rounded-md border p-4 text-left transition-colors',
-              form.template === opt.key
-                ? 'border-primary bg-primary/5'
-                : 'border-border hover:border-primary/50',
-            )}
-          >
-            <p className="font-medium">{opt.title}</p>
-            <p className="mt-1 text-sm text-muted-foreground">{opt.description}</p>
-          </button>
-        ))}
-      </div>
-
-      <div className="space-y-3 border-t border-border pt-6">
-        <FieldLabel hint="Optional: Add a database StatefulSet with persistence">Add-ons</FieldLabel>
-        
-        <div className="flex items-center gap-3 rounded-md border border-border p-3">
-          <input
-            type="checkbox"
-            id="addon-database"
-            checked={form.addonDatabase}
-            onChange={(e) => onChange({ addonDatabase: e.target.checked })}
-            className="h-4 w-4 rounded border-border"
-          />
-          <label htmlFor="addon-database" className="flex-1 cursor-pointer text-sm font-medium">
-            Database add-on (StatefulSet + Secret)
-          </label>
-        </div>
-
-        {form.addonDatabase && (
-          <div className="space-y-3 rounded-md bg-muted/40 p-4">
-            <div>
-              <label htmlFor="addon-engine" className="block text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Database engine
-              </label>
-              <select
-                id="addon-engine"
-                value={form.addonEngine}
-                onChange={(e) => onChange({ addonEngine: e.target.value as 'postgres' | 'mysql' })}
-                className="mt-2 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-              >
-                <option value="postgres">PostgreSQL 17 (with Alembic migrations)</option>
-                <option value="mysql">MySQL 8.0</option>
-              </select>
-            </div>
-
-            {form.template === 'python-fastapi' && (
-              <div>
-                <label htmlFor="addon-migration" className="block text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  Migration command <span className="text-muted-foreground font-normal">(optional)</span>
-                </label>
-                <input
-                  id="addon-migration"
-                  type="text"
-                  value={form.addonMigrationCommand}
-                  onChange={(e) => onChange({ addonMigrationCommand: e.target.value })}
-                  placeholder={form.addonEngine === 'postgres' ? 'alembic upgrade head' : 'mysql -e "SOURCE /init.sql"'}
-                  className="mt-2 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                />
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {form.addonEngine === 'postgres'
-                    ? 'Runs in a Kubernetes Job with automatic Argo CD sync hook. Defaults to `alembic upgrade head`.'
-                    : 'Runs in a Kubernetes Job. Defaults to basic MySQL initialization.'}
-                </p>
-              </div>
-            )}
-
-            {form.template === 'static-nginx' && (
-              <p className="rounded-sm bg-amber-500/10 px-2 py-1 text-xs text-amber-900 dark:text-amber-200">
-                Migration commands are only supported for backend templates (Python + FastAPI). Database will be created but no migration job will run.
-              </p>
-            )}
-          </div>
-        )}
-      </div>
+    <div className="space-y-3">
+      {options.map((opt) => (
+        <button
+          key={opt.key}
+          type="button"
+          onClick={() => onChange({ template: opt.key })}
+          className={cn(
+            'w-full rounded-md border p-4 text-left transition-colors',
+            form.template === opt.key
+              ? 'border-primary bg-primary/5'
+              : 'border-border hover:border-primary/50',
+          )}
+        >
+          <p className="font-medium">{opt.title}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{opt.description}</p>
+        </button>
+      ))}
     </div>
   )
 }
@@ -295,30 +244,36 @@ function ConfigStep({
   form: WizardFormState
   onChange: (patch: Partial<WizardFormState>) => void
 }) {
+  const isDb = isDatabaseTemplate(form.template)
+
   return (
     <div className="space-y-4">
-      <div>
-        <FieldLabel htmlFor="svc-image-repo" hint="e.g. ghcr.io/wlodzimierrr/my-service (without tag)">
-          Image repository *
-        </FieldLabel>
-        <TextInput
-          id="svc-image-repo"
-          value={form.imageRepo}
-          onChange={(v) => onChange({ imageRepo: v })}
-          placeholder="ghcr.io/org/my-service"
-          required
-        />
-      </div>
-      <div>
-        <FieldLabel htmlFor="svc-repo-url">Source repository URL *</FieldLabel>
-        <TextInput
-          id="svc-repo-url"
-          value={form.repoUrl}
-          onChange={(v) => onChange({ repoUrl: v })}
-          placeholder="https://github.com/org/my-service"
-          required
-        />
-      </div>
+      {!isDb && (
+        <>
+          <div>
+            <FieldLabel htmlFor="svc-image-repo" hint="e.g. ghcr.io/wlodzimierrr/my-service (without tag)">
+              Image repository *
+            </FieldLabel>
+            <TextInput
+              id="svc-image-repo"
+              value={form.imageRepo}
+              onChange={(v) => onChange({ imageRepo: v })}
+              placeholder="ghcr.io/org/my-service"
+              required
+            />
+          </div>
+          <div>
+            <FieldLabel htmlFor="svc-repo-url">Source repository URL *</FieldLabel>
+            <TextInput
+              id="svc-repo-url"
+              value={form.repoUrl}
+              onChange={(v) => onChange({ repoUrl: v })}
+              placeholder="https://github.com/org/my-service"
+              required
+            />
+          </div>
+        </>
+      )}
       <div>
         <FieldLabel htmlFor="svc-namespace" hint={`Defaults to service name: ${form.name || '<name>'}`}>
           Kubernetes namespace
@@ -330,30 +285,32 @@ function ConfigStep({
           placeholder={form.name || 'my-service'}
         />
       </div>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div>
-          <FieldLabel htmlFor="svc-dev-host" hint={`Default: ${form.name || '<name>'}.dev.homelab.local`}>
-            Dev ingress host
-          </FieldLabel>
-          <TextInput
-            id="svc-dev-host"
-            value={form.devHost}
-            onChange={(v) => onChange({ devHost: v })}
-            placeholder={`${form.name || 'my-service'}.dev.homelab.local`}
-          />
+      {!isDb && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <FieldLabel htmlFor="svc-dev-host" hint={`Default: ${form.name || '<name>'}.dev.homelab.local`}>
+              Dev ingress host
+            </FieldLabel>
+            <TextInput
+              id="svc-dev-host"
+              value={form.devHost}
+              onChange={(v) => onChange({ devHost: v })}
+              placeholder={`${form.name || 'my-service'}.dev.homelab.local`}
+            />
+          </div>
+          <div>
+            <FieldLabel htmlFor="svc-prod-host" hint={`Default: ${form.name || '<name>'}.homelab.local`}>
+              Prod ingress host
+            </FieldLabel>
+            <TextInput
+              id="svc-prod-host"
+              value={form.prodHost}
+              onChange={(v) => onChange({ prodHost: v })}
+              placeholder={`${form.name || 'my-service'}.homelab.local`}
+            />
+          </div>
         </div>
-        <div>
-          <FieldLabel htmlFor="svc-prod-host" hint={`Default: ${form.name || '<name>'}.homelab.local`}>
-            Prod ingress host
-          </FieldLabel>
-          <TextInput
-            id="svc-prod-host"
-            value={form.prodHost}
-            onChange={(v) => onChange({ prodHost: v })}
-            placeholder={`${form.name || 'my-service'}.homelab.local`}
-          />
-        </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -517,8 +474,10 @@ function validateBasic(form: WizardFormState): string {
 }
 
 function validateConfig(form: WizardFormState): string {
-  if (!form.imageRepo.trim()) return 'Image repository is required.'
-  if (!form.repoUrl.trim()) return 'Source repository URL is required.'
+  if (!isDatabaseTemplate(form.template)) {
+    if (!form.imageRepo.trim()) return 'Image repository is required.'
+    if (!form.repoUrl.trim()) return 'Source repository URL is required.'
+  }
   return ''
 }
 
@@ -541,18 +500,14 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
   const buildPayload = (): ScaffoldServiceRequest => ({
     name: form.name.trim(),
     description: form.description.trim(),
-    imageRepo: form.imageRepo.trim(),
-    repoUrl: form.repoUrl.trim(),
+    imageRepo: form.imageRepo.trim() || undefined,
+    repoUrl: form.repoUrl.trim() || undefined,
     ownerEmail: form.ownerEmail.trim(),
     owner: form.owner.trim(),
     template: form.template,
     namespace: form.namespace.trim() || undefined,
     devHost: form.devHost.trim() || undefined,
     prodHost: form.prodHost.trim() || undefined,
-    addonDatabase: form.addonDatabase ? form.addonEngine : undefined,
-    addonMigrationCommand: form.addonDatabase && form.addonMigrationCommand.trim() 
-      ? form.addonMigrationCommand.trim() 
-      : undefined,
   })
 
   const goNext = useCallback(async () => {

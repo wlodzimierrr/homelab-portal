@@ -807,16 +807,14 @@ export function getReleaseTraceability(params?: {
 export interface ScaffoldServiceRequest {
   name: string
   description: string
-  imageRepo: string
-  repoUrl: string
+  imageRepo?: string
+  repoUrl?: string
   ownerEmail: string
   owner?: string
-  template: 'python-fastapi' | 'static-nginx'
+  template: 'python-fastapi' | 'static-nginx' | 'postgres' | 'mysql'
   namespace?: string
   devHost?: string
   prodHost?: string
-  addonDatabase?: 'postgres' | 'mysql'
-  addonMigrationCommand?: string
 }
 
 export interface ScaffoldPreviewFile {

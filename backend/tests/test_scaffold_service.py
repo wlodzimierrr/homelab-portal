@@ -258,54 +258,96 @@ def test_build_appproject_addition_includes_workloads_repo_url() -> None:
 
 
 # ---------------------------------------------------------------------------
-# generate_gitops_new_files — database add-on
+# generate_gitops_new_files — postgres template
 # ---------------------------------------------------------------------------
 
 
-def test_db_addon_postgres_files_present() -> None:
-    inp = _make_input(addon_database="postgres", addon_migration_command="alembic upgrade head")
+def test_postgres_template_base_files_present() -> None:
+    inp = _make_input(template="postgres")
     files = generate_gitops_new_files(inp)
-    assert "apps/my-svc/base/database-secret.yaml" in files
-    assert "apps/my-svc/base/database-statefulset.yaml" in files
-    assert "apps/my-svc/base/database-service.yaml" in files
-    assert "apps/my-svc/base/database-migration-job.yaml" in files
+    assert "apps/my-svc/base/statefulset.yaml" in files
+    assert "apps/my-svc/base/service.yaml" in files
+    assert "apps/my-svc/base/credentials-secret.yaml" in files
+    assert "apps/my-svc/base/networkpolicy-allow-ingress.yaml" in files
 
 
-def test_db_addon_postgres_in_kustomization() -> None:
-    inp = _make_input(addon_database="postgres", addon_migration_command="alembic upgrade head")
+def test_postgres_template_no_deployment_or_ingress() -> None:
+    inp = _make_input(template="postgres")
+    files = generate_gitops_new_files(inp)
+    assert "apps/my-svc/base/deployment.yaml" not in files
+    assert "apps/my-svc/base/ingress.yaml" not in files
+    assert "apps/my-svc/base/servicemonitor.yaml" not in files
+
+
+def test_postgres_template_statefulset_uses_pg17() -> None:
+    inp = _make_input(template="postgres")
+    files = generate_gitops_new_files(inp)
+    assert "postgres:17-alpine" in files["apps/my-svc/base/statefulset.yaml"]
+
+
+def test_postgres_template_kustomization_resources() -> None:
+    inp = _make_input(template="postgres")
     files = generate_gitops_new_files(inp)
     kust = files["apps/my-svc/base/kustomization.yaml"]
-    assert "database-secret.yaml" in kust
-    assert "database-statefulset.yaml" in kust
-    assert "database-service.yaml" in kust
-    assert "database-migration-job.yaml" in kust
+    assert "statefulset.yaml" in kust
+    assert "service.yaml" in kust
+    assert "credentials-secret.yaml" in kust
 
 
-def test_db_addon_postgres_env_vars_in_deployment() -> None:
-    inp = _make_input(addon_database="postgres", addon_migration_command="alembic upgrade head")
+def test_postgres_template_argocd_apps_generated() -> None:
+    inp = _make_input(template="postgres")
     files = generate_gitops_new_files(inp)
-    deployment = files["apps/my-svc/base/deployment.yaml"]
-    assert "DATABASE_URL" in deployment
-    assert "POSTGRES_USER" in deployment
+    assert "environments/dev/workloads/my-svc-app.yaml" in files
+    assert "environments/prod/workloads/my-svc-app.yaml" in files
 
 
-def test_db_addon_mysql_files_present() -> None:
-    inp = _make_input(addon_database="mysql", addon_migration_command='mysql -e "SOURCE /init.sql"')
+# ---------------------------------------------------------------------------
+# generate_gitops_new_files — mysql template
+# ---------------------------------------------------------------------------
+
+
+def test_mysql_template_base_files_present() -> None:
+    inp = _make_input(template="mysql")
     files = generate_gitops_new_files(inp)
-    assert "apps/my-svc/base/database-secret.yaml" in files
-    assert "apps/my-svc/base/database-service.yaml" in files
-    assert "apps/my-svc/base/database-migration-job.yaml" in files
+    assert "apps/my-svc/base/statefulset.yaml" in files
+    assert "apps/my-svc/base/service.yaml" in files
+    assert "apps/my-svc/base/credentials-secret.yaml" in files
 
 
-def test_db_addon_mysql_env_vars_in_deployment() -> None:
-    inp = _make_input(addon_database="mysql", addon_migration_command='mysql -e "SOURCE /init.sql"')
+def test_mysql_template_no_deployment_or_ingress() -> None:
+    inp = _make_input(template="mysql")
     files = generate_gitops_new_files(inp)
-    deployment = files["apps/my-svc/base/deployment.yaml"]
-    assert "DATABASE_URL" in deployment
-    assert "MYSQL_DATABASE" in deployment
+    assert "apps/my-svc/base/deployment.yaml" not in files
+    assert "apps/my-svc/base/ingress.yaml" not in files
 
 
-def test_db_addon_absent_without_flag() -> None:
-    files = generate_gitops_new_files(_make_input())
-    db_files = [k for k in files if "database" in k]
-    assert db_files == []
+def test_mysql_template_statefulset_uses_mysql8() -> None:
+    inp = _make_input(template="mysql")
+    files = generate_gitops_new_files(inp)
+    assert "mysql:8.0" in files["apps/my-svc/base/statefulset.yaml"]
+
+
+def test_mysql_template_credentials_secret_has_mysql_keys() -> None:
+    inp = _make_input(template="mysql")
+    files = generate_gitops_new_files(inp)
+    secret = files["apps/my-svc/base/credentials-secret.yaml"]
+    assert "MYSQL_ROOT_PASSWORD" in secret
+    assert "MYSQL_USER" in secret
+    assert "MYSQL_DATABASE" in secret
+
+
+# ---------------------------------------------------------------------------
+# build_catalog_entry_addition — database templates use no-http mode
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_entry_postgres_uses_no_http_observability() -> None:
+    inp = _make_input(template="postgres")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: no-http" in result
+
+
+def test_catalog_entry_mysql_uses_no_http_observability() -> None:
+    inp = _make_input(template="mysql")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: no-http" in result

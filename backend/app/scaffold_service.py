@@ -25,6 +25,18 @@ _TEMPLATES: dict[str, dict[str, object]] = {
         "container_name": "web",
         "default_observability_mode": "ingress-derived",
     },
+    "postgres": {
+        "db_port": 5432,
+        "db_image": "postgres:17-alpine",
+        "db_engine": "postgres",
+        "default_observability_mode": "no-http",
+    },
+    "mysql": {
+        "db_port": 3306,
+        "db_image": "mysql:8.0",
+        "db_engine": "mysql",
+        "default_observability_mode": "no-http",
+    },
 }
 
 
@@ -44,13 +56,11 @@ class ScaffoldServiceInput:
     repo_url: str
     owner_email: str
     owner: str
-    template: Literal["python-fastapi", "static-nginx"]
+    template: Literal["python-fastapi", "static-nginx", "postgres", "mysql"]
     namespace: str
     dev_host: str
     prod_host: str
     workloads_repo_url: str
-    addon_database: str | None = None  # "postgres" or "mysql"
-    addon_migration_command: str | None = None
 
 
 def validate_service_name(name: str) -> None:
@@ -64,6 +74,9 @@ def validate_service_name(name: str) -> None:
 
 def generate_gitops_new_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     """Return all NEW files keyed by path relative to the gitops root."""
+    if inp.template in ("postgres", "mysql"):
+        return _generate_database_gitops_files(inp)
+
     t = _TEMPLATES[inp.template]
     container_port = int(t["container_port"])  # type: ignore[arg-type]
     service_port = int(t["service_port"])  # type: ignore[arg-type]
@@ -164,13 +177,14 @@ def build_catalog_entry_addition(existing_services_yaml: str, inp: ScaffoldServi
 
     observability_mode = str(_TEMPLATES[inp.template]["default_observability_mode"])
     display_name = " ".join(word.capitalize() for word in inp.name.split("-"))
+    repo_url = inp.repo_url or inp.workloads_repo_url
     entry = (
         f"  - service_id: {inp.name}\n"
         f"    name: {_yaml_string(display_name)}\n"
         f"    owner: {_yaml_string(inp.owner or inp.owner_email)}\n"
         f"    owner_email: {_yaml_string(inp.owner_email)}\n"
-        f"    repo_url: {_yaml_string(inp.repo_url)}\n"
-        f"    runbook_url: {_yaml_string(inp.repo_url)}\n"
+        f"    repo_url: {_yaml_string(repo_url)}\n"
+        f"    runbook_url: {_yaml_string(repo_url)}\n"
         f"    description: {_yaml_string(inp.description)}\n"
         "    observability:\n"
         f"      mode: {observability_mode}\n"
@@ -227,173 +241,373 @@ def _indent_block(value: str, spaces: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Database add-on helpers
+# Database template generators (standalone postgres / mysql service)
 # ---------------------------------------------------------------------------
 
 
-def _generate_database_secret(addon_database: str) -> str:
-    """Generate SOPS-encrypted Secret stub for database credentials."""
-    if addon_database == "postgres":
-        return _render_template(
+def _generate_database_gitops_files(inp: ScaffoldServiceInput) -> dict[str, str]:
+    """Return all NEW files for a standalone postgres or mysql template."""
+    files: dict[str, str] = {}
+
+    base_prefix = f"apps/{inp.name}/base"
+    for rel_path, content in _generate_database_base_files(inp).items():
+        files[f"{base_prefix}/{rel_path}"] = content
+
+    for env_name in ("dev", "prod"):
+        env_prefix = f"apps/{inp.name}/envs/{env_name}"
+        files[f"{env_prefix}/kustomization.yaml"] = _render_template(
             """
-            # SOPS-encrypted Secret stub for PostgreSQL credentials
-            # Fill in the placeholder values, then encrypt with SOPS
-            # See docs/runbooks/sops-secrets.md for setup details
+            apiVersion: kustomize.config.k8s.io/v1beta1
+            kind: Kustomization
+            resources:
+              - ../../base
+            commonLabels:
+              homelab.env: {env_name}
+            """,
+            env_name=env_name,
+        )
+
+    files[f"environments/dev/workloads/{inp.name}-app.yaml"] = _generate_application_manifest(
+        app_name=f"{inp.name}-dev",
+        project_name=inp.name,
+        path=f"apps/{inp.name}/envs/dev",
+        namespace=inp.namespace,
+        repo_url=inp.workloads_repo_url,
+    )
+    files[f"environments/prod/workloads/{inp.name}-app.yaml"] = (
+        "# Generated for future prod activation.\n"
+        "# Keep environments/prod/workloads/kustomization.yaml empty while single-cluster safety mode is active.\n"
+        + _generate_application_manifest(
+            app_name=f"{inp.name}-prod",
+            project_name=inp.name,
+            path=f"apps/{inp.name}/envs/prod",
+            namespace=inp.namespace,
+            repo_url=inp.workloads_repo_url,
+        )
+    )
+
+    return files
+
+
+def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
+    t = _TEMPLATES[inp.template]
+    db_port = int(t["db_port"])  # type: ignore[arg-type]
+    db_image = str(t["db_image"])
+    db_engine = str(t["db_engine"])
+    is_postgres = db_engine == "postgres"
+
+    resources = [
+        "namespace.yaml",
+        "serviceaccount.yaml",
+        "credentials-secret.yaml",
+        "statefulset.yaml",
+        "service.yaml",
+        "networkpolicy-default-deny.yaml",
+        "networkpolicy-allow-dns-egress.yaml",
+        "networkpolicy-allow-ingress.yaml",
+    ]
+
+    if is_postgres:
+        secret_content = _render_template(
+            """
+            # SOPS-encrypted Secret stub — fill values then encrypt with: sops -e -i credentials-secret.yaml
+            # See docs/runbooks/sops-secrets.md
             apiVersion: v1
             kind: Secret
             metadata:
-              name: db-credentials
+              name: {name}-credentials
               namespace: {namespace}
             type: Opaque
             stringData:
               POSTGRES_USER: appuser
               POSTGRES_PASSWORD: changeme
-              POSTGRES_DB: app_db
+              POSTGRES_DB: appdb
             """,
-            namespace="PLACEHOLDER_NAMESPACE",
+            name=inp.name,
+            namespace=inp.namespace,
+        )
+        statefulset_content = _render_template(
+            """
+            apiVersion: apps/v1
+            kind: StatefulSet
+            metadata:
+              name: {name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+            spec:
+              serviceName: {name}
+              replicas: 1
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {name}
+              template:
+                metadata:
+                  labels:
+                    app.kubernetes.io/name: {name}
+                spec:
+                  serviceAccountName: {name}
+                  containers:
+                    - name: postgres
+                      image: {db_image}
+                      imagePullPolicy: IfNotPresent
+                      ports:
+                        - containerPort: 5432
+                          name: postgres
+                      env:
+                        - name: POSTGRES_USER
+                          valueFrom:
+                            secretKeyRef:
+                              name: {name}-credentials
+                              key: POSTGRES_USER
+                        - name: POSTGRES_PASSWORD
+                          valueFrom:
+                            secretKeyRef:
+                              name: {name}-credentials
+                              key: POSTGRES_PASSWORD
+                        - name: POSTGRES_DB
+                          valueFrom:
+                            secretKeyRef:
+                              name: {name}-credentials
+                              key: POSTGRES_DB
+                      volumeMounts:
+                        - name: data
+                          mountPath: /var/lib/postgresql/data
+                          subPath: postgres
+                      resources:
+                        requests:
+                          cpu: 100m
+                          memory: 256Mi
+                        limits:
+                          cpu: 500m
+                          memory: 512Mi
+              volumeClaimTemplates:
+                - metadata:
+                    name: data
+                  spec:
+                    accessModes:
+                      - ReadWriteOnce
+                    resources:
+                      requests:
+                        storage: 10Gi
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+            db_image=db_image,
         )
     else:  # mysql
-        return _render_template(
+        secret_content = _render_template(
             """
-            # SOPS-encrypted Secret stub for MySQL credentials
-            # Fill in the placeholder values, then encrypt with SOPS
-            # See docs/runbooks/sops-secrets.md for setup details
+            # SOPS-encrypted Secret stub — fill values then encrypt with: sops -e -i credentials-secret.yaml
+            # See docs/runbooks/sops-secrets.md
             apiVersion: v1
             kind: Secret
             metadata:
-              name: db-credentials
+              name: {name}-credentials
               namespace: {namespace}
             type: Opaque
             stringData:
               MYSQL_ROOT_PASSWORD: changeme
               MYSQL_USER: appuser
               MYSQL_PASSWORD: changeme
-              MYSQL_DATABASE: app_db
+              MYSQL_DATABASE: appdb
             """,
-            namespace="PLACEHOLDER_NAMESPACE",
+            name=inp.name,
+            namespace=inp.namespace,
         )
-
-
-def _generate_database_env_vars(addon_database: str, name: str) -> str:
-    """Generate environment variables block for database connection."""
-    if addon_database == "postgres":
-        return _render_template(
+        statefulset_content = _render_template(
             """
-            - name: DATABASE_URL
-              value: postgresql://{{{{ POSTGRES_USER }}}}:{{{{ POSTGRES_PASSWORD }}}}@{name}-postgres:5432/{{{{ POSTGRES_DB }}}}
-            - name: POSTGRES_USER
-              valueFrom:
-                secretKeyRef:
-                  name: db-credentials
-                  key: POSTGRES_USER
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: db-credentials
-                  key: POSTGRES_PASSWORD
-            - name: POSTGRES_DB
-              valueFrom:
-                secretKeyRef:
-                  name: db-credentials
-                  key: POSTGRES_DB
-            """,
-            name=name,
-        )
-    else:  # mysql
-        return _render_template(
-            """
-            - name: DATABASE_URL
-              value: mysql://{{{{ MYSQL_USER }}}}:{{{{ MYSQL_PASSWORD }}}}@{name}-mysql:3306/{{{{ MYSQL_DATABASE }}}}
-            - name: MYSQL_HOST
-              value: {name}-mysql
-            - name: MYSQL_USER
-              valueFrom:
-                secretKeyRef:
-                  name: db-credentials
-                  key: MYSQL_USER
-            - name: MYSQL_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: db-credentials
-                  key: MYSQL_PASSWORD
-            - name: MYSQL_DATABASE
-              valueFrom:
-                secretKeyRef:
-                  name: db-credentials
-                  key: MYSQL_DATABASE
-            """,
-            name=name,
-        )
-
-
-def _generate_migration_job(inp: ScaffoldServiceInput) -> str:
-    """Generate Kubernetes Job for database migrations."""
-    if not inp.addon_migration_command:
-        migration_cmd = "alembic upgrade head" if inp.addon_database == "postgres" else ""
-    else:
-        migration_cmd = inp.addon_migration_command
-
-    if not migration_cmd:
-        return ""
-
-    return _render_template(
-        """
-        apiVersion: batch/v1
-        kind: Job
-        metadata:
-          name: {name}-migrate
-          namespace: {namespace}
-          labels:
-            app.kubernetes.io/name: {name}
-            app.kubernetes.io/component: migration
-          annotations:
-            argocd.argoproj.io/hook: Sync
-            argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
-        spec:
-          backoffLimit: 3
-          activeDeadlineSeconds: 600
-          template:
+            apiVersion: apps/v1
+            kind: StatefulSet
             metadata:
+              name: {name}
+              namespace: {namespace}
               labels:
                 app.kubernetes.io/name: {name}
-                app.kubernetes.io/component: migration
             spec:
-              serviceAccountName: {name}
-              restartPolicy: OnFailure
-              containers:
-                - name: migrate
-                  image: python:3.11-slim
-                  imagePullPolicy: IfNotPresent
-                  command:
-                    - /bin/sh
-                    - -c
-                    - |
-                      set -eu
-                      pip install -q alembic sqlalchemy psycopg2-binary
-                      {migration_cmd}
-                  env:
-                    - name: DATABASE_URL
-                      value: postgresql://${{POSTGRES_USER}}:${{POSTGRES_PASSWORD}}@{name}-postgres:5432/${{POSTGRES_DB}}
-                    - name: POSTGRES_USER
-                      valueFrom:
-                        secretKeyRef:
-                          name: db-credentials
-                          key: POSTGRES_USER
-                    - name: POSTGRES_PASSWORD
-                      valueFrom:
-                        secretKeyRef:
-                          name: db-credentials
-                          key: POSTGRES_PASSWORD
-                    - name: POSTGRES_DB
-                      valueFrom:
-                        secretKeyRef:
-                          name: db-credentials
-                          key: POSTGRES_DB
-        """,
-        name=inp.name,
-        namespace=inp.namespace,
-        migration_cmd=migration_cmd,
-    )
+              serviceName: {name}
+              replicas: 1
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {name}
+              template:
+                metadata:
+                  labels:
+                    app.kubernetes.io/name: {name}
+                spec:
+                  serviceAccountName: {name}
+                  containers:
+                    - name: mysql
+                      image: {db_image}
+                      imagePullPolicy: IfNotPresent
+                      ports:
+                        - containerPort: 3306
+                          name: mysql
+                      env:
+                        - name: MYSQL_ROOT_PASSWORD
+                          valueFrom:
+                            secretKeyRef:
+                              name: {name}-credentials
+                              key: MYSQL_ROOT_PASSWORD
+                        - name: MYSQL_USER
+                          valueFrom:
+                            secretKeyRef:
+                              name: {name}-credentials
+                              key: MYSQL_USER
+                        - name: MYSQL_PASSWORD
+                          valueFrom:
+                            secretKeyRef:
+                              name: {name}-credentials
+                              key: MYSQL_PASSWORD
+                        - name: MYSQL_DATABASE
+                          valueFrom:
+                            secretKeyRef:
+                              name: {name}-credentials
+                              key: MYSQL_DATABASE
+                      volumeMounts:
+                        - name: data
+                          mountPath: /var/lib/mysql
+                      resources:
+                        requests:
+                          cpu: 100m
+                          memory: 256Mi
+                        limits:
+                          cpu: 500m
+                          memory: 512Mi
+              volumeClaimTemplates:
+                - metadata:
+                    name: data
+                  spec:
+                    accessModes:
+                      - ReadWriteOnce
+                    resources:
+                      requests:
+                        storage: 10Gi
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+            db_image=db_image,
+        )
+
+    return {
+        "kustomization.yaml": (
+            "apiVersion: kustomize.config.k8s.io/v1beta1\n"
+            "kind: Kustomization\n"
+            "resources:\n"
+            + "".join(f"  - {r}\n" for r in resources)
+        ),
+        "namespace.yaml": _render_template(
+            """
+            apiVersion: v1
+            kind: Namespace
+            metadata:
+              name: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+            """,
+            namespace=inp.namespace,
+            name=inp.name,
+        ),
+        "serviceaccount.yaml": _render_template(
+            """
+            apiVersion: v1
+            kind: ServiceAccount
+            metadata:
+              name: {name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+        ),
+        "credentials-secret.yaml": secret_content,
+        "statefulset.yaml": statefulset_content,
+        "service.yaml": _render_template(
+            """
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: {name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+            spec:
+              type: ClusterIP
+              selector:
+                app.kubernetes.io/name: {name}
+              ports:
+                - name: {db_engine}
+                  port: {db_port}
+                  targetPort: {db_port}
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+            db_engine=db_engine,
+            db_port=str(db_port),
+        ),
+        "networkpolicy-default-deny.yaml": _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: default-deny
+              namespace: {namespace}
+            spec:
+              podSelector: {{}}
+              policyTypes:
+                - Ingress
+                - Egress
+            """,
+            namespace=inp.namespace,
+        ),
+        "networkpolicy-allow-dns-egress.yaml": _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-dns-egress
+              namespace: {namespace}
+            spec:
+              podSelector: {{}}
+              policyTypes:
+                - Egress
+              egress:
+                - to:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: kube-system
+                  ports:
+                    - protocol: UDP
+                      port: 53
+                    - protocol: TCP
+                      port: 53
+            """,
+            namespace=inp.namespace,
+        ),
+        "networkpolicy-allow-ingress.yaml": _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-db-ingress
+              namespace: {namespace}
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {name}
+              policyTypes:
+                - Ingress
+              ingress:
+                - ports:
+                    - protocol: TCP
+                      port: {db_port}
+            """,
+            namespace=inp.namespace,
+            name=inp.name,
+            db_port=str(db_port),
+        ),
+    }
 
 
 def _generate_base_files(
@@ -468,12 +682,7 @@ def _generate_base_files(
         "            - name: APP_ENV",
         "              value: base",
     ]
-    
-    # Add database env vars if addon is enabled
-    if inp.addon_database:
-        db_env_vars = _generate_database_env_vars(inp.addon_database, inp.name)
-        deployment_lines.extend(_indent_block(db_env_vars.rstrip(), 10).splitlines())
-    
+
     deployment_lines.extend(_indent_block(probes.rstrip(), 10).splitlines())
     deployment_lines.extend(
         [
@@ -499,20 +708,6 @@ def _generate_base_files(
     ]
     if observability_mode == "app-native":
         resources.insert(4, "servicemonitor.yaml")
-    
-    # Add database addon resources if enabled
-    if inp.addon_database:
-        # Insert database files after serviceaccount
-        resources.insert(2, "database-secret.yaml")
-        if inp.addon_database == "postgres":
-            resources.insert(3, "database-statefulset.yaml")
-            resources.insert(4, "database-service.yaml")
-        else:  # mysql
-            resources.insert(3, "database-deployment.yaml")
-            resources.insert(4, "database-service.yaml")
-        # Insert migration job last if migration command is set
-        if inp.addon_migration_command:
-            resources.append("database-migration-job.yaml")
 
     files: dict[str, str] = {
         "kustomization.yaml": (
@@ -680,189 +875,7 @@ def _generate_base_files(
             namespace=inp.namespace,
         )
 
-    # Add database addon files if enabled
-    if inp.addon_database:
-        files["database-secret.yaml"] = _generate_database_secret(inp.addon_database)
-        
-        # Generate database StatefulSet or Deployment
-        if inp.addon_database == "postgres":
-            files["database-statefulset.yaml"] = _render_template(
-                """
-                apiVersion: apps/v1
-                kind: StatefulSet
-                metadata:
-                  name: {name}-postgres
-                  namespace: {namespace}
-                  labels:
-                    app.kubernetes.io/name: {name}
-                    app.kubernetes.io/component: database
-                spec:
-                  serviceName: {name}-postgres
-                  replicas: 1
-                  selector:
-                    matchLabels:
-                      app.kubernetes.io/name: {name}
-                      app.kubernetes.io/component: database
-                  template:
-                    metadata:
-                      labels:
-                        app.kubernetes.io/name: {name}
-                        app.kubernetes.io/component: database
-                    spec:
-                      serviceAccountName: {name}
-                      containers:
-                        - name: postgres
-                          image: postgres:15-alpine
-                          imagePullPolicy: IfNotPresent
-                          ports:
-                            - containerPort: 5432
-                              name: postgres
-                          env:
-                            - name: POSTGRES_USER
-                              valueFrom:
-                                secretKeyRef:
-                                  name: db-credentials
-                                  key: POSTGRES_USER
-                            - name: POSTGRES_PASSWORD
-                              valueFrom:
-                                secretKeyRef:
-                                  name: db-credentials
-                                  key: POSTGRES_PASSWORD
-                            - name: POSTGRES_DB
-                              valueFrom:
-                                secretKeyRef:
-                                  name: db-credentials
-                                  key: POSTGRES_DB
-                          volumeMounts:
-                            - name: data
-                              mountPath: /var/lib/postgresql/data
-                              subPath: postgres
-                          resources:
-                            requests:
-                              cpu: 100m
-                              memory: 256Mi
-                            limits:
-                              cpu: 500m
-                              memory: 512Mi
-                  volumeClaimTemplates:
-                    - metadata:
-                        name: data
-                      spec:
-                        accessModes:
-                          - ReadWriteOnce
-                        resources:
-                          requests:
-                            storage: 10Gi
-                """,
-                name=inp.name,
-                namespace=inp.namespace,
-            )
-        else:  # mysql
-            files["database-deployment.yaml"] = _render_template(
-                """
-                apiVersion: apps/v1
-                kind: Deployment
-                metadata:
-                  name: {name}-mysql
-                  namespace: {namespace}
-                  labels:
-                    app.kubernetes.io/name: {name}
-                    app.kubernetes.io/component: database
-                spec:
-                  replicas: 1
-                  selector:
-                    matchLabels:
-                      app.kubernetes.io/name: {name}
-                      app.kubernetes.io/component: database
-                  template:
-                    metadata:
-                      labels:
-                        app.kubernetes.io/name: {name}
-                        app.kubernetes.io/component: database
-                    spec:
-                      serviceAccountName: {name}
-                      containers:
-                        - name: mysql
-                          image: mysql:8.0-alpine
-                          imagePullPolicy: IfNotPresent
-                          ports:
-                            - containerPort: 3306
-                              name: mysql
-                          env:
-                            - name: MYSQL_ROOT_PASSWORD
-                              valueFrom:
-                                secretKeyRef:
-                                  name: db-credentials
-                                  key: MYSQL_ROOT_PASSWORD
-                            - name: MYSQL_USER
-                              valueFrom:
-                                secretKeyRef:
-                                  name: db-credentials
-                                  key: MYSQL_USER
-                            - name: MYSQL_PASSWORD
-                              valueFrom:
-                                secretKeyRef:
-                                  name: db-credentials
-                                  key: MYSQL_PASSWORD
-                            - name: MYSQL_DATABASE
-                              valueFrom:
-                                secretKeyRef:
-                                  name: db-credentials
-                                  key: MYSQL_DATABASE
-                          volumeMounts:
-                            - name: data
-                              mountPath: /var/lib/mysql
-                          resources:
-                            requests:
-                              cpu: 100m
-                              memory: 256Mi
-                            limits:
-                              cpu: 500m
-                              memory: 512Mi
-                      volumes:
-                        - name: data
-                          emptyDir: {{}}
-                """,
-                name=inp.name,
-                namespace=inp.namespace,
-            )
-        
-        # Generate database Service
-        db_port = 5432 if inp.addon_database == "postgres" else 3306
-        db_service_name = f"{inp.name}-postgres" if inp.addon_database == "postgres" else f"{inp.name}-mysql"
-        files["database-service.yaml"] = _render_template(
-            """
-            apiVersion: v1
-            kind: Service
-            metadata:
-              name: {service_name}
-              namespace: {namespace}
-              labels:
-                app.kubernetes.io/name: {name}
-                app.kubernetes.io/component: database
-            spec:
-              type: ClusterIP
-              selector:
-                app.kubernetes.io/name: {name}
-                app.kubernetes.io/component: database
-              ports:
-                - name: {db_type}
-                  port: {db_port}
-                  targetPort: {db_port}
-            """,
-            service_name=db_service_name,
-            namespace=inp.namespace,
-            name=inp.name,
-            db_type="postgres" if inp.addon_database == "postgres" else "mysql",
-            db_port=str(db_port),
-        )
-        
-        # Generate migration job if migration command is set
-        if inp.addon_migration_command:
-            files["database-migration-job.yaml"] = _generate_migration_job(inp)
-
     return files
-
 
 
 def _generate_overlay_files(
