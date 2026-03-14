@@ -6835,9 +6835,7 @@ def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInp
 @app.post("/scaffold/preview", response_model=ScaffoldPreviewResponse, tags=["scaffold"])
 def scaffold_preview(
     payload: ScaffoldServiceRequest,
-    admin_user: str = Depends(require_admin),
 ) -> ScaffoldPreviewResponse:
-    del admin_user
     workloads_repo = _workloads_repo_slug()
     base_branch = _workloads_base_branch()
 
@@ -6883,7 +6881,6 @@ def scaffold_preview(
 )
 def scaffold_submit(
     payload: ScaffoldServiceRequest,
-    admin_user: str = Depends(require_admin),
 ) -> ScaffoldSubmitResponse:
     initiated_at = datetime.now(tz=timezone.utc)
     workloads_repo = _workloads_repo_slug()
