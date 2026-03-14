@@ -815,6 +815,8 @@ export interface ScaffoldServiceRequest {
   namespace?: string
   devHost?: string
   prodHost?: string
+  addonDatabase?: 'postgres' | 'mysql'
+  addonMigrationCommand?: string
 }
 
 export interface ScaffoldPreviewFile {
