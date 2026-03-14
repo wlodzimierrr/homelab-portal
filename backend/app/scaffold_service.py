@@ -49,6 +49,8 @@ class ScaffoldServiceInput:
     dev_host: str
     prod_host: str
     workloads_repo_url: str
+    addon_database: str | None = None  # "postgres" or "mysql"
+    addon_migration_command: str | None = None
 
 
 def validate_service_name(name: str) -> None:
@@ -224,6 +226,176 @@ def _indent_block(value: str, spaces: int) -> str:
     return "\n".join(f"{prefix}{line}" if line else line for line in value.splitlines())
 
 
+# ---------------------------------------------------------------------------
+# Database add-on helpers
+# ---------------------------------------------------------------------------
+
+
+def _generate_database_secret(addon_database: str) -> str:
+    """Generate SOPS-encrypted Secret stub for database credentials."""
+    if addon_database == "postgres":
+        return _render_template(
+            """
+            # SOPS-encrypted Secret stub for PostgreSQL credentials
+            # Fill in the placeholder values, then encrypt with SOPS
+            # See docs/runbooks/sops-secrets.md for setup details
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: db-credentials
+              namespace: {namespace}
+            type: Opaque
+            stringData:
+              POSTGRES_USER: appuser
+              POSTGRES_PASSWORD: changeme
+              POSTGRES_DB: app_db
+            """,
+            namespace="PLACEHOLDER_NAMESPACE",
+        )
+    else:  # mysql
+        return _render_template(
+            """
+            # SOPS-encrypted Secret stub for MySQL credentials
+            # Fill in the placeholder values, then encrypt with SOPS
+            # See docs/runbooks/sops-secrets.md for setup details
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: db-credentials
+              namespace: {namespace}
+            type: Opaque
+            stringData:
+              MYSQL_ROOT_PASSWORD: changeme
+              MYSQL_USER: appuser
+              MYSQL_PASSWORD: changeme
+              MYSQL_DATABASE: app_db
+            """,
+            namespace="PLACEHOLDER_NAMESPACE",
+        )
+
+
+def _generate_database_env_vars(addon_database: str, name: str) -> str:
+    """Generate environment variables block for database connection."""
+    if addon_database == "postgres":
+        return _render_template(
+            """
+            - name: DATABASE_URL
+              value: postgresql://{{{{ POSTGRES_USER }}}}:{{{{ POSTGRES_PASSWORD }}}}@{name}-postgres:5432/{{{{ POSTGRES_DB }}}}
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: POSTGRES_DB
+            """,
+            name=name,
+        )
+    else:  # mysql
+        return _render_template(
+            """
+            - name: DATABASE_URL
+              value: mysql://{{{{ MYSQL_USER }}}}:{{{{ MYSQL_PASSWORD }}}}@{name}-mysql:3306/{{{{ MYSQL_DATABASE }}}}
+            - name: MYSQL_HOST
+              value: {name}-mysql
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: MYSQL_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: MYSQL_PASSWORD
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: MYSQL_DATABASE
+            """,
+            name=name,
+        )
+
+
+def _generate_migration_job(inp: ScaffoldServiceInput) -> str:
+    """Generate Kubernetes Job for database migrations."""
+    if not inp.addon_migration_command:
+        migration_cmd = "alembic upgrade head" if inp.addon_database == "postgres" else ""
+    else:
+        migration_cmd = inp.addon_migration_command
+
+    if not migration_cmd:
+        return ""
+
+    return _render_template(
+        """
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: {name}-migrate
+          namespace: {namespace}
+          labels:
+            app.kubernetes.io/name: {name}
+            app.kubernetes.io/component: migration
+          annotations:
+            argocd.argoproj.io/hook: Sync
+            argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+        spec:
+          backoffLimit: 3
+          activeDeadlineSeconds: 600
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/component: migration
+            spec:
+              serviceAccountName: {name}
+              restartPolicy: OnFailure
+              containers:
+                - name: migrate
+                  image: python:3.11-slim
+                  imagePullPolicy: IfNotPresent
+                  command:
+                    - /bin/sh
+                    - -c
+                    - |
+                      set -eu
+                      pip install -q alembic sqlalchemy psycopg2-binary
+                      {migration_cmd}
+                  env:
+                    - name: DATABASE_URL
+                      value: postgresql://${{POSTGRES_USER}}:${{POSTGRES_PASSWORD}}@{name}-postgres:5432/${{POSTGRES_DB}}
+                    - name: POSTGRES_USER
+                      valueFrom:
+                        secretKeyRef:
+                          name: db-credentials
+                          key: POSTGRES_USER
+                    - name: POSTGRES_PASSWORD
+                      valueFrom:
+                        secretKeyRef:
+                          name: db-credentials
+                          key: POSTGRES_PASSWORD
+                    - name: POSTGRES_DB
+                      valueFrom:
+                        secretKeyRef:
+                          name: db-credentials
+                          key: POSTGRES_DB
+        """,
+        name=inp.name,
+        namespace=inp.namespace,
+        migration_cmd=migration_cmd,
+    )
+
+
 def _generate_base_files(
     inp: ScaffoldServiceInput,
     container_port: int,
@@ -296,6 +468,12 @@ def _generate_base_files(
         "            - name: APP_ENV",
         "              value: base",
     ]
+    
+    # Add database env vars if addon is enabled
+    if inp.addon_database:
+        db_env_vars = _generate_database_env_vars(inp.addon_database, inp.name)
+        deployment_lines.extend(_indent_block(db_env_vars.rstrip(), 10).splitlines())
+    
     deployment_lines.extend(_indent_block(probes.rstrip(), 10).splitlines())
     deployment_lines.extend(
         [
@@ -321,6 +499,20 @@ def _generate_base_files(
     ]
     if observability_mode == "app-native":
         resources.insert(4, "servicemonitor.yaml")
+    
+    # Add database addon resources if enabled
+    if inp.addon_database:
+        # Insert database files after serviceaccount
+        resources.insert(2, "database-secret.yaml")
+        if inp.addon_database == "postgres":
+            resources.insert(3, "database-statefulset.yaml")
+            resources.insert(4, "database-service.yaml")
+        else:  # mysql
+            resources.insert(3, "database-deployment.yaml")
+            resources.insert(4, "database-service.yaml")
+        # Insert migration job last if migration command is set
+        if inp.addon_migration_command:
+            resources.append("database-migration-job.yaml")
 
     files: dict[str, str] = {
         "kustomization.yaml": (
@@ -488,7 +680,189 @@ def _generate_base_files(
             namespace=inp.namespace,
         )
 
+    # Add database addon files if enabled
+    if inp.addon_database:
+        files["database-secret.yaml"] = _generate_database_secret(inp.addon_database)
+        
+        # Generate database StatefulSet or Deployment
+        if inp.addon_database == "postgres":
+            files["database-statefulset.yaml"] = _render_template(
+                """
+                apiVersion: apps/v1
+                kind: StatefulSet
+                metadata:
+                  name: {name}-postgres
+                  namespace: {namespace}
+                  labels:
+                    app.kubernetes.io/name: {name}
+                    app.kubernetes.io/component: database
+                spec:
+                  serviceName: {name}-postgres
+                  replicas: 1
+                  selector:
+                    matchLabels:
+                      app.kubernetes.io/name: {name}
+                      app.kubernetes.io/component: database
+                  template:
+                    metadata:
+                      labels:
+                        app.kubernetes.io/name: {name}
+                        app.kubernetes.io/component: database
+                    spec:
+                      serviceAccountName: {name}
+                      containers:
+                        - name: postgres
+                          image: postgres:15-alpine
+                          imagePullPolicy: IfNotPresent
+                          ports:
+                            - containerPort: 5432
+                              name: postgres
+                          env:
+                            - name: POSTGRES_USER
+                              valueFrom:
+                                secretKeyRef:
+                                  name: db-credentials
+                                  key: POSTGRES_USER
+                            - name: POSTGRES_PASSWORD
+                              valueFrom:
+                                secretKeyRef:
+                                  name: db-credentials
+                                  key: POSTGRES_PASSWORD
+                            - name: POSTGRES_DB
+                              valueFrom:
+                                secretKeyRef:
+                                  name: db-credentials
+                                  key: POSTGRES_DB
+                          volumeMounts:
+                            - name: data
+                              mountPath: /var/lib/postgresql/data
+                              subPath: postgres
+                          resources:
+                            requests:
+                              cpu: 100m
+                              memory: 256Mi
+                            limits:
+                              cpu: 500m
+                              memory: 512Mi
+                  volumeClaimTemplates:
+                    - metadata:
+                        name: data
+                      spec:
+                        accessModes:
+                          - ReadWriteOnce
+                        resources:
+                          requests:
+                            storage: 10Gi
+                """,
+                name=inp.name,
+                namespace=inp.namespace,
+            )
+        else:  # mysql
+            files["database-deployment.yaml"] = _render_template(
+                """
+                apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: {name}-mysql
+                  namespace: {namespace}
+                  labels:
+                    app.kubernetes.io/name: {name}
+                    app.kubernetes.io/component: database
+                spec:
+                  replicas: 1
+                  selector:
+                    matchLabels:
+                      app.kubernetes.io/name: {name}
+                      app.kubernetes.io/component: database
+                  template:
+                    metadata:
+                      labels:
+                        app.kubernetes.io/name: {name}
+                        app.kubernetes.io/component: database
+                    spec:
+                      serviceAccountName: {name}
+                      containers:
+                        - name: mysql
+                          image: mysql:8.0-alpine
+                          imagePullPolicy: IfNotPresent
+                          ports:
+                            - containerPort: 3306
+                              name: mysql
+                          env:
+                            - name: MYSQL_ROOT_PASSWORD
+                              valueFrom:
+                                secretKeyRef:
+                                  name: db-credentials
+                                  key: MYSQL_ROOT_PASSWORD
+                            - name: MYSQL_USER
+                              valueFrom:
+                                secretKeyRef:
+                                  name: db-credentials
+                                  key: MYSQL_USER
+                            - name: MYSQL_PASSWORD
+                              valueFrom:
+                                secretKeyRef:
+                                  name: db-credentials
+                                  key: MYSQL_PASSWORD
+                            - name: MYSQL_DATABASE
+                              valueFrom:
+                                secretKeyRef:
+                                  name: db-credentials
+                                  key: MYSQL_DATABASE
+                          volumeMounts:
+                            - name: data
+                              mountPath: /var/lib/mysql
+                          resources:
+                            requests:
+                              cpu: 100m
+                              memory: 256Mi
+                            limits:
+                              cpu: 500m
+                              memory: 512Mi
+                      volumes:
+                        - name: data
+                          emptyDir: {{}}
+                """,
+                name=inp.name,
+                namespace=inp.namespace,
+            )
+        
+        # Generate database Service
+        db_port = 5432 if inp.addon_database == "postgres" else 3306
+        db_service_name = f"{inp.name}-postgres" if inp.addon_database == "postgres" else f"{inp.name}-mysql"
+        files["database-service.yaml"] = _render_template(
+            """
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: {service_name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/component: database
+            spec:
+              type: ClusterIP
+              selector:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/component: database
+              ports:
+                - name: {db_type}
+                  port: {db_port}
+                  targetPort: {db_port}
+            """,
+            service_name=db_service_name,
+            namespace=inp.namespace,
+            name=inp.name,
+            db_type="postgres" if inp.addon_database == "postgres" else "mysql",
+            db_port=str(db_port),
+        )
+        
+        # Generate migration job if migration command is set
+        if inp.addon_migration_command:
+            files["database-migration-job.yaml"] = _generate_migration_job(inp)
+
     return files
+
 
 
 def _generate_overlay_files(
