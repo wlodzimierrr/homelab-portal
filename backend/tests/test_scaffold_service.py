@@ -255,3 +255,57 @@ def test_build_appproject_addition_includes_workloads_repo_url() -> None:
     inp = _make_input(workloads_repo_url="https://github.com/org/wl.git")
     result = build_appproject_addition(_APPPROJECT_YAML, inp)
     assert "https://github.com/org/wl.git" in result
+
+
+# ---------------------------------------------------------------------------
+# generate_gitops_new_files — database add-on
+# ---------------------------------------------------------------------------
+
+
+def test_db_addon_postgres_files_present() -> None:
+    inp = _make_input(addon_database="postgres", addon_migration_command="alembic upgrade head")
+    files = generate_gitops_new_files(inp)
+    assert "apps/my-svc/base/database-secret.yaml" in files
+    assert "apps/my-svc/base/database-statefulset.yaml" in files
+    assert "apps/my-svc/base/database-service.yaml" in files
+    assert "apps/my-svc/base/database-migration-job.yaml" in files
+
+
+def test_db_addon_postgres_in_kustomization() -> None:
+    inp = _make_input(addon_database="postgres", addon_migration_command="alembic upgrade head")
+    files = generate_gitops_new_files(inp)
+    kust = files["apps/my-svc/base/kustomization.yaml"]
+    assert "database-secret.yaml" in kust
+    assert "database-statefulset.yaml" in kust
+    assert "database-service.yaml" in kust
+    assert "database-migration-job.yaml" in kust
+
+
+def test_db_addon_postgres_env_vars_in_deployment() -> None:
+    inp = _make_input(addon_database="postgres", addon_migration_command="alembic upgrade head")
+    files = generate_gitops_new_files(inp)
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "DATABASE_URL" in deployment
+    assert "POSTGRES_USER" in deployment
+
+
+def test_db_addon_mysql_files_present() -> None:
+    inp = _make_input(addon_database="mysql", addon_migration_command='mysql -e "SOURCE /init.sql"')
+    files = generate_gitops_new_files(inp)
+    assert "apps/my-svc/base/database-secret.yaml" in files
+    assert "apps/my-svc/base/database-service.yaml" in files
+    assert "apps/my-svc/base/database-migration-job.yaml" in files
+
+
+def test_db_addon_mysql_env_vars_in_deployment() -> None:
+    inp = _make_input(addon_database="mysql", addon_migration_command='mysql -e "SOURCE /init.sql"')
+    files = generate_gitops_new_files(inp)
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "DATABASE_URL" in deployment
+    assert "MYSQL_DATABASE" in deployment
+
+
+def test_db_addon_absent_without_flag() -> None:
+    files = generate_gitops_new_files(_make_input())
+    db_files = [k for k in files if "database" in k]
+    assert db_files == []
