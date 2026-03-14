@@ -21,6 +21,9 @@ interface WizardFormState {
   namespace: string
   devHost: string
   prodHost: string
+  addonDatabase: boolean
+  addonEngine: 'postgres' | 'mysql'
+  addonMigrationCommand: string
 }
 
 const EMPTY_FORM: WizardFormState = {
@@ -34,6 +37,9 @@ const EMPTY_FORM: WizardFormState = {
   namespace: '',
   devHost: '',
   prodHost: '',
+  addonDatabase: false,
+  addonEngine: 'postgres',
+  addonMigrationCommand: '',
 }
 
 const STEPS: Step[] = ['basic', 'template', 'config', 'preview']
@@ -196,23 +202,88 @@ function TemplateStep({
   ]
 
   return (
-    <div className="space-y-3">
-      {options.map((opt) => (
-        <button
-          key={opt.key}
-          type="button"
-          onClick={() => onChange({ template: opt.key })}
-          className={cn(
-            'w-full rounded-md border p-4 text-left transition-colors',
-            form.template === opt.key
-              ? 'border-primary bg-primary/5'
-              : 'border-border hover:border-primary/50',
-          )}
-        >
-          <p className="font-medium">{opt.title}</p>
-          <p className="mt-1 text-sm text-muted-foreground">{opt.description}</p>
-        </button>
-      ))}
+    <div className="space-y-6">
+      <div className="space-y-3">
+        {options.map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            onClick={() => onChange({ template: opt.key })}
+            className={cn(
+              'w-full rounded-md border p-4 text-left transition-colors',
+              form.template === opt.key
+                ? 'border-primary bg-primary/5'
+                : 'border-border hover:border-primary/50',
+            )}
+          >
+            <p className="font-medium">{opt.title}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{opt.description}</p>
+          </button>
+        ))}
+      </div>
+
+      <div className="space-y-3 border-t border-border pt-6">
+        <FieldLabel hint="Optional: Add a database StatefulSet with persistence">Add-ons</FieldLabel>
+        
+        <div className="flex items-center gap-3 rounded-md border border-border p-3">
+          <input
+            type="checkbox"
+            id="addon-database"
+            checked={form.addonDatabase}
+            onChange={(e) => onChange({ addonDatabase: e.target.checked })}
+            className="h-4 w-4 rounded border-border"
+          />
+          <label htmlFor="addon-database" className="flex-1 cursor-pointer text-sm font-medium">
+            Database add-on (StatefulSet + Secret)
+          </label>
+        </div>
+
+        {form.addonDatabase && (
+          <div className="space-y-3 rounded-md bg-muted/40 p-4">
+            <div>
+              <label htmlFor="addon-engine" className="block text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Database engine
+              </label>
+              <select
+                id="addon-engine"
+                value={form.addonEngine}
+                onChange={(e) => onChange({ addonEngine: e.target.value as 'postgres' | 'mysql' })}
+                className="mt-2 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+              >
+                <option value="postgres">PostgreSQL 17 (with Alembic migrations)</option>
+                <option value="mysql">MySQL 8.0</option>
+              </select>
+            </div>
+
+            {form.template === 'python-fastapi' && (
+              <div>
+                <label htmlFor="addon-migration" className="block text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Migration command <span className="text-muted-foreground font-normal">(optional)</span>
+                </label>
+                <input
+                  id="addon-migration"
+                  type="text"
+                  value={form.addonMigrationCommand}
+                  onChange={(e) => onChange({ addonMigrationCommand: e.target.value })}
+                  placeholder={form.addonEngine === 'postgres' ? 'alembic upgrade head' : 'mysql -e "SOURCE /init.sql"'}
+                  className="mt-2 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {form.addonEngine === 'postgres'
+                    ? 'Runs in a Kubernetes Job with automatic Argo CD sync hook. Defaults to `alembic upgrade head`.'
+                    : 'Runs in a Kubernetes Job. Defaults to basic MySQL initialization.'}
+                </p>
+              </div>
+            )}
+
+            {form.template === 'static-nginx' && (
+              <p className="rounded-sm bg-amber-500/10 px-2 py-1 text-xs text-amber-900 dark:text-amber-200">
+                Migration commands are only supported for backend templates (Python + FastAPI). Database will be created but no migration job will run.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -478,6 +549,10 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
     namespace: form.namespace.trim() || undefined,
     devHost: form.devHost.trim() || undefined,
     prodHost: form.prodHost.trim() || undefined,
+    addonDatabase: form.addonDatabase ? form.addonEngine : undefined,
+    addonMigrationCommand: form.addonDatabase && form.addonMigrationCommand.trim() 
+      ? form.addonMigrationCommand.trim() 
+      : undefined,
   })
 
   const goNext = useCallback(async () => {
