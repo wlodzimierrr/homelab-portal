@@ -207,13 +207,13 @@ function TemplateStep({
       key: 'postgres',
       title: 'PostgreSQL 17',
       description:
-        'Standalone PostgreSQL 17 database. StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials stub. No ingress — connects to other services in-cluster.',
+        'Standalone PostgreSQL 17 database. StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials stub. Ingress-derived observability mode, single prod environment.',
     },
     {
       key: 'mysql',
       title: 'MySQL 8.0',
       description:
-        'Standalone MySQL 8.0 database. StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials stub. No ingress — connects to other services in-cluster.',
+        'Standalone MySQL 8.0 database. StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials stub. Ingress-derived observability mode, single prod environment.',
     },
   ]
 
