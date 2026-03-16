@@ -6786,6 +6786,9 @@ class ScaffoldServiceRequest(BaseModel):
     dev_host: str = Field(alias="devHost", default="")
     prod_host: str = Field(alias="prodHost", default="")
     public_host: str = Field(alias="publicHost", default="")
+    db_username: str = Field(alias="dbUsername", default="")
+    db_password: str = Field(alias="dbPassword", default="")
+    db_name: str = Field(alias="dbName", default="")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -6837,6 +6840,9 @@ def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInp
         prod_host=prod_host,
         public_host=public_host,
         workloads_repo_url=_workloads_gitops_repo_url(repo_slug),
+        db_username=payload.db_username.strip() or "appuser",
+        db_password=payload.db_password.strip() or "changeme",
+        db_name=payload.db_name.strip() or "appdb",
     )
 
 

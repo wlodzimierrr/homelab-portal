@@ -62,6 +62,9 @@ class ScaffoldServiceInput:
     prod_host: str
     public_host: str
     workloads_repo_url: str
+    db_username: str = "appuser"
+    db_password: str = "changeme"
+    db_name: str = "appdb"
 
 
 def validate_service_name(name: str) -> None:
@@ -322,13 +325,16 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
               namespace: {namespace}
             type: Opaque
             stringData:
-              POSTGRES_USER: appuser
-              POSTGRES_PASSWORD: changeme
-              POSTGRES_DB: appdb
+              POSTGRES_USER: {db_username}
+              POSTGRES_PASSWORD: {db_password}
+              POSTGRES_DB: {db_name}
             sops:
             """,
             name=inp.name,
             namespace=inp.namespace,
+            db_username=inp.db_username,
+            db_password=inp.db_password,
+            db_name=inp.db_name,
         )
         statefulset_content = _render_template(
             """
@@ -411,14 +417,17 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
               namespace: {namespace}
             type: Opaque
             stringData:
-              MYSQL_ROOT_PASSWORD: changeme
-              MYSQL_USER: appuser
-              MYSQL_PASSWORD: changeme
-              MYSQL_DATABASE: appdb
+              MYSQL_ROOT_PASSWORD: {db_password}
+              MYSQL_USER: {db_username}
+              MYSQL_PASSWORD: {db_password}
+              MYSQL_DATABASE: {db_name}
             sops:
             """,
             name=inp.name,
             namespace=inp.namespace,
+            db_username=inp.db_username,
+            db_password=inp.db_password,
+            db_name=inp.db_name,
         )
         statefulset_content = _render_template(
             """
