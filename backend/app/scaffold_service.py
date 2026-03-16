@@ -137,7 +137,7 @@ def update_kustomization_resources(existing: str, resource_name: str) -> str:
     has_resources = any(line.strip() == "resources:" for line in lines)
     if not has_resources:
         raise ScaffoldError(
-            "Expected resources: block in environments/dev/workloads/kustomization.yaml.",
+            "Expected resources: block in workloads kustomization.yaml.",
             status_code=502,
         )
 

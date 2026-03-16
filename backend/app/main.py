@@ -6770,8 +6770,13 @@ def get_service_logs_quickview(
 # ---------------------------------------------------------------------------
 
 _WORKLOADS_KUSTOMIZATION_PATH = "environments/dev/workloads/kustomization.yaml"
+_WORKLOADS_PROD_KUSTOMIZATION_PATH = "environments/prod/workloads/kustomization.yaml"
 _WORKLOADS_APPPROJECT_PATH = "bootstrap/project-homelab.yaml"
 _WORKLOADS_CATALOG_PATH = "services.yaml"
+
+
+def _kustomization_path_for(inp: "ScaffoldServiceInput") -> str:
+    return _WORKLOADS_PROD_KUSTOMIZATION_PATH if inp.template in ("postgres", "mysql") else _WORKLOADS_KUSTOMIZATION_PATH
 
 
 class ScaffoldServiceRequest(BaseModel):
@@ -6858,7 +6863,8 @@ def scaffold_preview(
         validate_service_name(inp.name)
 
         git_provider = build_default_git_provider()
-        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_KUSTOMIZATION_PATH)
+        kustomization_path = _kustomization_path_for(inp)
+        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)
         appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)
         services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
 
@@ -6880,7 +6886,7 @@ def scaffold_preview(
         for path, content in sorted(new_files.items())
     ]
     preview_files += [
-        ScaffoldPreviewFile(path=_WORKLOADS_KUSTOMIZATION_PATH, content=updated_kustomization, changeType="modify"),
+        ScaffoldPreviewFile(path=kustomization_path, content=updated_kustomization, changeType="modify"),
         ScaffoldPreviewFile(path=_WORKLOADS_APPPROJECT_PATH, content=updated_appproject, changeType="modify"),
         ScaffoldPreviewFile(path=_WORKLOADS_CATALOG_PATH, content=updated_services_yaml, changeType="modify"),
     ]
@@ -6905,7 +6911,8 @@ def scaffold_submit(
         validate_service_name(inp.name)
 
         git_provider = build_default_git_provider()
-        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_KUSTOMIZATION_PATH)
+        kustomization_path = _kustomization_path_for(inp)
+        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)
         appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)
         services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
 
@@ -6926,7 +6933,7 @@ def scaffold_submit(
 
     all_files: dict[str, str] = {
         **new_files,
-        _WORKLOADS_KUSTOMIZATION_PATH: updated_kustomization,
+        kustomization_path: updated_kustomization,
         _WORKLOADS_APPPROJECT_PATH: updated_appproject,
         _WORKLOADS_CATALOG_PATH: updated_services_yaml,
     }
