@@ -29,13 +29,13 @@ _TEMPLATES: dict[str, dict[str, object]] = {
         "db_port": 5432,
         "db_image": "postgres:17-alpine",
         "db_engine": "postgres",
-        "default_observability_mode": "no-http",
+        "default_observability_mode": "ingress-derived",
     },
     "mysql": {
         "db_port": 3306,
         "db_image": "mysql:8.0",
         "db_engine": "mysql",
-        "default_observability_mode": "no-http",
+        "default_observability_mode": "ingress-derived",
     },
 }
 
@@ -179,7 +179,26 @@ def build_catalog_entry_addition(existing_services_yaml: str, inp: ScaffoldServi
     observability_mode = str(_TEMPLATES[inp.template]["default_observability_mode"])
     display_name = " ".join(word.capitalize() for word in inp.name.split("-"))
     repo_url = inp.repo_url or inp.workloads_repo_url
-    prod_public_host_line = f"        public_host: {_yaml_string(inp.public_host)}\n" if inp.public_host else ""
+    is_database = inp.template in ("postgres", "mysql")
+    if is_database:
+        envs_section = (
+            "    envs:\n"
+            "      - name: prod\n"
+            f"        namespace: {inp.namespace}\n"
+            f"        argo_app: {inp.name}-prod\n"
+        )
+    else:
+        prod_public_host_line = f"        public_host: {_yaml_string(inp.public_host)}\n" if inp.public_host else ""
+        envs_section = (
+            "    envs:\n"
+            "      - name: dev\n"
+            f"        namespace: {inp.namespace}\n"
+            f"        argo_app: {inp.name}-dev\n"
+            "      - name: prod\n"
+            f"        namespace: {inp.namespace}\n"
+            f"        argo_app: {inp.name}-prod\n"
+            f"{prod_public_host_line}"
+        )
     entry = (
         f"  - service_id: {inp.name}\n"
         f"    name: {_yaml_string(display_name)}\n"
@@ -190,14 +209,7 @@ def build_catalog_entry_addition(existing_services_yaml: str, inp: ScaffoldServi
         f"    description: {_yaml_string(inp.description)}\n"
         "    observability:\n"
         f"      mode: {observability_mode}\n"
-        "    envs:\n"
-        "      - name: dev\n"
-        f"        namespace: {inp.namespace}\n"
-        f"        argo_app: {inp.name}-dev\n"
-        "      - name: prod\n"
-        f"        namespace: {inp.namespace}\n"
-        f"        argo_app: {inp.name}-prod\n"
-        f"{prod_public_host_line}"
+        f"{envs_section}"
     )
     suffix = "" if existing_services_yaml.endswith("\n") else "\n"
     return existing_services_yaml + suffix + entry
@@ -256,37 +268,25 @@ def _generate_database_gitops_files(inp: ScaffoldServiceInput) -> dict[str, str]
     for rel_path, content in _generate_database_base_files(inp).items():
         files[f"{base_prefix}/{rel_path}"] = content
 
-    for env_name in ("dev", "prod"):
-        env_prefix = f"apps/{inp.name}/envs/{env_name}"
-        files[f"{env_prefix}/kustomization.yaml"] = _render_template(
-            """
-            apiVersion: kustomize.config.k8s.io/v1beta1
-            kind: Kustomization
-            resources:
-              - ../../base
-            commonLabels:
-              homelab.env: {env_name}
-            """,
-            env_name=env_name,
-        )
+    env_prefix = f"apps/{inp.name}/envs/prod"
+    files[f"{env_prefix}/kustomization.yaml"] = _render_template(
+        """
+        apiVersion: kustomize.config.k8s.io/v1beta1
+        kind: Kustomization
+        resources:
+          - ../../base
+        commonLabels:
+          homelab.env: {env_name}
+        """,
+        env_name="prod",
+    )
 
-    files[f"environments/dev/workloads/{inp.name}-app.yaml"] = _generate_application_manifest(
-        app_name=f"{inp.name}-dev",
+    files[f"environments/prod/workloads/{inp.name}-app.yaml"] = _generate_application_manifest(
+        app_name=f"{inp.name}-prod",
         project_name=inp.name,
-        path=f"apps/{inp.name}/envs/dev",
+        path=f"apps/{inp.name}/envs/prod",
         namespace=inp.namespace,
         repo_url=inp.workloads_repo_url,
-    )
-    files[f"environments/prod/workloads/{inp.name}-app.yaml"] = (
-        "# Generated for future prod activation.\n"
-        "# Keep environments/prod/workloads/kustomization.yaml empty while single-cluster safety mode is active.\n"
-        + _generate_application_manifest(
-            app_name=f"{inp.name}-prod",
-            project_name=inp.name,
-            path=f"apps/{inp.name}/envs/prod",
-            namespace=inp.namespace,
-            repo_url=inp.workloads_repo_url,
-        )
     )
 
     return files

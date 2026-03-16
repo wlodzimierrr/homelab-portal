@@ -322,7 +322,7 @@ def test_postgres_template_kustomization_resources() -> None:
 def test_postgres_template_argocd_apps_generated() -> None:
     inp = _make_input(template="postgres")
     files = generate_gitops_new_files(inp)
-    assert "environments/dev/workloads/my-svc-app.yaml" in files
+    assert "environments/dev/workloads/my-svc-app.yaml" not in files
     assert "environments/prod/workloads/my-svc-app.yaml" in files
 
 
@@ -362,17 +362,31 @@ def test_mysql_template_credentials_secret_has_mysql_keys() -> None:
 
 
 # ---------------------------------------------------------------------------
-# build_catalog_entry_addition — database templates use no-http mode
+# build_catalog_entry_addition — database templates use ingress-derived mode, single env
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_entry_postgres_uses_no_http_observability() -> None:
+def test_catalog_entry_postgres_uses_ingress_derived_observability() -> None:
     inp = _make_input(template="postgres")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "mode: no-http" in result
+    assert "mode: ingress-derived" in result
 
 
-def test_catalog_entry_mysql_uses_no_http_observability() -> None:
+def test_catalog_entry_mysql_uses_ingress_derived_observability() -> None:
     inp = _make_input(template="mysql")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "mode: no-http" in result
+    assert "mode: ingress-derived" in result
+
+
+def test_catalog_entry_postgres_single_env() -> None:
+    inp = _make_input(template="postgres")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "name: prod" in result
+    assert "name: dev" not in result
+
+
+def test_catalog_entry_mysql_single_env() -> None:
+    inp = _make_input(template="mysql")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "name: prod" in result
+    assert "name: dev" not in result
