@@ -22,7 +22,7 @@ def _make_input(**overrides: object) -> ScaffoldServiceInput:
         "template": "python-fastapi",
         "namespace": "my-svc",
         "dev_host": "my-svc.dev.homelab.local",
-        "prod_host": "my-svc.homelab.local",
+        "prod_host": "",
         "public_host": "my-svc.homelab.local",
         "workloads_repo_url": "https://github.com/example/workloads.git",
     }
