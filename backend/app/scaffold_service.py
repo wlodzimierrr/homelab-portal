@@ -345,6 +345,7 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
               namespace: {namespace}
               labels:
                 app.kubernetes.io/name: {name}
+                app.kubernetes.io/instance: {name}
             spec:
               serviceName: {name}
               replicas: 1
@@ -438,6 +439,7 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
               namespace: {namespace}
               labels:
                 app.kubernetes.io/name: {name}
+                app.kubernetes.io/instance: {name}
             spec:
               serviceName: {name}
               replicas: 1
@@ -546,6 +548,7 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
               namespace: {namespace}
               labels:
                 app.kubernetes.io/name: {name}
+                app.kubernetes.io/instance: {name}
             spec:
               type: ClusterIP
               selector:
@@ -674,6 +677,7 @@ def _generate_base_files(
         f"  namespace: {inp.namespace}",
         "  labels:",
         f"    app.kubernetes.io/name: {inp.name}",
+        f"    app.kubernetes.io/instance: {inp.name}",
         "spec:",
         "  replicas: 1",
         "  selector:",
@@ -753,6 +757,7 @@ def _generate_base_files(
               namespace: {namespace}
               labels:
                 app.kubernetes.io/name: {name}
+                app.kubernetes.io/instance: {name}
             spec:
               type: ClusterIP
               selector:
