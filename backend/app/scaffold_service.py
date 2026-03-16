@@ -313,7 +313,7 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     if is_postgres:
         secret_content = _render_template(
             """
-            # SOPS-encrypted Secret stub — fill values then encrypt with: sops -e -i credentials-secret.yaml
+            # SOPS-encrypted Secret stub — fill values then run: sops -e -i credentials-secret.yaml
             # See docs/runbooks/sops-secrets.md
             apiVersion: v1
             kind: Secret
@@ -325,6 +325,7 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
               POSTGRES_USER: appuser
               POSTGRES_PASSWORD: changeme
               POSTGRES_DB: appdb
+            sops:
             """,
             name=inp.name,
             namespace=inp.namespace,
@@ -401,7 +402,7 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     else:  # mysql
         secret_content = _render_template(
             """
-            # SOPS-encrypted Secret stub — fill values then encrypt with: sops -e -i credentials-secret.yaml
+            # SOPS-encrypted Secret stub — fill values then run: sops -e -i credentials-secret.yaml
             # See docs/runbooks/sops-secrets.md
             apiVersion: v1
             kind: Secret
@@ -414,6 +415,7 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
               MYSQL_USER: appuser
               MYSQL_PASSWORD: changeme
               MYSQL_DATABASE: appdb
+            sops:
             """,
             name=inp.name,
             namespace=inp.namespace,

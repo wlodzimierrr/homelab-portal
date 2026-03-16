@@ -361,6 +361,18 @@ def test_mysql_template_credentials_secret_has_mysql_keys() -> None:
     assert "MYSQL_DATABASE" in secret
 
 
+def test_postgres_template_credentials_secret_has_sops_block() -> None:
+    inp = _make_input(template="postgres")
+    secret = generate_gitops_new_files(inp)["apps/my-svc/base/credentials-secret.yaml"]
+    assert "sops:" in secret
+
+
+def test_mysql_template_credentials_secret_has_sops_block() -> None:
+    inp = _make_input(template="mysql")
+    secret = generate_gitops_new_files(inp)["apps/my-svc/base/credentials-secret.yaml"]
+    assert "sops:" in secret
+
+
 # ---------------------------------------------------------------------------
 # build_catalog_entry_addition — database templates use ingress-derived mode, single env
 # ---------------------------------------------------------------------------
