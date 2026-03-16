@@ -817,6 +817,9 @@ export interface ScaffoldServiceRequest {
   devHost?: string
   prodHost?: string
   publicHost?: string
+  dbUsername?: string
+  dbPassword?: string
+  dbName?: string
 }
 
 export interface ScaffoldPreviewFile {

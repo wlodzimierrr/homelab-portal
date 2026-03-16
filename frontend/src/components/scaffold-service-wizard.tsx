@@ -30,6 +30,9 @@ interface WizardFormState {
   devHost: string
   prodHost: string
   publicHost: string
+  dbUsername: string
+  dbPassword: string
+  dbName: string
 }
 
 const EMPTY_FORM: WizardFormState = {
@@ -44,6 +47,9 @@ const EMPTY_FORM: WizardFormState = {
   devHost: '',
   prodHost: '',
   publicHost: '',
+  dbUsername: '',
+  dbPassword: '',
+  dbName: '',
 }
 
 const STEPS: Step[] = ['basic', 'template', 'config', 'preview']
@@ -287,6 +293,45 @@ function ConfigStep({
           placeholder={form.name || 'my-service'}
         />
       </div>
+      {isDb && (
+        <>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <FieldLabel htmlFor="svc-db-username" hint="Default: appuser">
+                Database username
+              </FieldLabel>
+              <TextInput
+                id="svc-db-username"
+                value={form.dbUsername}
+                onChange={(v) => onChange({ dbUsername: v })}
+                placeholder="appuser"
+              />
+            </div>
+            <div>
+              <FieldLabel htmlFor="svc-db-name" hint="Default: appdb">
+                Database name
+              </FieldLabel>
+              <TextInput
+                id="svc-db-name"
+                value={form.dbName}
+                onChange={(v) => onChange({ dbName: v })}
+                placeholder="appdb"
+              />
+            </div>
+          </div>
+          <div>
+            <FieldLabel htmlFor="svc-db-password" hint="Written to SOPS-encrypted credentials secret">
+              Database password
+            </FieldLabel>
+            <TextInput
+              id="svc-db-password"
+              value={form.dbPassword}
+              onChange={(v) => onChange({ dbPassword: v })}
+              placeholder="changeme"
+            />
+          </div>
+        </>
+      )}
       {isDb ? (
         <div>
           <FieldLabel htmlFor="svc-prod-host" hint={`Default: ${form.name || '<name>'}.homelab.local`}>
@@ -537,6 +582,9 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
     devHost: form.devHost.trim() || undefined,
     prodHost: form.prodHost.trim() || undefined,
     publicHost: form.publicHost.trim() || undefined,
+    dbUsername: form.dbUsername.trim() || undefined,
+    dbPassword: form.dbPassword.trim() || undefined,
+    dbName: form.dbName.trim() || undefined,
   })
 
   const goNext = useCallback(async () => {
