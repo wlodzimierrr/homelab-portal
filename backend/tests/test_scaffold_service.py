@@ -380,13 +380,13 @@ def test_catalog_entry_mysql_uses_ingress_derived_observability() -> None:
 
 def test_catalog_entry_postgres_single_env() -> None:
     inp = _make_input(template="postgres")
-    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "name: prod" in result
-    assert "name: dev" not in result
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: prod" in new_entry
+    assert "name: dev" not in new_entry
 
 
 def test_catalog_entry_mysql_single_env() -> None:
     inp = _make_input(template="mysql")
-    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "name: prod" in result
-    assert "name: dev" not in result
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: prod" in new_entry
+    assert "name: dev" not in new_entry
