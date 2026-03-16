@@ -287,21 +287,10 @@ function ConfigStep({
           placeholder={form.name || 'my-service'}
         />
       </div>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div>
-          <FieldLabel htmlFor="svc-dev-host" hint={`Default: ${form.name || '<name>'}.dev.homelab.local`}>
-            Dev ingress host
-          </FieldLabel>
-          <TextInput
-            id="svc-dev-host"
-            value={form.devHost}
-            onChange={(v) => onChange({ devHost: v })}
-            placeholder={`${form.name || 'my-service'}.dev.homelab.local`}
-          />
-        </div>
+      {isDb ? (
         <div>
           <FieldLabel htmlFor="svc-prod-host" hint={`Default: ${form.name || '<name>'}.homelab.local`}>
-            Prod ingress host
+            Ingress host
           </FieldLabel>
           <TextInput
             id="svc-prod-host"
@@ -310,7 +299,32 @@ function ConfigStep({
             placeholder={`${form.name || 'my-service'}.homelab.local`}
           />
         </div>
-      </div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <FieldLabel htmlFor="svc-dev-host" hint={`Default: ${form.name || '<name>'}.dev.homelab.local`}>
+              Dev ingress host
+            </FieldLabel>
+            <TextInput
+              id="svc-dev-host"
+              value={form.devHost}
+              onChange={(v) => onChange({ devHost: v })}
+              placeholder={`${form.name || 'my-service'}.dev.homelab.local`}
+            />
+          </div>
+          <div>
+            <FieldLabel htmlFor="svc-prod-host" hint={`Default: ${form.name || '<name>'}.homelab.local`}>
+              Prod ingress host
+            </FieldLabel>
+            <TextInput
+              id="svc-prod-host"
+              value={form.prodHost}
+              onChange={(v) => onChange({ prodHost: v })}
+              placeholder={`${form.name || 'my-service'}.homelab.local`}
+            />
+          </div>
+        </div>
+      )}
       <div>
         <FieldLabel
           htmlFor="svc-public-host"
