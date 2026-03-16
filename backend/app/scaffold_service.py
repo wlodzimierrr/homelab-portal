@@ -60,6 +60,7 @@ class ScaffoldServiceInput:
     namespace: str
     dev_host: str
     prod_host: str
+    public_host: str
     workloads_repo_url: str
 
 
@@ -178,6 +179,7 @@ def build_catalog_entry_addition(existing_services_yaml: str, inp: ScaffoldServi
     observability_mode = str(_TEMPLATES[inp.template]["default_observability_mode"])
     display_name = " ".join(word.capitalize() for word in inp.name.split("-"))
     repo_url = inp.repo_url or inp.workloads_repo_url
+    prod_public_host_line = f"        public_host: {_yaml_string(inp.public_host)}\n" if inp.public_host else ""
     entry = (
         f"  - service_id: {inp.name}\n"
         f"    name: {_yaml_string(display_name)}\n"
@@ -195,6 +197,7 @@ def build_catalog_entry_addition(existing_services_yaml: str, inp: ScaffoldServi
         "      - name: prod\n"
         f"        namespace: {inp.namespace}\n"
         f"        argo_app: {inp.name}-prod\n"
+        f"{prod_public_host_line}"
     )
     suffix = "" if existing_services_yaml.endswith("\n") else "\n"
     return existing_services_yaml + suffix + entry
@@ -976,6 +979,7 @@ def _generate_overlay_files(
     }
 
     if env_name == "prod":
+        ingress_host = inp.public_host or inp.prod_host
         files["patch-ingress.yaml"] = _render_template(
             """
             apiVersion: networking.k8s.io/v1
@@ -985,11 +989,11 @@ def _generate_overlay_files(
               namespace: {namespace}
             spec:
               rules:
-                - host: {prod_host}
+                - host: {ingress_host}
             """,
             name=inp.name,
             namespace=inp.namespace,
-            prod_host=inp.prod_host,
+            ingress_host=ingress_host,
         )
 
     return files

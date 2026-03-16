@@ -29,6 +29,7 @@ interface WizardFormState {
   namespace: string
   devHost: string
   prodHost: string
+  publicHost: string
 }
 
 const EMPTY_FORM: WizardFormState = {
@@ -42,6 +43,7 @@ const EMPTY_FORM: WizardFormState = {
   namespace: '',
   devHost: '',
   prodHost: '',
+  publicHost: '',
 }
 
 const STEPS: Step[] = ['basic', 'template', 'config', 'preview']
@@ -309,6 +311,20 @@ function ConfigStep({
           />
         </div>
       </div>
+      <div>
+        <FieldLabel
+          htmlFor="svc-public-host"
+          hint={`External DNS hostname written to patch-ingress.yaml. Default: ${form.name || '<name>'}.<PUBLIC_BASE_DOMAIN>`}
+        >
+          Public hostname
+        </FieldLabel>
+        <TextInput
+          id="svc-public-host"
+          value={form.publicHost}
+          onChange={(v) => onChange({ publicHost: v })}
+          placeholder={`${form.name || 'my-service'}.example.com`}
+        />
+      </div>
     </div>
   )
 }
@@ -506,6 +522,7 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
     namespace: form.namespace.trim() || undefined,
     devHost: form.devHost.trim() || undefined,
     prodHost: form.prodHost.trim() || undefined,
+    publicHost: form.publicHost.trim() || undefined,
   })
 
   const goNext = useCallback(async () => {

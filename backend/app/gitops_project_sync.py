@@ -52,6 +52,7 @@ class ProjectRegistryRecord:
     repo_url: str | None
     runbook_url: str | None
     observability_mode: str | None
+    public_host: str | None
     source: str
     source_ref: str
     last_synced_at: datetime
@@ -63,6 +64,7 @@ class ServiceCatalogEnvRecord:
     namespace: str
     app_label: str
     source_path: str | None
+    public_host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -287,12 +289,17 @@ def _load_service_catalog_metadata(
                     env_item.get("workload_ref"),
                     env_item.get("workloadRef"),
                 )
+                public_host = _first_nonempty_string(
+                    env_item.get("public_host"),
+                    env_item.get("publicHost"),
+                )
                 env_records.append(
                     ServiceCatalogEnvRecord(
                         env=env_name,
                         namespace=namespace,
                         app_label=app_label,
                         source_path=source_path,
+                        public_host=public_host,
                     )
                 )
 
@@ -410,6 +417,14 @@ def _discover_records_from_repo(
             )
             continue
 
+        # Look up public_host from the catalog's prod env entry when available
+        catalog_public_host: str | None = None
+        if service_metadata:
+            for env_rec in service_metadata.envs:
+                if env_rec.env == env_value:
+                    catalog_public_host = env_rec.public_host
+                    break
+
         records.append(
             ProjectRegistryRecord(
                 project_id=project_id,
@@ -423,6 +438,7 @@ def _discover_records_from_repo(
                 observability_mode=(
                     service_metadata.observability_mode if service_metadata else None
                 ),
+                public_host=catalog_public_host,
                 source=DEFAULT_SOURCE,
                 source_ref=_build_source_ref(repo_path, env_dir),
                 last_synced_at=synced_at,
@@ -464,6 +480,7 @@ def _discover_records_from_repo(
                     repo_url=service_metadata.repo_url,
                     runbook_url=service_metadata.runbook_url,
                     observability_mode=service_metadata.observability_mode,
+                    public_host=env_record.public_host,
                     source=DEFAULT_SOURCE,
                     source_ref=_build_source_ref(repo_path, source_target),
                     last_synced_at=synced_at,
@@ -546,11 +563,12 @@ def _upsert_project_registry_records(
                     repo_url,
                     runbook_url,
                     observability_mode,
+                    public_host,
                     source,
                     source_ref,
                     last_synced_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (project_id, env) DO UPDATE
                 SET project_name = EXCLUDED.project_name,
                     namespace = EXCLUDED.namespace,
@@ -559,6 +577,7 @@ def _upsert_project_registry_records(
                     repo_url = EXCLUDED.repo_url,
                     runbook_url = EXCLUDED.runbook_url,
                     observability_mode = EXCLUDED.observability_mode,
+                    public_host = EXCLUDED.public_host,
                     source = EXCLUDED.source,
                     source_ref = EXCLUDED.source_ref,
                     last_synced_at = EXCLUDED.last_synced_at,
@@ -575,6 +594,7 @@ def _upsert_project_registry_records(
                     row.repo_url,
                     row.runbook_url,
                     row.observability_mode,
+                    row.public_host,
                     row.source,
                     row.source_ref,
                     row.last_synced_at,

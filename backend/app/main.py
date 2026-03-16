@@ -377,6 +377,7 @@ class ServiceDetailResponse(BaseModel):
     source_ref: str | None = Field(default=None, alias="sourceRef")
     last_synced_at: str | None = Field(default=None, alias="lastSyncedAt")
     observability_mode: str | None = Field(default=None, alias="observabilityMode")
+    public_host: str | None = Field(default=None, alias="publicHost")
     deployment_lock: "DeploymentLockResponse | None" = Field(default=None, alias="deploymentLock")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -1528,7 +1529,7 @@ def _load_project_catalog_rows(
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT project_id, project_name, env, namespace, app_label, source_ref, observability_mode
+                SELECT project_id, project_name, env, namespace, app_label, source_ref, observability_mode, public_host
                 FROM project_registry
                 WHERE {where_clause}
                 ORDER BY project_id ASC, env ASC
@@ -1546,6 +1547,7 @@ def _load_project_catalog_rows(
             "app_label": row[4],
             "source_ref": row[5] if len(row) > 5 else None,
             "observability_mode": normalize_observability_mode(row[6] if len(row) > 6 else None),
+            "public_host": row[7] if len(row) > 7 else None,
         }
         for row in rows
     ]
@@ -4684,6 +4686,7 @@ def get_service(
     )
     observability_mode = project_rows[0].get("observability_mode") if project_rows else None
 
+    catalog_public_host = project_rows[0].get("public_host") if project_rows else None
     return ServiceDetailResponse(
         id=str(selected["service_id"]),
         name=str(selected["service_name"]),
@@ -4698,6 +4701,7 @@ def get_service(
         sourceRef=selected["source_ref"] if isinstance(selected["source_ref"], str) else None,
         lastSyncedAt=selected["last_synced_at"] if isinstance(selected["last_synced_at"], str) else None,
         observabilityMode=observability_mode if isinstance(observability_mode, str) else None,
+        publicHost=catalog_public_host if isinstance(catalog_public_host, str) else None,
         deploymentLock=_build_deployment_lock_response(active_lock),
     )
 
@@ -6781,6 +6785,7 @@ class ScaffoldServiceRequest(BaseModel):
     namespace: str = ""
     dev_host: str = Field(alias="devHost", default="")
     prod_host: str = Field(alias="prodHost", default="")
+    public_host: str = Field(alias="publicHost", default="")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -6817,6 +6822,8 @@ def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInp
     namespace = payload.namespace.strip() or name
     dev_host = payload.dev_host.strip() or f"{name}.dev.homelab.local"
     prod_host = payload.prod_host.strip() or f"{name}.homelab.local"
+    base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
+    public_host = payload.public_host.strip() or f"{name}.{base_domain}"
     return ScaffoldServiceInput(
         name=name,
         description=payload.description.strip(),
@@ -6828,6 +6835,7 @@ def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInp
         namespace=namespace,
         dev_host=dev_host,
         prod_host=prod_host,
+        public_host=public_host,
         workloads_repo_url=_workloads_gitops_repo_url(repo_slug),
     )
 
@@ -6960,4 +6968,229 @@ def scaffold_submit(
         branchName=branch_name,
         filesCommitted=sorted(all_files),
         initiatedAt=initiated_at.isoformat(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# T6.4.7 — Public hostname management
+# ---------------------------------------------------------------------------
+
+
+class UpdatePublicHostnameRequest(BaseModel):
+    public_host: str = Field(alias="publicHost")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class UpdatePublicHostnameResponse(BaseModel):
+    pr_url: str = Field(alias="prUrl")
+    pr_number: int = Field(alias="prNumber")
+    branch_name: str = Field(alias="branchName")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+def _read_current_public_host_from_services_yaml(services_yaml: str, service_id: str) -> str | None:
+    """Parse services.yaml and return the current prod public_host for the given service_id, or None."""
+    import yaml as _yaml
+    try:
+        data = _yaml.safe_load(services_yaml)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    for entry in (data.get("services") or []):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("service_id") != service_id:
+            continue
+        for env_entry in (entry.get("envs") or []):
+            if not isinstance(env_entry, dict):
+                continue
+            if env_entry.get("name") == "prod":
+                val = env_entry.get("public_host")
+                return str(val).strip() if val else None
+    return None
+
+
+def _read_current_host_from_patch_ingress(patch_ingress: str) -> str | None:
+    """Return the current host value from a patch-ingress.yaml, or None."""
+    import re as _re
+    match = _re.search(r"^\s*-\s*host:\s*(.+)$", patch_ingress, _re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def _update_services_yaml_public_host(services_yaml: str, service_id: str, new_host: str) -> str:
+    """Return services.yaml content with the prod public_host for service_id set to new_host.
+
+    Adds the field if absent; replaces it if present.  The file's existing whitespace
+    and ordering are preserved for all other entries.
+    """
+    import re as _re
+    from app.scaffold_service import _yaml_string as _ys
+
+    # --- locate the service block ----------------------------------------
+    # Pattern: find `  - service_id: <id>` then, within that block, find the
+    # prod env entry and update/insert public_host.
+
+    # We work line-by-line to avoid reformatting the entire file.
+    lines = services_yaml.splitlines(keepends=True)
+    in_service = False
+    in_prod_env = False
+    service_indent = ""
+    prod_env_start = -1  # index of "      - name: prod" line
+    public_host_line_idx = -1  # index of existing "        public_host: ..." line
+
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+
+        if stripped.startswith(f"service_id: {service_id}"):
+            in_service = True
+            service_indent = indent
+            in_prod_env = False
+            prod_env_start = -1
+            public_host_line_idx = -1
+            continue
+
+        if in_service:
+            # Detect a new top-level service entry (same or lesser indent) — stop
+            if stripped.startswith("- service_id:") and indent == service_indent:
+                break
+
+            if stripped.startswith("- name: prod"):
+                in_prod_env = True
+                prod_env_start = i
+                continue
+
+            if in_prod_env:
+                if stripped.startswith("- name:") and not stripped.startswith("- name: prod"):
+                    # moved to next env entry
+                    in_prod_env = False
+                    continue
+                if stripped.startswith("public_host:"):
+                    public_host_line_idx = i
+                    # don't break — keep scanning so we have the full picture
+
+    new_host_line = f"        public_host: {_ys(new_host)}\n"
+
+    if public_host_line_idx >= 0:
+        lines[public_host_line_idx] = new_host_line
+    elif prod_env_start >= 0:
+        # Insert after the last field of the prod env block.
+        # Find the end of the prod env block (next "- name:" or new service entry).
+        insert_after = prod_env_start
+        for j in range(prod_env_start + 1, len(lines)):
+            stripped_j = lines[j].lstrip()
+            if stripped_j.startswith("- name:") or stripped_j.startswith("- service_id:"):
+                break
+            if stripped_j and not stripped_j.startswith("#"):
+                insert_after = j
+        lines.insert(insert_after + 1, new_host_line)
+    else:
+        # Fallback: append to end (should not happen for valid catalog)
+        lines.append(new_host_line)
+
+    return "".join(lines)
+
+
+def _update_patch_ingress_host(patch_ingress: str, new_host: str) -> str:
+    """Replace the host value in patch-ingress.yaml."""
+    import re as _re
+    return _re.sub(
+        r"^(\s*-\s*host:\s*)(.+)$",
+        lambda m: f"{m.group(1)}{new_host}",
+        patch_ingress,
+        flags=_re.MULTILINE,
+    )
+
+
+@app.put(
+    "/services/{service_id}/public-hostname",
+    tags=["scaffold"],
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=UpdatePublicHostnameResponse,
+    responses={204: {"description": "No-op: hostname unchanged"}},
+)
+def update_service_public_hostname(
+    service_id: str,
+    payload: UpdatePublicHostnameRequest,
+    response: Response,
+    _admin: str = Depends(require_admin),
+) -> UpdatePublicHostnameResponse | None:
+    """Update the production public hostname for an existing service.
+
+    Creates a GitOps PR updating services.yaml and patch-ingress.yaml.
+    Returns 204 if the hostname is unchanged.
+    """
+    new_host = payload.public_host.strip()
+    if not new_host:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="publicHost must be non-empty")
+
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+    patch_ingress_path = f"apps/{service_id}/envs/prod/patch-ingress.yaml"
+
+    try:
+        git_provider = build_default_git_provider()
+        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
+        patch_ingress_raw = git_provider.read_file(workloads_repo, base_branch, patch_ingress_path)
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    # No-op check
+    current_catalog_host = _read_current_public_host_from_services_yaml(services_yaml_raw, service_id)
+    current_ingress_host = _read_current_host_from_patch_ingress(patch_ingress_raw)
+    if current_catalog_host == new_host and current_ingress_host == new_host:
+        response.status_code = status.HTTP_204_NO_CONTENT
+        return None
+
+    updated_services_yaml = _update_services_yaml_public_host(services_yaml_raw, service_id, new_host)
+    updated_patch_ingress = _update_patch_ingress_host(patch_ingress_raw, new_host)
+
+    initiated_at = datetime.now(tz=timezone.utc)
+    timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
+    branch_name = f"hostname/{service_id}-{timestamp}"
+    pr_title = f"feat(hostname): update {service_id} public hostname"
+    pr_body = (
+        f"## Public hostname update: {service_id}\n\n"
+        f"**New hostname:** `{new_host}`\n\n"
+        f"### Files changed\n"
+        f"- `{_WORKLOADS_CATALOG_PATH}` — updated `envs[prod].public_host`\n"
+        f"- `{patch_ingress_path}` — updated Ingress host field\n\n"
+        f"> **Note:** DNS record creation is out of scope. Point `{new_host}` at the "
+        f"cluster ingress IP after merging.\n"
+    )
+
+    all_files = {
+        _WORKLOADS_CATALOG_PATH: updated_services_yaml,
+        patch_ingress_path: updated_patch_ingress,
+    }
+
+    try:
+        git_provider.create_branch(workloads_repo, base_branch, branch_name)
+        git_provider.commit_to_branch(
+            workloads_repo,
+            branch_name,
+            all_files,
+            f"feat(hostname): update {service_id} public hostname to {new_host}",
+        )
+        pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitServiceAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitServiceConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GitServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return UpdatePublicHostnameResponse(
+        prUrl=pr["url"],
+        prNumber=pr["number"],
+        branchName=branch_name,
     )

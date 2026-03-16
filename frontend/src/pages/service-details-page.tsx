@@ -36,6 +36,8 @@ import {
   type ServiceRollbackCandidatesResponse,
   type ServiceRollbackResponse,
   type ServiceSetConfigResponse,
+  updateServicePublicHostname,
+  type UpdatePublicHostnameResponse,
 } from '@/lib/api'
 import { getDeploymentHistory, type DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import {
@@ -760,6 +762,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [configSubmitting, setConfigSubmitting] = useState(false)
   const [configSubmitError, setConfigSubmitError] = useState('')
   const [configSubmitResult, setConfigSubmitResult] = useState<ServiceSetConfigResponse | null>(null)
+  const [publicHostEditMode, setPublicHostEditMode] = useState(false)
+  const [publicHostValue, setPublicHostValue] = useState('')
+  const [publicHostSubmitting, setPublicHostSubmitting] = useState(false)
+  const [publicHostError, setPublicHostError] = useState('')
+  const [publicHostResult, setPublicHostResult] = useState<UpdatePublicHostnameResponse | null>(null)
   const [toastMessage, setToastMessage] = useState('')
   const [toastVariant, setToastVariant] = useState<'success' | 'error' | 'info'>('info')
 
@@ -867,6 +874,9 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       }
 
       setOverview(finalOverview)
+      if (serviceResult.status === 'fulfilled') {
+        setPublicHostValue(serviceResult.value.publicHost ?? '')
+      }
     } catch (requestError) {
       const message =
         requestError instanceof Error ? requestError.message : 'Failed to load service overview'
@@ -1368,6 +1378,28 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       void loadConfig(configEnv)
     }
   }, [configSupported, configEnv, loadConfig])
+
+  const submitPublicHostname = useCallback(async () => {
+    const trimmed = publicHostValue.trim()
+    if (!trimmed) return
+    setPublicHostSubmitting(true)
+    setPublicHostError('')
+    setPublicHostResult(null)
+    try {
+      const result = await updateServicePublicHostname(decodedServiceId, trimmed)
+      setPublicHostResult(result)
+      setPublicHostEditMode(false)
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 204) {
+        // No-op: hostname unchanged
+        setPublicHostEditMode(false)
+      } else {
+        setPublicHostError(err instanceof Error ? err.message : 'Failed to update public hostname.')
+      }
+    } finally {
+      setPublicHostSubmitting(false)
+    }
+  }, [decodedServiceId, publicHostValue])
 
   return (
     <PageShell
@@ -2588,6 +2620,78 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                       ))}
                     </tbody>
                   </table>
+                </div>
+              )}
+            </section>
+
+            <section className="space-y-3 rounded-md border border-border bg-card p-4">
+              <div className="flex items-center justify-between">
+                <div className="space-y-1">
+                  <h2 className="text-sm font-semibold">Public hostname</h2>
+                  <p className="text-xs text-muted-foreground">
+                    External DNS name for the prod Ingress. Updating opens a GitOps PR.
+                  </p>
+                </div>
+                {!publicHostEditMode && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => { setPublicHostEditMode(true); setPublicHostError(''); setPublicHostResult(null) }}
+                  >
+                    Edit
+                  </Button>
+                )}
+              </div>
+              {publicHostEditMode ? (
+                <div className="space-y-3">
+                  <input
+                    type="text"
+                    value={publicHostValue}
+                    onChange={(e) => setPublicHostValue(e.target.value)}
+                    placeholder="my-service.example.com"
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                  />
+                  {publicHostError ? (
+                    <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                      <p className="text-xs text-destructive">{publicHostError}</p>
+                    </div>
+                  ) : null}
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      onClick={() => void submitPublicHostname()}
+                      disabled={publicHostSubmitting || !publicHostValue.trim()}
+                    >
+                      {publicHostSubmitting ? 'Saving...' : 'Save'}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => { setPublicHostEditMode(false); setPublicHostError('') }}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-sm">
+                    {publicHostValue || <span className="text-muted-foreground">Not set</span>}
+                  </p>
+                  {publicHostResult ? (
+                    <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-950 dark:text-emerald-200">
+                      <p className="font-medium">PR created.</p>
+                      <a
+                        href={publicHostResult.prUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-1 inline-flex font-medium underline underline-offset-2"
+                      >
+                        Open PR #{publicHostResult.prNumber} on GitHub →
+                      </a>
+                    </div>
+                  ) : null}
                 </div>
               )}
             </section>

@@ -23,6 +23,7 @@ def _make_input(**overrides: object) -> ScaffoldServiceInput:
         "namespace": "my-svc",
         "dev_host": "my-svc.dev.homelab.local",
         "prod_host": "my-svc.homelab.local",
+        "public_host": "my-svc.homelab.local",
         "workloads_repo_url": "https://github.com/example/workloads.git",
     }
     defaults.update(overrides)
@@ -214,6 +215,30 @@ def test_build_catalog_entry_addition_observability_mode_nginx() -> None:
     inp = _make_input(template="static-nginx")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
     assert "mode: ingress-derived" in result
+
+
+def test_build_catalog_entry_addition_writes_public_host_for_prod_env() -> None:
+    inp = _make_input(public_host="my-svc.example.com")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "public_host: 'my-svc.example.com'" in result
+
+
+def test_build_catalog_entry_addition_omits_public_host_when_empty() -> None:
+    inp = _make_input(public_host="")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "public_host" not in result
+
+
+def test_generate_gitops_new_files_public_host_in_prod_patch_ingress() -> None:
+    files = generate_gitops_new_files(_make_input(public_host="svc.example.com"))
+    patch = files["apps/my-svc/envs/prod/patch-ingress.yaml"]
+    assert "svc.example.com" in patch
+
+
+def test_generate_gitops_new_files_prod_patch_ingress_falls_back_to_prod_host_when_public_host_empty() -> None:
+    files = generate_gitops_new_files(_make_input(public_host="", prod_host="svc.internal.local"))
+    patch = files["apps/my-svc/envs/prod/patch-ingress.yaml"]
+    assert "svc.internal.local" in patch
 
 
 # ---------------------------------------------------------------------------

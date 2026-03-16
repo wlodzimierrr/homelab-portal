@@ -344,6 +344,7 @@ export interface ServiceDetails {
   health?: string
   sync?: string
   publicUrl?: string
+  publicHost?: string | null
   internalUrls?: string[]
   endpoints?: ServiceEndpoint[]
   deployments?: ServiceDeployment[]
@@ -815,6 +816,7 @@ export interface ScaffoldServiceRequest {
   namespace?: string
   devHost?: string
   prodHost?: string
+  publicHost?: string
 }
 
 export interface ScaffoldPreviewFile {
@@ -846,5 +848,18 @@ export function submitScaffold(payload: ScaffoldServiceRequest) {
   return request<ScaffoldSubmitResponse>('/scaffold/submit', {
     method: 'POST',
     body: JSON.stringify(payload),
+  })
+}
+
+export interface UpdatePublicHostnameResponse {
+  prUrl: string
+  prNumber: number
+  branchName: string
+}
+
+export function updateServicePublicHostname(serviceId: string, publicHost: string) {
+  return request<UpdatePublicHostnameResponse>(`/services/${encodeURIComponent(serviceId)}/public-hostname`, {
+    method: 'PUT',
+    body: JSON.stringify({ publicHost }),
   })
 }
