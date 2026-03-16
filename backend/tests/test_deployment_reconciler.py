@@ -710,3 +710,471 @@ def test_reconcile_preserves_terminal_live_status_for_historical_rows(monkeypatc
     assert captured[0]["status"] == "live"
     assert captured[0]["started_at"] == "2026-03-10T16:08:08+00:00"
     assert captured[0]["finished_at"] == "2026-03-10T16:12:37+00:00"
+
+
+def test_reconcile_sets_result_success_when_status_is_live(monkeypatch) -> None:
+    source_sha = "e" * 40
+    target_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}"
+    captured: list[dict[str, object]] = []
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 50,
+                "title": f"chore(dev): bump portal images to sha-{source_sha}",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/50",
+                "state": "closed",
+                "created_at": "2026-03-16T10:00:00Z",
+                "closed_at": "2026-03-16T10:02:00Z",
+                "merged_at": "2026-03-16T10:02:00Z",
+                "merge_commit_sha": "merge-sha-50",
+                "body": f"- backend -> `ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}`",
+                "user": {"login": "github-actions[bot]"},
+                "head": {"ref": f"automation/dev-image-bump-{source_sha}"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        captured.append(kwargs)
+        return {"status": kwargs["status"]}
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+    monkeypatch.setattr(deployment_reconciler, "sync_deployment_lock_for_deployment_row", lambda *_a, **_k: None)
+
+    deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-16T10:00:00Z",
+            }
+        ],
+        select_preferred_service_row=lambda _service_id, rows, _env: rows[0],
+        load_live_argo_status=lambda _row: {
+            "syncStatus": "synced",
+            "healthStatus": "healthy",
+            "revision": "merge-sha-50",
+            "deployedAt": "2026-03-16T10:02:30Z",
+        },
+        list_live_deployments=lambda _row: [{"kind": "Deployment"}],
+        extract_live_image_ref=lambda _deployment: target_image,
+        service_id="homelab-api",
+        github_fetch_json=_fake_fetch,
+        now=datetime(2026, 3, 16, 10, 3, tzinfo=timezone.utc),
+    )
+
+    assert captured[0]["status"] == "live"
+    assert captured[0]["result"] == "success"
+    assert captured[0]["result_reason"] is None
+
+
+def test_reconcile_sets_result_failure_when_pr_closed_without_merge(monkeypatch) -> None:
+    source_sha = "f" * 40
+    captured: list[dict[str, object]] = []
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 51,
+                "title": f"chore(dev): bump portal images to sha-{source_sha}",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/51",
+                "state": "closed",
+                "created_at": "2026-03-16T10:05:00Z",
+                "closed_at": "2026-03-16T10:06:00Z",
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "body": f"- backend -> `ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}`",
+                "user": {"login": "github-actions[bot]"},
+                "head": {"ref": f"automation/dev-image-bump-{source_sha}"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        captured.append(kwargs)
+        return {"status": kwargs["status"]}
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+    monkeypatch.setattr(deployment_reconciler, "sync_deployment_lock_for_deployment_row", lambda *_a, **_k: None)
+
+    deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [],
+        select_preferred_service_row=lambda *_args, **_kwargs: None,
+        load_live_argo_status=lambda _row: {},
+        list_live_deployments=lambda _row: [],
+        extract_live_image_ref=lambda _deployment: None,
+        service_id="homelab-api",
+        github_fetch_json=_fake_fetch,
+        now=datetime(2026, 3, 16, 10, 7, tzinfo=timezone.utc),
+    )
+
+    assert captured[0]["status"] == "failed"
+    assert captured[0]["result"] == "failure"
+    assert captured[0]["result_reason"] == "GitOps pull request was closed without merge."
+
+
+def test_reconcile_sets_result_none_when_deployment_pending(monkeypatch) -> None:
+    source_sha = "a" * 40
+    captured: list[dict[str, object]] = []
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 52,
+                "title": f"chore(dev): bump portal images to sha-{source_sha}",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/52",
+                "state": "open",
+                "created_at": "2026-03-16T10:10:00Z",
+                "closed_at": None,
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "body": f"- backend -> `ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}`",
+                "user": {"login": "github-actions[bot]"},
+                "head": {"ref": f"automation/dev-image-bump-{source_sha}"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        captured.append(kwargs)
+        return {"status": kwargs["status"]}
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+    monkeypatch.setattr(deployment_reconciler, "sync_deployment_lock_for_deployment_row", lambda *_a, **_k: None)
+
+    deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [],
+        select_preferred_service_row=lambda *_args, **_kwargs: None,
+        load_live_argo_status=lambda _row: {},
+        list_live_deployments=lambda _row: [],
+        extract_live_image_ref=lambda _deployment: None,
+        service_id="homelab-api",
+        github_fetch_json=_fake_fetch,
+        now=datetime(2026, 3, 16, 10, 11, tzinfo=timezone.utc),
+    )
+
+    assert captured[0]["status"] == "pending"
+    assert captured[0]["result"] is None
+    assert captured[0]["result_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# PR comment tests
+# ---------------------------------------------------------------------------
+
+
+def _make_live_pr_fetch(source_sha: str, pr_number: int = 60) -> object:
+    def _fetch(_path: str) -> object:
+        return [
+            {
+                "number": pr_number,
+                "title": f"chore(dev): bump portal images to sha-{source_sha}",
+                "html_url": f"https://github.com/wlodzimierrr/homelab-workloads/pull/{pr_number}",
+                "state": "closed",
+                "created_at": "2026-03-16T11:00:00Z",
+                "closed_at": "2026-03-16T11:02:00Z",
+                "merged_at": "2026-03-16T11:02:00Z",
+                "merge_commit_sha": f"merge-sha-{pr_number}",
+                "body": f"- backend -> `ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}`",
+                "user": {"login": "github-actions[bot]"},
+                "head": {"ref": f"automation/dev-image-bump-{source_sha}"},
+            }
+        ]
+
+    return _fetch
+
+
+def test_reconcile_posts_pr_comment_when_deployment_first_goes_live(monkeypatch) -> None:
+    source_sha = "1" * 40
+    target_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}"
+    comment_calls: list[tuple[int, str]] = []
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_a, **_k: None,
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        return {"status": kwargs["status"], "result": kwargs.get("result"), "resultReason": kwargs.get("result_reason"), "deploymentId": "dep-1", "metadata": {}}
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+    monkeypatch.setattr(deployment_reconciler, "sync_deployment_lock_for_deployment_row", lambda *_a, **_k: None)
+
+    deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-16T11:00:00Z",
+            }
+        ],
+        select_preferred_service_row=lambda _s, rows, _e: rows[0],
+        load_live_argo_status=lambda _row: {
+            "syncStatus": "synced",
+            "healthStatus": "healthy",
+            "revision": "merge-sha-60",
+            "deployedAt": "2026-03-16T11:02:30Z",
+        },
+        list_live_deployments=lambda _row: [{"kind": "Deployment"}],
+        extract_live_image_ref=lambda _d: target_image,
+        service_id="homelab-api",
+        github_fetch_json=_make_live_pr_fetch(source_sha, 60),
+        post_pr_comment=lambda pr, body: comment_calls.append((pr, body)),
+        now=datetime(2026, 3, 16, 11, 3, tzinfo=timezone.utc),
+    )
+
+    assert len(comment_calls) == 1
+    pr_number, body = comment_calls[0]
+    assert pr_number == 60
+    assert "live" in body
+    assert "success" in body
+    assert "homelab-api" in body
+    assert "dep-1" in body
+
+
+def test_reconcile_does_not_post_comment_when_already_terminal(monkeypatch) -> None:
+    source_sha = "2" * 40
+    target_image = f"ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}"
+    comment_calls: list[tuple[int, str]] = []
+
+    # existing_record is already live — was_terminal=True
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_a, **_k: {"status": "live", "result": "success"},
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_a, **_k: None,
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        return {"status": kwargs["status"], "result": kwargs.get("result"), "resultReason": kwargs.get("result_reason"), "deploymentId": "dep-2", "metadata": {}}
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+    monkeypatch.setattr(deployment_reconciler, "sync_deployment_lock_for_deployment_row", lambda *_a, **_k: None)
+
+    deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [
+            {
+                "service_id": "homelab-api",
+                "service_name": "homelab-api",
+                "env": "dev",
+                "namespace": "homelab-api",
+                "app_label": "homelab-api",
+                "argo_app_name": "homelab-api-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": "2026-03-16T11:05:00Z",
+            }
+        ],
+        select_preferred_service_row=lambda _s, rows, _e: rows[0],
+        load_live_argo_status=lambda _row: {
+            "syncStatus": "synced",
+            "healthStatus": "healthy",
+            "revision": "merge-sha-61",
+        },
+        list_live_deployments=lambda _row: [{"kind": "Deployment"}],
+        extract_live_image_ref=lambda _d: target_image,
+        service_id="homelab-api",
+        github_fetch_json=_make_live_pr_fetch(source_sha, 61),
+        post_pr_comment=lambda pr, body: comment_calls.append((pr, body)),
+        now=datetime(2026, 3, 16, 11, 6, tzinfo=timezone.utc),
+    )
+
+    assert len(comment_calls) == 0
+
+
+def test_reconcile_posts_pr_comment_with_failure_reason_when_deployment_fails(monkeypatch) -> None:
+    source_sha = "3" * 40
+    comment_calls: list[tuple[int, str]] = []
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 62,
+                "title": f"chore(dev): bump portal images to sha-{source_sha}",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/62",
+                "state": "closed",
+                "created_at": "2026-03-16T11:10:00Z",
+                "closed_at": "2026-03-16T11:11:00Z",
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "body": f"- backend -> `ghcr.io/wlodzimierrr/homelab-api:sha-{source_sha}`",
+                "user": {"login": "github-actions[bot]"},
+                "head": {"ref": f"automation/dev-image-bump-{source_sha}"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_deployment_record_by_request_key",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        deployment_reconciler,
+        "get_latest_deployment_record_for_service",
+        lambda *_a, **_k: None,
+    )
+
+    def _fake_upsert(_conn, **kwargs):
+        return {
+            "status": kwargs["status"],
+            "result": kwargs.get("result"),
+            "resultReason": kwargs.get("result_reason"),
+            "deploymentId": "dep-3",
+            "metadata": {"failureReason": kwargs.get("result_reason", "")},
+        }
+
+    monkeypatch.setattr(deployment_reconciler, "upsert_deployment_record", _fake_upsert)
+    monkeypatch.setattr(deployment_reconciler, "sync_deployment_lock_for_deployment_row", lambda *_a, **_k: None)
+
+    deployment_reconciler.reconcile_recent_gitops_deployments(
+        conn=object(),  # type: ignore[arg-type]
+        load_service_rows=lambda **_kwargs: [],
+        select_preferred_service_row=lambda *_a, **_k: None,
+        load_live_argo_status=lambda _row: {},
+        list_live_deployments=lambda _row: [],
+        extract_live_image_ref=lambda _d: None,
+        service_id="homelab-api",
+        github_fetch_json=_fake_fetch,
+        post_pr_comment=lambda pr, body: comment_calls.append((pr, body)),
+        now=datetime(2026, 3, 16, 11, 12, tzinfo=timezone.utc),
+    )
+
+    assert len(comment_calls) == 1
+    pr_number, body = comment_calls[0]
+    assert pr_number == 62
+    assert "failed" in body
+    assert "closed without merge" in body
+
+
+def test_build_pr_comment_body_live() -> None:
+    from app.deployment_reconciler import _build_pr_comment_body, GitOpsDeploymentEvent
+
+    event = GitOpsDeploymentEvent(
+        request_key="gitops-pr:70:homelab-api:dev:deploy",
+        service_id="homelab-api",
+        env="dev",
+        action="deploy",
+        target_image="ghcr.io/wlodzimierrr/homelab-api:sha-abc",
+        requested_by="bot",
+        requested_at=datetime(2026, 3, 16, 12, 0, tzinfo=timezone.utc),
+        pr_url="https://github.com/wlodzimierrr/homelab-workloads/pull/70",
+        pr_number=70,
+        pr_state="closed",
+        git_ref=None,
+        merge_sha="abc123",
+        merged_at=datetime(2026, 3, 16, 12, 2, tzinfo=timezone.utc),
+        closed_at=None,
+        source_commit_sha=None,
+        compare_url=None,
+        metadata={},
+    )
+    row: dict[str, object] = {
+        "status": "live",
+        "result": "success",
+        "resultReason": None,
+        "deploymentId": "dep-live-1",
+        "metadata": {},
+    }
+    body = _build_pr_comment_body(row=row, event=event)
+
+    assert "live" in body
+    assert "success" in body
+    assert "homelab-api" in body
+    assert "dev" in body
+    assert "dep-live-1" in body
+    assert "\u2705" in body
+
+
+def test_build_pr_comment_body_failed() -> None:
+    from app.deployment_reconciler import _build_pr_comment_body, GitOpsDeploymentEvent
+
+    event = GitOpsDeploymentEvent(
+        request_key="gitops-pr:71:homelab-api:dev:deploy",
+        service_id="homelab-api",
+        env="dev",
+        action="deploy",
+        target_image="ghcr.io/wlodzimierrr/homelab-api:sha-xyz",
+        requested_by="bot",
+        requested_at=datetime(2026, 3, 16, 12, 5, tzinfo=timezone.utc),
+        pr_url="https://github.com/wlodzimierrr/homelab-workloads/pull/71",
+        pr_number=71,
+        pr_state="closed",
+        git_ref=None,
+        merge_sha=None,
+        merged_at=None,
+        closed_at=datetime(2026, 3, 16, 12, 6, tzinfo=timezone.utc),
+        source_commit_sha=None,
+        compare_url=None,
+        metadata={},
+    )
+    row: dict[str, object] = {
+        "status": "failed",
+        "result": "failure",
+        "resultReason": "GitOps pull request was closed without merge.",
+        "deploymentId": "dep-fail-1",
+        "metadata": {"failureReason": "GitOps pull request was closed without merge."},
+    }
+    body = _build_pr_comment_body(row=row, event=event)
+
+    assert "failed" in body
+    assert "failure" in body
+    assert "closed without merge" in body
+    assert "\u274c" in body

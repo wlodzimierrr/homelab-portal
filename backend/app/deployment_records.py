@@ -10,6 +10,7 @@ from psycopg.types.json import Json
 
 ACTION_TYPES = ("deploy", "promote", "rollback", "config-change")
 DEPLOYMENT_STATUSES = ("pending", "deploying", "live", "failed")
+DEPLOYMENT_RESULTS = ("success", "failure", "cancelled", "skipped")
 
 
 class DeploymentRecordRow(TypedDict, total=False):
@@ -36,6 +37,8 @@ class DeploymentRecordRow(TypedDict, total=False):
     compareUrl: str | None
     gitRef: str | None
     requestKey: str | None
+    result: str | None
+    resultReason: str | None
     metadata: dict[str, Any]
     createdAt: str
     updatedAt: str
@@ -98,6 +101,8 @@ def _row_from_tuple(row: tuple[object, ...]) -> DeploymentRecordRow:
         "requestKey": row[23] if isinstance(row[23], str) else None,
         "createdAt": _serialize_datetime(row[24]) or "",
         "updatedAt": _serialize_datetime(row[25]) or "",
+        "result": row[26] if isinstance(row[26], str) else None,
+        "resultReason": row[27] if isinstance(row[27], str) else None,
     }
 
 
@@ -129,7 +134,9 @@ def _base_select_sql() -> str:
             metadata,
             request_key,
             created_at,
-            updated_at
+            updated_at,
+            result,
+            result_reason
         FROM deployments
     """
 
@@ -254,6 +261,8 @@ def upsert_deployment_record(
     git_ref: str | None = None,
     request_key: str | None = None,
     metadata: dict[str, Any] | None = None,
+    result: str | None = None,
+    result_reason: str | None = None,
 ) -> DeploymentRecordRow:
     deployment_id = str(uuid4())
     now = datetime.now(tz=timezone.utc)
@@ -289,6 +298,8 @@ def upsert_deployment_record(
         git_ref,
         Json(metadata_value),
         request_key,
+        result,
+        result_reason,
     )
 
     with conn.cursor() as cur:
@@ -319,10 +330,12 @@ def upsert_deployment_record(
                     compare_url,
                     git_ref,
                     metadata,
-                    request_key
+                    request_key,
+                    result,
+                    result_reason
                 )
                 VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (request_key) DO UPDATE SET
                     service_id = EXCLUDED.service_id,
@@ -350,6 +363,8 @@ def upsert_deployment_record(
                         WHEN EXCLUDED.metadata = '{}'::jsonb THEN deployments.metadata
                         ELSE EXCLUDED.metadata
                     END,
+                    result = COALESCE(EXCLUDED.result, deployments.result),
+                    result_reason = COALESCE(EXCLUDED.result_reason, deployments.result_reason),
                     updated_at = NOW()
                 RETURNING
                     deployment_id,
@@ -377,7 +392,9 @@ def upsert_deployment_record(
                     metadata,
                     request_key,
                     created_at,
-                    updated_at
+                    updated_at,
+                    result,
+                    result_reason
                 """,
                 insert_params,
             )
@@ -408,10 +425,12 @@ def upsert_deployment_record(
                     compare_url,
                     git_ref,
                     metadata,
-                    request_key
+                    request_key,
+                    result,
+                    result_reason
                 )
                 VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 RETURNING
                     deployment_id,
@@ -439,7 +458,9 @@ def upsert_deployment_record(
                     metadata,
                     request_key,
                     created_at,
-                    updated_at
+                    updated_at,
+                    result,
+                    result_reason
                 """,
                 insert_params,
             )

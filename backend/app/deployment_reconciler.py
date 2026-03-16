@@ -141,6 +141,85 @@ def _github_get_json(path: str, timeout_seconds: float = 8.0) -> object:
         return json.loads(response.read())
 
 
+def _github_post_json(path: str, payload: object, timeout_seconds: float = 8.0) -> None:
+    base_url = os.getenv("GITHUB_API_BASE_URL", "https://api.github.com").rstrip("/")
+    data = json.dumps(payload).encode()
+    request = urlrequest.Request(
+        f"{base_url}/{path.lstrip('/')}",
+        data=data,
+        method="POST",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "User-Agent": "homelab-portal-backend",
+        },
+    )
+    token = _github_api_token()
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    with urlrequest.urlopen(request, timeout=timeout_seconds) as _response:
+        pass
+
+
+def _build_pr_comment_body(*, row: dict[str, object], event: GitOpsDeploymentEvent) -> str:
+    deployment_status = str(row.get("status") or "")
+    result = str(row.get("result") or "")
+    result_reason = row.get("resultReason")
+    deployment_id = str(row.get("deploymentId") or "")
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    failure_reason = (
+        result_reason
+        if isinstance(result_reason, str) and result_reason
+        else metadata.get("failureReason")
+        if isinstance(metadata, dict) and isinstance(metadata.get("failureReason"), str)
+        else None
+    )
+
+    portal_base_url = os.getenv("PORTAL_BASE_URL", "").rstrip("/")
+    portal_link = f"{portal_base_url}/services/{event.service_id}" if portal_base_url else None
+
+    if deployment_status == "live":
+        icon = "\u2705"
+        headline = f"Deployment **live** (`success`)"
+    else:
+        icon = "\u274c"
+        headline = f"Deployment **failed** (`{result or 'failure'}`)"
+
+    lines = [f"{icon} {headline}", ""]
+    lines.append(f"| Field | Value |")
+    lines.append(f"| --- | --- |")
+    lines.append(f"| **Service** | `{event.service_id}` |")
+    lines.append(f"| **Environment** | `{event.env}` |")
+    lines.append(f"| **Action** | `{event.action}` |")
+    lines.append(f"| **Image** | `{event.target_image}` |")
+    if deployment_id:
+        lines.append(f"| **Deployment ID** | `{deployment_id}` |")
+    if failure_reason:
+        lines.append(f"| **Reason** | {failure_reason} |")
+    if portal_link:
+        lines.append(f"| **Portal** | [{event.service_id}]({portal_link}) |")
+
+    lines.append("")
+    lines.append("_Posted by homelab portal deployment reconciler._")
+    return "\n".join(lines)
+
+
+def make_pr_comment_poster(
+    gitops_repo_path: str,
+    *,
+    github_post_json: Callable[[str, object], None] = _github_post_json,
+) -> Callable[[int, str], None]:
+    """Return a callable that posts a comment on the given PR number."""
+
+    def _post(pr_number: int, body: str) -> None:
+        github_post_json(
+            f"repos/{gitops_repo_path}/issues/{pr_number}/comments",
+            {"body": body},
+        )
+
+    return _post
+
+
 def _extract_images_from_body(body: object) -> dict[str, str]:
     if not isinstance(body, str):
         return {}
@@ -514,6 +593,18 @@ def _build_reconciled_record(
             if isinstance(metadata.get("failureReason"), str)
             else None
         )
+        existing_result = existing_record.get("result") if existing_record else None
+        existing_result_reason = existing_record.get("resultReason") if existing_record else None
+        if terminal_status == "live":
+            reconciled_result: str | None = existing_result if isinstance(existing_result, str) else "success"
+            reconciled_result_reason: str | None = None
+        else:
+            reconciled_result = existing_result if isinstance(existing_result, str) else "failure"
+            reconciled_result_reason = (
+                existing_result_reason
+                if isinstance(existing_result_reason, str)
+                else failure_reason
+            )
         return {
             "service_id": event.service_id,
             "env": event.env,
@@ -578,6 +669,8 @@ def _build_reconciled_record(
             ),
             "request_key": event.request_key,
             "metadata": metadata,
+            "result": reconciled_result,
+            "result_reason": reconciled_result_reason,
         }
 
     failure_reason: str | None = None
@@ -643,6 +736,16 @@ def _build_reconciled_record(
     else:
         metadata.pop("failureReason", None)
 
+    if status == "live":
+        computed_result: str | None = "success"
+        computed_result_reason: str | None = None
+    elif status == "failed":
+        computed_result = "failure"
+        computed_result_reason = failure_reason
+    else:
+        computed_result = None
+        computed_result_reason = None
+
     return {
         "service_id": event.service_id,
         "env": event.env,
@@ -679,6 +782,8 @@ def _build_reconciled_record(
         "git_ref": event.git_ref,
         "request_key": event.request_key,
         "metadata": metadata,
+        "result": computed_result,
+        "result_reason": computed_result_reason,
     }
 
 
@@ -694,6 +799,7 @@ def reconcile_recent_gitops_deployments(
     env: str | None = None,
     limit_pull_requests: int = DEFAULT_PULL_REQUEST_LIMIT,
     github_fetch_json: Callable[[str], object] = _github_get_json,
+    post_pr_comment: Callable[[int, str], None] | None = None,
     now: datetime | None = None,
 ) -> DeploymentReconcileSummary:
     current_time = now or datetime.now(tz=timezone.utc)
@@ -709,6 +815,7 @@ def reconcile_recent_gitops_deployments(
 
     for event in events:
         existing_record = get_deployment_record_by_request_key(conn, event.request_key)
+        was_terminal = _terminal_status(existing_record) is not None
         previous_record = get_latest_deployment_record_for_service(
             conn,
             service_id=event.service_id,
@@ -747,9 +854,26 @@ def reconcile_recent_gitops_deployments(
                 now=current_time,
             )
             lock_managed_pairs.add(pair)
-        status = row.get("status")
-        if isinstance(status, str) and status in status_counts:
-            status_counts[status] += 1
+        new_status = row.get("status")
+        if isinstance(new_status, str) and new_status in status_counts:
+            status_counts[new_status] += 1
+
+        if (
+            not was_terminal
+            and new_status in {"live", "failed"}
+            and post_pr_comment is not None
+        ):
+            comment_body = _build_pr_comment_body(row=row, event=event)
+            try:
+                post_pr_comment(event.pr_number, comment_body)
+            except Exception as exc:
+                logger.warning(
+                    "deployment_reconciler_pr_comment_failed pr=%s service=%s env=%s error=%s",
+                    event.pr_number,
+                    event.service_id,
+                    event.env,
+                    exc,
+                )
 
     return {
         "pullRequestsScanned": len(events),

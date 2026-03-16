@@ -46,9 +46,10 @@ from app.deployment_locks import (
     DeploymentLockRow,
     cleanup_stale_deployment_locks,
     get_deployment_lock,
+    release_deployment_lock,
     sync_deployment_lock_for_deployment_row,
 )
-from app.deployment_reconciler import reconcile_recent_gitops_deployments
+from app.deployment_reconciler import make_pr_comment_poster, reconcile_recent_gitops_deployments
 from app.health_timeline import (
     TimelinePoint,
     classify_timeline_status,
@@ -431,6 +432,8 @@ class DeploymentRecordResponse(BaseModel):
     deploy_window_start: str | None = Field(default=None, alias="deployWindowStart")
     deploy_window_end: str | None = Field(default=None, alias="deployWindowEnd")
     failure_reason: str | None = Field(default=None, alias="failureReason")
+    result: str | None = None
+    result_reason: str | None = Field(default=None, alias="resultReason")
     error_rate_pct: dict[str, float] | None = Field(default=None, alias="errorRatePct")
     p95_latency_ms: dict[str, float] | None = Field(default=None, alias="p95LatencyMs")
     availability_pct: dict[str, float] | None = Field(default=None, alias="availabilityPct")
@@ -1419,11 +1422,21 @@ def _deployment_reconciler_read_ttl_seconds() -> int:
     return max(0, int(os.getenv("DEPLOYMENT_RECONCILER_READ_TTL_SECONDS", "30")))
 
 
+def _deployment_reconciler_pr_comments_enabled() -> bool:
+    return _parse_bool_env("DEPLOYMENT_RECONCILER_PR_COMMENTS_ENABLED", False)
+
+
 def _reconcile_recent_deployment_activity(
     *,
     service_id: str | None = None,
     env: str | None = None,
 ) -> DeploymentReconcileResponse:
+    pr_commenter = None
+    if _deployment_reconciler_pr_comments_enabled():
+        owner = os.getenv("DEPLOYMENT_RECONCILER_GITHUB_OWNER", "wlodzimierrr").strip() or "wlodzimierrr"
+        gitops_repo = os.getenv("DEPLOYMENT_RECONCILER_GITOPS_REPO", "homelab-workloads").strip() or "homelab-workloads"
+        pr_commenter = make_pr_comment_poster(f"{owner}/{gitops_repo}")
+
     with _with_connection() as conn:
         cleanup_stale_deployment_locks(conn)
         result = reconcile_recent_gitops_deployments(
@@ -1435,6 +1448,7 @@ def _reconcile_recent_deployment_activity(
             extract_live_image_ref=_extract_live_deployment_image_ref,
             service_id=service_id,
             env=env,
+            post_pr_comment=pr_commenter,
         )
     deployment_history_cache.clear()
     return DeploymentReconcileResponse(**result)
@@ -3393,6 +3407,8 @@ def _build_deployment_record_response(
             else None
         ),
         failureReason=failure_reason,
+        result=record.get("result") if isinstance(record.get("result"), str) else None,
+        resultReason=record.get("resultReason") if isinstance(record.get("resultReason"), str) else None,
         errorRatePct=metric_snapshots.get("errorRatePct"),
         p95LatencyMs=metric_snapshots.get("p95LatencyMs"),
         availabilityPct=metric_snapshots.get("availabilityPct"),
@@ -4775,6 +4791,86 @@ def create_deployment_record(
     service_rows = _load_service_rows(service_id=payload.service_id, env=payload.env)
     selected = _select_preferred_service_row(payload.service_id, service_rows, payload.env)
     return _build_deployment_record_response(record, selected)
+
+
+@app.post(
+    "/deployments/{deployment_id}/cancel",
+    response_model=DeploymentRecordResponse,
+    tags=["metadata"],
+)
+def cancel_deployment(
+    deployment_id: str,
+    admin_user: str = Depends(require_admin),
+) -> DeploymentRecordResponse:
+    """Soft-cancel a deployment that has not yet reached a terminal state.
+
+    Sets status='failed', result='cancelled', result_reason='Cancelled by operator'
+    and releases the deployment lock.  Returns 404 if the deployment is not found,
+    409 if it is already in a terminal state.
+    """
+    record = _get_deployment_record_by_id(deployment_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment record not found",
+        )
+
+    current_status = record.get("status")
+    if current_status in {"live", "failed"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Deployment is already in terminal state '{current_status}' and cannot be cancelled.",
+        )
+
+    service_id = str(record.get("serviceId") or "")
+    env = str(record.get("env") or "")
+    request_key = record.get("requestKey")
+
+    with _with_connection() as conn:
+        now = datetime.now(tz=timezone.utc)
+        updated = upsert_deployment_record(
+            conn,
+            service_id=service_id,
+            env=env,
+            action=str(record.get("action") or "deploy"),
+            status="failed",
+            result="cancelled",
+            result_reason=f"Cancelled by operator ({admin_user})",
+            request_key=request_key if isinstance(request_key, str) else None,
+            requested_by=record.get("requestedBy") if isinstance(record.get("requestedBy"), str) else None,
+            requested_at=record.get("requestedAt"),
+            pr_url=record.get("prUrl") if isinstance(record.get("prUrl"), str) else None,
+            pr_number=record.get("prNumber") if isinstance(record.get("prNumber"), int) else None,
+            merge_sha=record.get("mergeSha") if isinstance(record.get("mergeSha"), str) else None,
+            target_image=record.get("targetImage") if isinstance(record.get("targetImage"), str) else None,
+            previous_image=record.get("previousImage") if isinstance(record.get("previousImage"), str) else None,
+            argo_app=record.get("argoApp") if isinstance(record.get("argoApp"), str) else None,
+            sync_status=record.get("syncStatus") if isinstance(record.get("syncStatus"), str) else None,
+            health_status=record.get("healthStatus") if isinstance(record.get("healthStatus"), str) else None,
+            started_at=record.get("startedAt"),
+            finished_at=now,
+            deploy_window_start=record.get("deployWindowStart"),
+            deploy_window_end=now,
+            deploy_reason=record.get("deployReason") if isinstance(record.get("deployReason"), str) else None,
+            compare_url=record.get("compareUrl") if isinstance(record.get("compareUrl"), str) else None,
+            git_ref=record.get("gitRef") if isinstance(record.get("gitRef"), str) else None,
+            metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
+        )
+        if service_id and env:
+            release_deployment_lock(
+                conn,
+                service_id=service_id,
+                env=env,
+                request_key=request_key if isinstance(request_key, str) else None,
+                deployment_id=deployment_id,
+            )
+
+    deployment_history_cache.clear()
+    deployment_reconcile_cache.clear()
+
+    service_rows = _load_service_rows(service_id=service_id or None, env=env or None)
+    selected = _select_preferred_service_row(service_id, service_rows, env) if service_id else None
+    return _build_deployment_record_response(updated, selected)
 
 
 @app.post(

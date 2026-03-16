@@ -1155,6 +1155,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   )
   const devLockActive = overview?.deploymentLock?.env === 'dev'
   const prodLockActive = overview?.deploymentLock?.env === 'prod'
+  const rollbackLockActive = rollbackTargetEnvironment === 'dev' ? devLockActive : prodLockActive
+  const rollbackInFlight = rollbackTargetEnvironment === 'dev' ? devInFlight : prodInFlight
 
   useEffect(() => {
     if (serviceIdentity.env === 'dev' || serviceIdentity.env === 'prod') {
@@ -2389,12 +2391,19 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
 
             {rollbackSupported ? (
               <section className="space-y-3 rounded-md border border-border bg-card p-4">
-                <div className="space-y-1">
-                  <h2 className="text-sm font-semibold">Portal Rollback</h2>
-                  <p className="text-xs text-muted-foreground">
-                    Request a Git-backed rollback for this service. The portal lists previous deployable tags from
-                    GitHub Packages, opens a rollback PR, and records the request as a first-class deployment event.
-                  </p>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <h2 className="text-sm font-semibold">Portal Rollback</h2>
+                    <p className="text-xs text-muted-foreground">
+                      Request a Git-backed rollback for this service. The portal lists previous deployable tags from
+                      GitHub Packages, opens a rollback PR, and records the request as a first-class deployment event.
+                    </p>
+                  </div>
+                  {rollbackLockActive || rollbackInFlight ? (
+                    <span className="rounded-full bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-700 dark:text-sky-300">
+                      {rollbackTargetEnvironment === 'dev' ? 'Dev' : 'Prod'} locked
+                    </span>
+                  ) : null}
                 </div>
                 <div className="grid gap-3 md:grid-cols-[180px_minmax(0,1fr)]">
                   <label className="space-y-1">
@@ -2519,6 +2528,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                     onClick={() => void submitRollbackRequest()}
                     disabled={
                       rollbackSubmitting ||
+                      rollbackLockActive ||
+                      rollbackInFlight ||
                       rollbackCandidatesLoading ||
                       selectedRollbackTag.trim().length === 0 ||
                       rollbackReason.trim().length < 5
