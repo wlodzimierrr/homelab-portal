@@ -180,14 +180,14 @@ def _build_pr_comment_body(*, row: dict[str, object], event: GitOpsDeploymentEve
 
     if deployment_status == "live":
         icon = "\u2705"
-        headline = f"Deployment **live** (`success`)"
+        headline = "Deployment **live** (`success`)"
     else:
         icon = "\u274c"
         headline = f"Deployment **failed** (`{result or 'failure'}`)"
 
     lines = [f"{icon} {headline}", ""]
-    lines.append(f"| Field | Value |")
-    lines.append(f"| --- | --- |")
+    lines.append("| Field | Value |")
+    lines.append("| --- | --- |")
     lines.append(f"| **Service** | `{event.service_id}` |")
     lines.append(f"| **Environment** | `{event.env}` |")
     lines.append(f"| **Action** | `{event.action}` |")
