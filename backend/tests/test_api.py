@@ -500,6 +500,7 @@ def test_service_detail_returns_cluster_backed_row(monkeypatch) -> None:
         "lastSyncedAt": None,
         "observabilityMode": "ingress-derived",
         "deploymentLock": None,
+        "publicHost": None,
     }
 
 

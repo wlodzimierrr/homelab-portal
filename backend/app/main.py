@@ -7026,7 +7026,6 @@ def _update_services_yaml_public_host(services_yaml: str, service_id: str, new_h
     Adds the field if absent; replaces it if present.  The file's existing whitespace
     and ordering are preserved for all other entries.
     """
-    import re as _re
     from app.scaffold_service import _yaml_string as _ys
 
     # --- locate the service block ----------------------------------------

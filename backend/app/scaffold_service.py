@@ -979,7 +979,7 @@ def _generate_overlay_files(
     }
 
     if env_name == "prod":
-        ingress_host = inp.public_host or inp.prod_host
+        ingress_host = inp.prod_host or inp.public_host
         files["patch-ingress.yaml"] = _render_template(
             """
             apiVersion: networking.k8s.io/v1
