@@ -1483,7 +1483,7 @@ def test_service_deployments_endpoint_returns_deployment_records(monkeypatch) ->
             }
         ],
     )
-    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: ({}, "none"))
 
     response = client.get(
         "/services/homelab-api/deployments?env=dev",
@@ -1523,7 +1523,7 @@ def test_service_deployments_endpoint_returns_empty_list_without_records(monkeyp
         ],
     )
     monkeypatch.setattr("app.main._list_deployment_records_for_service", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: ({}, "none"))
 
     response = client.get(
         "/services/homelab-api/deployments?env=dev",
@@ -1570,11 +1570,14 @@ def test_service_deployments_endpoint_includes_observability_snapshots(monkeypat
     )
     monkeypatch.setattr(
         "app.main._load_deployment_metric_snapshots",
-        lambda *_args, **_kwargs: {
-            "errorRatePct": {"before": 0.1, "after": 0.3, "delta": 0.2},
-            "p95LatencyMs": {"before": 110.0, "after": 140.0, "delta": 30.0},
-            "availabilityPct": {"before": 99.9, "after": 99.4, "delta": -0.5},
-        },
+        lambda *_args, **_kwargs: (
+            {
+                "errorRatePct": {"before": 0.1, "after": 0.3, "delta": 0.2},
+                "p95LatencyMs": {"before": 110.0, "after": 140.0, "delta": 30.0},
+                "availabilityPct": {"before": 99.9, "after": 99.4, "delta": -0.5},
+            },
+            "live_query",
+        ),
     )
 
     response = client.get(
@@ -1601,7 +1604,7 @@ def test_load_deployment_metric_snapshots_uses_record_window(monkeypatch) -> Non
 
     monkeypatch.setattr("app.main._load_metric_snapshots_for_window", _fake_load_window)
 
-    result = app_main._load_deployment_metric_snapshots(
+    snapshots, source = app_main._load_deployment_metric_snapshots(
         {
             "service_id": "homelab-api",
             "env": "dev",
@@ -1619,7 +1622,8 @@ def test_load_deployment_metric_snapshots_uses_record_window(monkeypatch) -> Non
         "window_start": "2026-03-10T16:35:09+00:00",
         "window_end": "2026-03-10T16:37:20+00:00",
     }
-    assert result["errorRatePct"]["delta"] == 0.2
+    assert source == "live_query"
+    assert snapshots["errorRatePct"]["delta"] == 0.2
 
 
 def test_service_deployment_observability_returns_window_scoped_sections(monkeypatch) -> None:
@@ -1894,7 +1898,7 @@ def test_create_deployment_record_endpoint_returns_record(monkeypatch) -> None:
             }
         ],
     )
-    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: ({}, "none"))
 
     response = client.post(
         "/deployments",
@@ -2877,7 +2881,7 @@ def test_get_deployment_endpoint_returns_record(monkeypatch) -> None:
             }
         ],
     )
-    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr("app.main._load_deployment_metric_snapshots", lambda *_args, **_kwargs: ({}, "none"))
 
     response = client.get(
         "/deployments/dep-123",
