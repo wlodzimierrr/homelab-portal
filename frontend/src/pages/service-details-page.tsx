@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AppLink } from '@/components/navigation/app-link'
+import { cn } from '@/lib/utils'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
