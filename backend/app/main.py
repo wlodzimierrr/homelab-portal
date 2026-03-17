@@ -39,6 +39,7 @@ from app.db import get_psycopg_database_url
 from app.deployment_records import (
     get_deployment_record,
     list_deployment_records_for_service,
+    store_observability_snapshot,
     upsert_deployment_record,
 )
 from app.deployment_locks import (
@@ -437,6 +438,9 @@ class DeploymentRecordResponse(BaseModel):
     error_rate_pct: dict[str, float] | None = Field(default=None, alias="errorRatePct")
     p95_latency_ms: dict[str, float] | None = Field(default=None, alias="p95LatencyMs")
     availability_pct: dict[str, float] | None = Field(default=None, alias="availabilityPct")
+    metrics_source: Literal["live_query", "stored_snapshot", "none"] | None = Field(
+        default=None, alias="metricsSource"
+    )
     metadata: dict[str, Any] | None = None
 
     model_config = ConfigDict(populate_by_name=True)
@@ -3327,15 +3331,44 @@ def _load_metric_snapshots_for_window(
 def _load_deployment_metric_snapshots(
     service_row: dict[str, str | None] | None,
     release_row: dict[str, object],
-) -> dict[str, dict[str, float]]:
+) -> tuple[dict[str, dict[str, float]], Literal["live_query", "stored_snapshot", "none"]]:
+    """Returns (snapshots, source).
+
+    Priority:
+    1. Live Prometheus query — used when the deploy window is within retention.
+    2. Stored snapshot from metadata.observabilitySnapshot — used when Prometheus
+       no longer has samples for the window (retention expired).
+    3. Empty — no metrics available from either source.
+    """
     window_start, window_end = _resolve_record_window(release_row)
-    if window_start is None or window_end is None:
-        return {}
-    return _load_metric_snapshots_for_window(
-        service_row,
-        window_start=window_start,
-        window_end=window_end,
-    )
+    if window_start is not None and window_end is not None:
+        live = _load_metric_snapshots_for_window(service_row, window_start=window_start, window_end=window_end)
+        if live:
+            return live, "live_query"
+
+    metadata = release_row.get("metadata")
+    stored = metadata.get("observabilitySnapshot") if isinstance(metadata, dict) else None
+    if isinstance(stored, dict) and stored:
+        return stored, "stored_snapshot"
+
+    return {}, "none"
+
+
+def _persist_observability_snapshot_safe(
+    deployment_id: str,
+    snapshots: dict[str, dict[str, float]],
+) -> None:
+    """Write observability snapshots into deployment metadata.
+
+    Called lazily when live Prometheus data is available for a terminal
+    deployment that has no snapshot yet.  Errors are swallowed so that a
+    DB write failure never breaks the API response.
+    """
+    try:
+        with _with_connection() as conn:
+            store_observability_snapshot(conn, deployment_id, snapshots)
+    except Exception:
+        pass  # non-critical; snapshot will be captured on the next request
 
 
 def _deployment_record_sort_timestamp(record: dict[str, object]) -> str | None:
@@ -3351,7 +3384,7 @@ def _build_deployment_record_response(
     service_row: dict[str, str | None] | None,
 ) -> DeploymentRecordResponse:
     observed_at = _deployment_record_sort_timestamp(record)
-    metric_snapshots = _load_deployment_metric_snapshots(service_row, record)
+    metric_snapshots, metrics_source = _load_deployment_metric_snapshots(service_row, record)
     image_ref = record.get("targetImage") if isinstance(record.get("targetImage"), str) else None
     metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else None
     failure_reason = (
@@ -3359,6 +3392,20 @@ def _build_deployment_record_response(
         if isinstance(metadata, dict) and isinstance(metadata.get("failureReason"), str)
         else None
     )
+
+    # Lazily persist a snapshot the first time live Prometheus data is available
+    # for a terminal deployment that has no stored snapshot yet.
+    deployment_id = record.get("deploymentId")
+    status = record.get("status")
+    has_stored_snapshot = isinstance(metadata, dict) and isinstance(metadata.get("observabilitySnapshot"), dict)
+    if (
+        metrics_source == "live_query"
+        and isinstance(deployment_id, str)
+        and status in {"live", "failed"}
+        and not has_stored_snapshot
+        and metric_snapshots
+    ):
+        _persist_observability_snapshot_safe(deployment_id, metric_snapshots)
 
     return DeploymentRecordResponse(
         id=str(record.get("deploymentId") or ""),
@@ -3412,6 +3459,7 @@ def _build_deployment_record_response(
         errorRatePct=metric_snapshots.get("errorRatePct"),
         p95LatencyMs=metric_snapshots.get("p95LatencyMs"),
         availabilityPct=metric_snapshots.get("availabilityPct"),
+        metricsSource=metrics_source,
         metadata=metadata,
     )
 

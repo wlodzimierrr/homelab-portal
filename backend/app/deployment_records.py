@@ -470,3 +470,31 @@ def upsert_deployment_record(
     if row is None:
         raise RuntimeError("deployment record insert returned no row")
     return _row_from_tuple(row)
+
+
+def store_observability_snapshot(
+    conn: psycopg.Connection,
+    deployment_id: str,
+    snapshot: dict[str, Any],
+) -> None:
+    """Merge observabilitySnapshot into deployment metadata.
+
+    Uses jsonb_set so existing metadata keys are preserved.
+    Only writes when the key is absent — idempotent on subsequent calls.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE deployments
+            SET metadata = jsonb_set(
+                    metadata,
+                    '{observabilitySnapshot}',
+                    %s::jsonb
+                ),
+                updated_at = NOW()
+            WHERE deployment_id = %s
+              AND (metadata->>'observabilitySnapshot') IS NULL
+            """,
+            (Json(snapshot), deployment_id),
+        )
+        conn.commit()
