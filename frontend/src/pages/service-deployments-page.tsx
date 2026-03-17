@@ -10,7 +10,7 @@ import {
   type DeploymentObservability,
   type DeploymentObservabilityMetricSnapshot,
 } from '@/lib/adapters/deployment-observability'
-import { getDeploymentHistory, type DeploymentHistoryItem } from '@/lib/adapters/deployments'
+import { getDeploymentHistory, type DeploymentHistoryItem, type DeploymentEvidenceSource } from '@/lib/adapters/deployments'
 import type { LogsQuickViewPreset } from '@/lib/adapters/logs-quickview'
 import { evaluateDeploymentHistoryItem } from '@/lib/deployment-alerts'
 import { createServiceIdentity } from '@/lib/service-identity'
@@ -218,6 +218,56 @@ function ImpactBadge({ item }: { item: DeploymentHistoryItem }) {
   const label = alert.level === 'critical' ? 'High regression' : alert.level === 'warning' ? 'Regression' : 'Stable/Improved'
 
   return <span className={cn('inline-flex items-center rounded-full px-2 py-1 text-xs font-medium', tone)}>{label}</span>
+}
+
+function MetricsSourceBadge({ source }: { source: DeploymentHistoryItem['metricsSource'] }) {
+  if (source === 'live_query') {
+    return null
+  }
+  if (source === 'stored_snapshot') {
+    return (
+      <span className="inline-flex items-center rounded-full bg-indigo-500/10 px-2 py-1 text-xs font-medium text-indigo-700 dark:text-indigo-300">
+        Stored snapshot
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center rounded-full bg-muted px-2 py-1 text-xs font-medium text-muted-foreground">
+      No retained snapshot
+    </span>
+  )
+}
+
+function EvidenceBadge({
+  source,
+  hasData,
+  backfilled,
+}: {
+  source: DeploymentEvidenceSource
+  hasData: boolean
+  backfilled?: boolean
+}) {
+  if (source === 'deployment_record') {
+    return (
+      <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+        {backfilled ? 'Deployed · Backfilled' : 'Deployed'}
+      </span>
+    )
+  }
+
+  if (hasData) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-700 dark:text-sky-300">
+        Published
+      </span>
+    )
+  }
+
+  return (
+    <span className="inline-flex items-center rounded-full bg-muted px-2 py-1 text-xs font-medium text-muted-foreground">
+      Unknown deployment evidence
+    </span>
+  )
 }
 
 export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProps) {
@@ -514,6 +564,11 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
                     </td>
                     <td className="px-3 py-2">
                       <div className="space-y-1">
+                        <EvidenceBadge
+                          source={item.evidenceSource}
+                          hasData={Boolean(item.deployedAt || item.version !== 'N/A')}
+                          backfilled={item.metadata?.backfilled === true}
+                        />
                         <OutcomeBadge outcome={item.outcome} />
                         {item.failureReason ? (
                           <p className="max-w-xs text-xs text-amber-700 dark:text-amber-300">{item.failureReason}</p>
@@ -530,6 +585,11 @@ export function ServiceDeploymentsPage({ serviceId }: ServiceDeploymentsPageProp
                       <p className="text-xs text-muted-foreground">
                         delta: {formatDelta('pct', item.errorRatePct.delta)}
                       </p>
+                      {item.metricsSource !== 'live_query' ? (
+                        <div className="mt-1">
+                          <MetricsSourceBadge source={item.metricsSource} />
+                        </div>
+                      ) : null}
                     </td>
                     <td className="px-3 py-2">
                       <p>{formatBeforeAfter('ms', item.p95LatencyMs.before, item.p95LatencyMs.after)}</p>

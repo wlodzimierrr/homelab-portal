@@ -13,6 +13,8 @@ export interface DeploymentMetricSnapshot {
   delta?: number
 }
 
+export type DeploymentEvidenceSource = 'deployment_record' | 'release_traceability'
+
 export interface DeploymentHistoryItem {
   id: string
   identity: ServiceIdentity
@@ -37,6 +39,10 @@ export interface DeploymentHistoryItem {
   availabilityPct: DeploymentMetricSnapshot
   hasComparisonWindow: boolean
   regressionScore: number
+  /** Evidence source: deployment_record = tracked in DB; release_traceability = inferred from Argo/releases */
+  evidenceSource: DeploymentEvidenceSource
+  /** Metrics source: live_query = Prometheus live; stored_snapshot = persisted in DB; none = unavailable */
+  metricsSource: 'live_query' | 'stored_snapshot' | 'none'
 }
 
 interface DeploymentHistoryOptions {
@@ -92,6 +98,8 @@ function normalizeDeployment(item: ServiceDeployment, identity: ServiceIdentity)
     availabilityPct: availability,
     hasComparisonWindow,
     regressionScore: computeRegressionScore(errorRate, latency, availability),
+    evidenceSource: 'deployment_record',
+    metricsSource: (item.metricsSource as DeploymentHistoryItem['metricsSource']) ?? 'none',
   }
 }
 
@@ -131,6 +139,8 @@ function normalizeReleaseDeployment(
     availabilityPct: {},
     hasComparisonWindow: false,
     regressionScore: 0,
+    evidenceSource: 'release_traceability',
+    metricsSource: 'none',
   }
 }
 

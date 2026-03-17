@@ -143,6 +143,7 @@ export interface ServiceDeployment {
   errorRatePct?: DeploymentMetricSnapshot
   p95LatencyMs?: DeploymentMetricSnapshot
   availabilityPct?: DeploymentMetricSnapshot
+  metricsSource?: 'live_query' | 'stored_snapshot' | 'none'
   metadata?: Record<string, unknown>
 }
 
