@@ -536,8 +536,17 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                         }
                       />
                       <StatusBadge label="Sync" value={service.sync} />
-                      {serviceAlerts[service.id]?.suspicious ? (
-                        <StatusBadge label="Alert" value="degraded" />
+                      {serviceAlerts[service.id]?.level && serviceAlerts[service.id].level !== 'none' ? (
+                        <span
+                          className={cn(
+                            'inline-flex items-center rounded-full px-2 py-1 text-xs font-medium',
+                            serviceAlerts[service.id].level === 'critical'
+                              ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                              : 'bg-amber-500/10 text-amber-700 dark:text-amber-300',
+                          )}
+                        >
+                          Deploy: {serviceAlerts[service.id].level}
+                        </span>
                       ) : null}
                     </div>
                     <UptimeIndicator

@@ -61,7 +61,7 @@ import {
   type ServiceHealthTimeline as ServiceHealthTimelineData,
   type TimelineWindow,
 } from '@/lib/adapters/service-health-timeline'
-import { summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
+import { evaluateDeploymentHistoryItem, summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
 import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
 import { createServiceIdentity, normalizeServiceId, type ServiceIdentity } from '@/lib/service-identity'
 import {
@@ -1448,6 +1448,91 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               </article>
               <StatusCard health={effectiveHealth} sync={overview.sync} />
             </div>
+
+            {(latestDevDeployment ?? latestProdDeployment) ? (
+              <section className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold">Recent Deploy Impact</h2>
+                  <AppLink
+                    to={`/services/${encodeURIComponent(decodedServiceId)}/deployments`}
+                    className="text-xs text-primary hover:underline"
+                  >
+                    Full history
+                  </AppLink>
+                </div>
+                <div className="space-y-2">
+                  {(
+                    [
+                      latestDevDeployment ? { env: 'dev', item: latestDevDeployment } : null,
+                      latestProdDeployment ? { env: 'prod', item: latestProdDeployment } : null,
+                    ] as Array<{ env: string; item: DeploymentHistoryItem } | null>
+                  ).filter((entry): entry is { env: string; item: DeploymentHistoryItem } => entry !== null).map(({ env, item }) => {
+                    const alert = evaluateDeploymentHistoryItem(item)
+                    const impactTone =
+                      alert.level === 'critical'
+                        ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                        : alert.level === 'warning'
+                          ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                          : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                    const impactLabel =
+                      !item.hasComparisonWindow && alert.level === 'none'
+                        ? 'No comparison samples'
+                        : alert.level === 'critical'
+                          ? 'High regression'
+                          : alert.level === 'warning'
+                            ? 'Regression'
+                            : 'Stable/Improved'
+                    const outcomeTone =
+                      item.outcome === 'live' || item.outcome === 'succeeded'
+                        ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                        : item.outcome === 'deploying' || item.outcome === 'pending'
+                          ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
+                          : item.outcome === 'failed' || item.outcome === 'degraded' || item.outcome === 'error'
+                            ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                            : 'bg-muted text-muted-foreground'
+                    const errorDelta = item.errorRatePct.delta
+                    const latencyDelta = item.p95LatencyMs.delta
+                    const availDelta = item.availabilityPct.delta
+
+                    return (
+                      <div
+                        key={env}
+                        className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-xs"
+                      >
+                        <span className="inline-flex rounded-full bg-slate-500/10 px-2 py-0.5 font-medium text-slate-700 dark:text-slate-300">
+                          {env}
+                        </span>
+                        <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 font-medium', outcomeTone)}>
+                          {item.outcome}
+                        </span>
+                        <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 font-medium', impactTone)}>
+                          {impactLabel}
+                        </span>
+                        {item.hasComparisonWindow ? (
+                          <span className="text-muted-foreground">
+                            err{' '}
+                            <span className={typeof errorDelta === 'number' && errorDelta > 0 ? 'text-rose-600 dark:text-rose-400' : ''}>
+                              {typeof errorDelta === 'number' ? `${errorDelta >= 0 ? '+' : ''}${errorDelta.toFixed(2)} pp` : 'N/A'}
+                            </span>
+                            {' · '}p95{' '}
+                            <span className={typeof latencyDelta === 'number' && latencyDelta > 0 ? 'text-rose-600 dark:text-rose-400' : ''}>
+                              {typeof latencyDelta === 'number' ? `${latencyDelta >= 0 ? '+' : ''}${latencyDelta.toFixed(0)} ms` : 'N/A'}
+                            </span>
+                            {' · '}avail{' '}
+                            <span className={typeof availDelta === 'number' && availDelta < 0 ? 'text-rose-600 dark:text-rose-400' : ''}>
+                              {typeof availDelta === 'number' ? `${availDelta >= 0 ? '+' : ''}${availDelta.toFixed(2)} pp` : 'N/A'}
+                            </span>
+                          </span>
+                        ) : null}
+                        <span className="ml-auto text-muted-foreground">
+                          {item.version ? `v${item.version} · ` : ''}{formatDate(item.deployedAt ?? item.requestedAt)}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            ) : null}
 
             {deploymentAlert.suspicious ? (
               <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
