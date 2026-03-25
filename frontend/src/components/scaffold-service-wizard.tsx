@@ -10,12 +10,16 @@ import { cn } from '@/lib/utils'
 
 type Step = 'basic' | 'template' | 'config' | 'preview' | 'success'
 
-type TemplateId = 'python-fastapi' | 'static-nginx' | 'postgres' | 'mysql'
+type TemplateId = 'python-fastapi' | 'python-django' | 'python-flask' | 'static-nginx' | 'react' | 'vue' | 'wordpress' | 'node-express' | 'node-nestjs' | 'postgres' | 'mysql'
 
 const DB_TEMPLATES: TemplateId[] = ['postgres', 'mysql']
 
 function isDatabaseTemplate(template: TemplateId): boolean {
   return DB_TEMPLATES.includes(template)
+}
+
+function isWordPressTemplate(template: TemplateId): boolean {
+  return template === 'wordpress'
 }
 
 interface WizardFormState {
@@ -204,10 +208,52 @@ function TemplateStep({
         'Backend API service on port 8000. Includes ServiceMonitor for Prometheus scraping (app-native observability).',
     },
     {
+      key: 'python-django',
+      title: 'Python + Django',
+      description:
+        'Backend API service on port 8000 with Gunicorn. Trailing-slash health endpoint convention. Includes ServiceMonitor (app-native observability).',
+    },
+    {
+      key: 'python-flask',
+      title: 'Python + Flask',
+      description:
+        'Lightweight backend API on port 5000 with Gunicorn. Includes ServiceMonitor for Prometheus scraping (app-native observability).',
+    },
+    {
+      key: 'node-express',
+      title: 'Express.js',
+      description:
+        'Backend API service on port 3000. Includes ServiceMonitor for Prometheus scraping via prom-client (app-native observability).',
+    },
+    {
+      key: 'node-nestjs',
+      title: 'NestJS',
+      description:
+        'TypeScript backend framework on port 3000. Built-in health module and structured project layout. Includes ServiceMonitor (app-native observability).',
+    },
+    {
       key: 'static-nginx',
       title: 'Static site + Nginx',
       description:
         'Frontend or static asset server on port 80. Observability via ingress metrics (ingress-derived mode).',
+    },
+    {
+      key: 'react',
+      title: 'React (Vite)',
+      description:
+        'React SPA built with Vite. Multi-stage Dockerfile (Node build → nginx serve) on port 80. Ingress-derived observability.',
+    },
+    {
+      key: 'vue',
+      title: 'Vue (Vite)',
+      description:
+        'Vue SPA built with Vite. Multi-stage Dockerfile (Node build → nginx serve) on port 80, root-path probes, and ingress-derived observability.',
+    },
+    {
+      key: 'wordpress',
+      title: 'WordPress',
+      description:
+        'Prebuilt WordPress image on port 80 with bundled MySQL, persistent wp-content storage, /wp-login.php probes, and ingress-derived observability.',
     },
     {
       key: 'postgres',
@@ -253,34 +299,42 @@ function ConfigStep({
   onChange: (patch: Partial<WizardFormState>) => void
 }) {
   const isDb = isDatabaseTemplate(form.template)
+  const isWordPress = isWordPressTemplate(form.template)
 
   return (
     <div className="space-y-4">
+      {!isDb && !isWordPress && (
+        <div>
+          <FieldLabel htmlFor="svc-image-repo" hint="e.g. ghcr.io/wlodzimierrr/my-service (without tag)">
+            Image repository *
+          </FieldLabel>
+          <TextInput
+            id="svc-image-repo"
+            value={form.imageRepo}
+            onChange={(v) => onChange({ imageRepo: v })}
+            placeholder="ghcr.io/org/my-service"
+            required
+          />
+        </div>
+      )}
       {!isDb && (
-        <>
-          <div>
-            <FieldLabel htmlFor="svc-image-repo" hint="e.g. ghcr.io/wlodzimierrr/my-service (without tag)">
-              Image repository *
-            </FieldLabel>
-            <TextInput
-              id="svc-image-repo"
-              value={form.imageRepo}
-              onChange={(v) => onChange({ imageRepo: v })}
-              placeholder="ghcr.io/org/my-service"
-              required
-            />
-          </div>
-          <div>
-            <FieldLabel htmlFor="svc-repo-url">Source repository URL *</FieldLabel>
-            <TextInput
-              id="svc-repo-url"
-              value={form.repoUrl}
-              onChange={(v) => onChange({ repoUrl: v })}
-              placeholder="https://github.com/org/my-service"
-              required
-            />
-          </div>
-        </>
+        <div>
+          <FieldLabel htmlFor="svc-repo-url">
+            Source repository URL *
+          </FieldLabel>
+          <TextInput
+            id="svc-repo-url"
+            value={form.repoUrl}
+            onChange={(v) => onChange({ repoUrl: v })}
+            placeholder="https://github.com/org/my-service"
+            required
+          />
+        </div>
+      )}
+      {isWordPress && (
+        <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          WordPress uses the prebuilt <code className="font-mono">wordpress:latest</code> image, so no application Dockerfile or CI workflow is generated.
+        </p>
       )}
       <div>
         <FieldLabel htmlFor="svc-namespace" hint={`Defaults to service name: ${form.name || '<name>'}`}>
@@ -548,7 +602,7 @@ function validateBasic(form: WizardFormState): string {
 
 function validateConfig(form: WizardFormState): string {
   if (!isDatabaseTemplate(form.template)) {
-    if (!form.imageRepo.trim()) return 'Image repository is required.'
+    if (!isWordPressTemplate(form.template) && !form.imageRepo.trim()) return 'Image repository is required.'
     if (!form.repoUrl.trim()) return 'Source repository URL is required.'
   }
   return ''
@@ -566,14 +620,22 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
   const [submitResult, setSubmitResult] = useState<ScaffoldSubmitResponse | null>(null)
 
   const patchForm = useCallback((patch: Partial<WizardFormState>) => {
-    setForm((prev) => ({ ...prev, ...patch }))
+    setForm((prev) => {
+      const next = { ...prev, ...patch }
+      if (patch.template === 'wordpress') {
+        next.imageRepo = 'wordpress:latest'
+      }
+      return next
+    })
     setValidationError('')
   }, [])
 
   const buildPayload = (): ScaffoldServiceRequest => ({
     name: form.name.trim(),
     description: form.description.trim(),
-    imageRepo: form.imageRepo.trim() || undefined,
+    imageRepo: form.template === 'wordpress'
+      ? form.imageRepo.trim() || 'wordpress:latest'
+      : form.imageRepo.trim() || undefined,
     repoUrl: form.repoUrl.trim() || undefined,
     ownerEmail: form.ownerEmail.trim(),
     owner: form.owner.trim(),

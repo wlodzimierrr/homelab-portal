@@ -77,6 +77,107 @@ def test_generate_gitops_new_files_static_nginx_no_servicemonitor() -> None:
     assert len(files) == 16
 
 
+def test_vue_template_file_count_matches_static_nginx() -> None:
+    static_files = generate_gitops_new_files(_make_input(template="static-nginx"))
+    vue_files = generate_gitops_new_files(_make_input(template="vue"))
+    assert len(vue_files) == len(static_files)
+
+
+def test_vue_template_has_no_servicemonitor() -> None:
+    files = generate_gitops_new_files(_make_input(template="vue"))
+    assert not any("servicemonitor" in path for path in files)
+
+
+def test_vue_template_uses_root_health_path() -> None:
+    files = generate_gitops_new_files(_make_input(template="vue"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "path: /" in deployment
+
+
+def test_vue_template_container_port_80() -> None:
+    files = generate_gitops_new_files(_make_input(template="vue"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "containerPort: 80" in deployment
+
+
+def test_vue_template_container_name_is_web() -> None:
+    files = generate_gitops_new_files(_make_input(template="vue"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "name: web" in deployment
+
+
+def test_catalog_entry_vue_uses_ingress_derived_observability() -> None:
+    inp = _make_input(template="vue")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: ingress-derived" in result
+
+
+def test_catalog_entry_vue_has_dev_and_prod_envs() -> None:
+    inp = _make_input(template="vue")
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: dev" in new_entry
+    assert "name: prod" in new_entry
+
+
+def test_wordpress_template_generates_expected_file_count() -> None:
+    files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
+    assert len(files) == 22
+
+
+
+def test_wordpress_template_has_no_servicemonitor() -> None:
+    files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
+    assert not any("servicemonitor" in path for path in files)
+
+
+
+def test_wordpress_template_uses_wp_login_probes() -> None:
+    files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "path: /wp-login.php" in deployment
+
+
+
+def test_wordpress_template_includes_persistent_volume_claim() -> None:
+    files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
+    assert "apps/my-svc/base/persistentvolumeclaim.yaml" in files
+    pvc = files["apps/my-svc/base/persistentvolumeclaim.yaml"]
+    assert "my-svc-wp-content" in pvc
+
+
+
+def test_wordpress_template_includes_mysql_bundle_files() -> None:
+    files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
+    assert "apps/my-svc/base/mysql-service.yaml" in files
+    assert "apps/my-svc/base/mysql-statefulset.yaml" in files
+    assert "apps/my-svc/base/wordpress-db-secret.enc.yaml" in files
+
+
+
+def test_wordpress_template_secret_stub_has_sops_block() -> None:
+    files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
+    secret_stub = files["apps/my-svc/base/wordpress-db-secret.enc.yaml"]
+    assert "kind: Secret" in secret_stub
+    assert "sops:" in secret_stub
+    assert "WORDPRESS_DB_PASSWORD" in secret_stub
+    assert "MYSQL_ROOT_PASSWORD" in secret_stub
+
+
+
+def test_catalog_entry_wordpress_uses_ingress_derived_observability() -> None:
+    inp = _make_input(template="wordpress", image_repo="wordpress:latest")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: ingress-derived" in result
+
+
+
+def test_catalog_entry_wordpress_has_dev_and_prod_envs() -> None:
+    inp = _make_input(template="wordpress", image_repo="wordpress:latest")
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: dev" in new_entry
+    assert "name: prod" in new_entry
+
+
 def test_generate_gitops_new_files_paths_contain_service_name() -> None:
     files = generate_gitops_new_files(_make_input(name="test-svc"))
     for path in files:
@@ -402,3 +503,216 @@ def test_catalog_entry_mysql_single_env() -> None:
     new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
     assert "name: prod" in new_entry
     assert "name: dev" not in new_entry
+
+
+# ---------------------------------------------------------------------------
+# generate_gitops_new_files — python-django template
+# ---------------------------------------------------------------------------
+
+
+def test_django_template_file_count_matches_fastapi() -> None:
+    """Django uses app-native observability like FastAPI, so file count is the same."""
+    fastapi_files = generate_gitops_new_files(_make_input(template="python-fastapi"))
+    django_files = generate_gitops_new_files(_make_input(template="python-django"))
+    assert len(django_files) == len(fastapi_files)
+
+
+def test_django_template_has_servicemonitor() -> None:
+    files = generate_gitops_new_files(_make_input(template="python-django"))
+    assert any("servicemonitor" in path for path in files)
+
+
+def test_django_template_health_path_trailing_slash() -> None:
+    files = generate_gitops_new_files(_make_input(template="python-django"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "/health/" in deployment
+
+
+def test_django_template_container_port_8000() -> None:
+    files = generate_gitops_new_files(_make_input(template="python-django"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "containerPort: 8000" in deployment
+
+
+def test_django_template_container_name_is_app() -> None:
+    files = generate_gitops_new_files(_make_input(template="python-django"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "name: app" in deployment
+
+
+def test_django_template_dev_and_prod_overlays() -> None:
+    files = generate_gitops_new_files(_make_input(template="python-django"))
+    assert "apps/my-svc/envs/dev/kustomization.yaml" in files
+    assert "apps/my-svc/envs/prod/kustomization.yaml" in files
+    assert "apps/my-svc/envs/prod/patch-ingress.yaml" in files
+
+
+def test_catalog_entry_django_uses_app_native_observability() -> None:
+    inp = _make_input(template="python-django")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: app-native" in result
+
+
+def test_catalog_entry_django_has_dev_and_prod_envs() -> None:
+    inp = _make_input(template="python-django")
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: dev" in new_entry
+    assert "name: prod" in new_entry
+
+
+# ---------------------------------------------------------------------------
+# generate_gitops_new_files — python-flask template
+# ---------------------------------------------------------------------------
+
+
+def test_flask_template_file_count_matches_fastapi() -> None:
+    """Flask uses app-native observability like FastAPI, so file count is the same."""
+    fastapi_files = generate_gitops_new_files(_make_input(template="python-fastapi"))
+    flask_files = generate_gitops_new_files(_make_input(template="python-flask"))
+    assert len(flask_files) == len(fastapi_files)
+
+
+def test_flask_template_has_servicemonitor() -> None:
+    files = generate_gitops_new_files(_make_input(template="python-flask"))
+    assert any("servicemonitor" in path for path in files)
+
+
+def test_flask_template_container_port_5000() -> None:
+    files = generate_gitops_new_files(_make_input(template="python-flask"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "containerPort: 5000" in deployment
+
+
+def test_flask_template_health_path() -> None:
+    files = generate_gitops_new_files(_make_input(template="python-flask"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "/health" in deployment
+
+
+def test_flask_template_network_policy_port_5000() -> None:
+    files = generate_gitops_new_files(_make_input(template="python-flask"))
+    np = files["apps/my-svc/base/networkpolicy-allow-ingress.yaml"]
+    assert "5000" in np
+
+
+def test_catalog_entry_flask_uses_app_native_observability() -> None:
+    inp = _make_input(template="python-flask")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: app-native" in result
+
+
+def test_catalog_entry_flask_has_dev_and_prod_envs() -> None:
+    inp = _make_input(template="python-flask")
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: dev" in new_entry
+    assert "name: prod" in new_entry
+
+
+# ---------------------------------------------------------------------------
+# generate_gitops_new_files — node-express template
+# ---------------------------------------------------------------------------
+
+
+def test_express_template_file_count_matches_fastapi() -> None:
+    """Express uses app-native observability like FastAPI, so file count is the same."""
+    fastapi_files = generate_gitops_new_files(_make_input(template="python-fastapi"))
+    express_files = generate_gitops_new_files(_make_input(template="node-express"))
+    assert len(express_files) == len(fastapi_files)
+
+
+def test_express_template_has_servicemonitor() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-express"))
+    assert any("servicemonitor" in path for path in files)
+
+
+def test_express_template_container_port_3000() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-express"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "containerPort: 3000" in deployment
+
+
+def test_express_template_health_path() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-express"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "/health" in deployment
+
+
+def test_express_template_network_policy_port_3000() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-express"))
+    np = files["apps/my-svc/base/networkpolicy-allow-ingress.yaml"]
+    assert "3000" in np
+
+
+def test_express_template_dev_and_prod_overlays() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-express"))
+    assert "apps/my-svc/envs/dev/kustomization.yaml" in files
+    assert "apps/my-svc/envs/prod/kustomization.yaml" in files
+    assert "apps/my-svc/envs/prod/patch-ingress.yaml" in files
+
+
+def test_catalog_entry_express_uses_app_native_observability() -> None:
+    inp = _make_input(template="node-express")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: app-native" in result
+
+
+def test_catalog_entry_express_has_dev_and_prod_envs() -> None:
+    inp = _make_input(template="node-express")
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: dev" in new_entry
+    assert "name: prod" in new_entry
+
+
+# ---------------------------------------------------------------------------
+# generate_gitops_new_files — node-nestjs template
+# ---------------------------------------------------------------------------
+
+
+def test_nestjs_template_file_count_matches_fastapi() -> None:
+    """NestJS uses app-native observability like FastAPI, so file count is the same."""
+    fastapi_files = generate_gitops_new_files(_make_input(template="python-fastapi"))
+    nestjs_files = generate_gitops_new_files(_make_input(template="node-nestjs"))
+    assert len(nestjs_files) == len(fastapi_files)
+
+
+def test_nestjs_template_has_servicemonitor() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-nestjs"))
+    assert any("servicemonitor" in path for path in files)
+
+
+def test_nestjs_template_container_port_3000() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-nestjs"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "containerPort: 3000" in deployment
+
+
+def test_nestjs_template_health_path() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-nestjs"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "/health" in deployment
+
+
+def test_nestjs_template_network_policy_port_3000() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-nestjs"))
+    np = files["apps/my-svc/base/networkpolicy-allow-ingress.yaml"]
+    assert "3000" in np
+
+
+def test_nestjs_template_dev_and_prod_overlays() -> None:
+    files = generate_gitops_new_files(_make_input(template="node-nestjs"))
+    assert "apps/my-svc/envs/dev/kustomization.yaml" in files
+    assert "apps/my-svc/envs/prod/kustomization.yaml" in files
+    assert "apps/my-svc/envs/prod/patch-ingress.yaml" in files
+
+
+def test_catalog_entry_nestjs_uses_app_native_observability() -> None:
+    inp = _make_input(template="node-nestjs")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: app-native" in result
+
+
+def test_catalog_entry_nestjs_has_dev_and_prod_envs() -> None:
+    inp = _make_input(template="node-nestjs")
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: dev" in new_entry
+    assert "name: prod" in new_entry

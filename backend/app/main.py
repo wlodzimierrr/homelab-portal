@@ -6930,7 +6930,7 @@ class ScaffoldServiceRequest(BaseModel):
     repo_url: str = Field(alias="repoUrl", default="")
     owner_email: str = Field(alias="ownerEmail")
     owner: str = ""
-    template: Literal["python-fastapi", "static-nginx", "postgres", "mysql"] = "python-fastapi"
+    template: Literal["python-fastapi", "python-django", "python-flask", "static-nginx", "react", "vue", "wordpress", "node-express", "node-nestjs", "postgres", "mysql"] = "python-fastapi"
     namespace: str = ""
     dev_host: str = Field(alias="devHost", default="")
     prod_host: str = Field(alias="prodHost", default="")
@@ -6976,10 +6976,13 @@ def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInp
     prod_host = payload.prod_host.strip() or f"{name}.homelab.local"
     base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
     public_host = payload.public_host.strip() or f"{name}.{base_domain}"
+    image_repo = payload.image_repo.strip()
+    if payload.template == "wordpress" and not image_repo:
+        image_repo = "wordpress:latest"
     return ScaffoldServiceInput(
         name=name,
         description=payload.description.strip(),
-        image_repo=payload.image_repo.strip(),
+        image_repo=image_repo,
         repo_url=payload.repo_url.strip(),
         owner_email=payload.owner_email.strip(),
         owner=payload.owner.strip(),

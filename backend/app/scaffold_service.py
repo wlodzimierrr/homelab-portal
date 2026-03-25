@@ -17,6 +17,22 @@ _TEMPLATES: dict[str, dict[str, object]] = {
         "container_name": "app",
         "default_observability_mode": "app-native",
     },
+    "python-django": {
+        "container_port": 8000,
+        "service_port": 80,
+        "health_path": "/health/",
+        "readiness_path": "/health/",
+        "container_name": "app",
+        "default_observability_mode": "app-native",
+    },
+    "python-flask": {
+        "container_port": 5000,
+        "service_port": 80,
+        "health_path": "/health",
+        "readiness_path": "/health",
+        "container_name": "app",
+        "default_observability_mode": "app-native",
+    },
     "static-nginx": {
         "container_port": 80,
         "service_port": 80,
@@ -24,6 +40,46 @@ _TEMPLATES: dict[str, dict[str, object]] = {
         "readiness_path": "/health",
         "container_name": "web",
         "default_observability_mode": "ingress-derived",
+    },
+    "react": {
+        "container_port": 80,
+        "service_port": 80,
+        "health_path": "/health",
+        "readiness_path": "/health",
+        "container_name": "web",
+        "default_observability_mode": "ingress-derived",
+    },
+    "vue": {
+        "container_port": 80,
+        "service_port": 80,
+        "health_path": "/",
+        "readiness_path": "/",
+        "container_name": "web",
+        "default_observability_mode": "ingress-derived",
+    },
+    "wordpress": {
+        "container_port": 80,
+        "service_port": 80,
+        "health_path": "/wp-login.php",
+        "readiness_path": "/wp-login.php",
+        "container_name": "web",
+        "default_observability_mode": "ingress-derived",
+    },
+    "node-express": {
+        "container_port": 3000,
+        "service_port": 80,
+        "health_path": "/health",
+        "readiness_path": "/health",
+        "container_name": "app",
+        "default_observability_mode": "app-native",
+    },
+    "node-nestjs": {
+        "container_port": 3000,
+        "service_port": 80,
+        "health_path": "/health",
+        "readiness_path": "/health",
+        "container_name": "app",
+        "default_observability_mode": "app-native",
     },
     "postgres": {
         "db_port": 5432,
@@ -56,7 +112,7 @@ class ScaffoldServiceInput:
     repo_url: str
     owner_email: str
     owner: str
-    template: Literal["python-fastapi", "static-nginx", "postgres", "mysql"]
+    template: Literal["python-fastapi", "python-django", "python-flask", "static-nginx", "react", "vue", "wordpress", "node-express", "node-nestjs", "postgres", "mysql"]
     namespace: str
     dev_host: str
     prod_host: str
@@ -80,6 +136,8 @@ def generate_gitops_new_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     """Return all NEW files keyed by path relative to the gitops root."""
     if inp.template in ("postgres", "mysql"):
         return _generate_database_gitops_files(inp)
+    if inp.template == "wordpress":
+        return _generate_wordpress_gitops_files(inp)
 
     t = _TEMPLATES[inp.template]
     container_port = int(t["container_port"])  # type: ignore[arg-type]
@@ -117,8 +175,9 @@ def generate_gitops_new_files(inp: ScaffoldServiceInput) -> dict[str, str]:
         repo_url=inp.workloads_repo_url,
     )
     files[f"environments/prod/workloads/{inp.name}-app.yaml"] = (
-        "# Generated for future prod activation.\n"
-        "# Keep environments/prod/workloads/kustomization.yaml empty while single-cluster safety mode is active.\n"
+        """# Generated for future prod activation.
+# Keep environments/prod/workloads/kustomization.yaml empty while single-cluster safety mode is active.
+"""
         + _generate_application_manifest(
             app_name=f"{inp.name}-prod",
             project_name=inp.name,
@@ -626,6 +685,610 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
         ),
     }
 
+
+def _generate_wordpress_gitops_files(inp: ScaffoldServiceInput) -> dict[str, str]:
+    files: dict[str, str] = {}
+
+    base_prefix = f"apps/{inp.name}/base"
+    for rel_path, content in _generate_wordpress_base_files(inp).items():
+        files[f"{base_prefix}/{rel_path}"] = content
+
+    dev_prefix = f"apps/{inp.name}/envs/dev"
+    for rel_path, content in _generate_wordpress_overlay_files(inp, "dev").items():
+        files[f"{dev_prefix}/{rel_path}"] = content
+
+    prod_prefix = f"apps/{inp.name}/envs/prod"
+    for rel_path, content in _generate_wordpress_overlay_files(inp, "prod").items():
+        files[f"{prod_prefix}/{rel_path}"] = content
+
+    files[f"environments/dev/workloads/{inp.name}-app.yaml"] = _generate_application_manifest(
+        app_name=f"{inp.name}-dev",
+        project_name=inp.name,
+        path=f"apps/{inp.name}/envs/dev",
+        namespace=inp.namespace,
+        repo_url=inp.workloads_repo_url,
+    )
+    files[f"environments/prod/workloads/{inp.name}-app.yaml"] = (
+        "# Generated for future prod activation.\n"
+        "# Keep environments/prod/workloads/kustomization.yaml empty while single-cluster safety mode is active.\n"
+        + _generate_application_manifest(
+            app_name=f"{inp.name}-prod",
+            project_name=inp.name,
+            path=f"apps/{inp.name}/envs/prod",
+            namespace=inp.namespace,
+            repo_url=inp.workloads_repo_url,
+        )
+    )
+
+    return files
+
+
+
+def _generate_wordpress_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
+    db_secret_name = f"{inp.name}-wordpress-db"
+    db_service_name = f"{inp.name}-mysql"
+    resources = [
+        "namespace.yaml",
+        "serviceaccount.yaml",
+        "wordpress-db-secret.enc.yaml",
+        "persistentvolumeclaim.yaml",
+        "deployment.yaml",
+        "service.yaml",
+        "ingress.yaml",
+        "mysql-service.yaml",
+        "mysql-statefulset.yaml",
+        "networkpolicy-default-deny.yaml",
+        "networkpolicy-allow-dns-egress.yaml",
+        "networkpolicy-allow-ingress.yaml",
+        "networkpolicy-allow-mysql-egress.yaml",
+        "networkpolicy-allow-mysql-ingress.yaml",
+    ]
+
+    return {
+        "kustomization.yaml": "\n".join(
+            [
+                "apiVersion: kustomize.config.k8s.io/v1beta1",
+                "kind: Kustomization",
+                "resources:",
+                *[f"  - {resource}" for resource in resources],
+            ]
+        ) + "\n",
+        "namespace.yaml": _render_template(
+            """
+            apiVersion: v1
+            kind: Namespace
+            metadata:
+              name: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+            """,
+            namespace=inp.namespace,
+            name=inp.name,
+        ),
+        "serviceaccount.yaml": _render_template(
+            """
+            apiVersion: v1
+            kind: ServiceAccount
+            metadata:
+              name: {name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/component: web
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+        ),
+        "wordpress-db-secret.enc.yaml": _render_template(
+            """
+            # SOPS-encrypted Secret stub for WordPress + MySQL credentials.
+            # Rotate by editing the placeholder values and re-encrypting with SOPS.
+            # See docs/runbooks/sops-secrets.md for the full workflow.
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: {db_secret_name}
+              namespace: {namespace}
+            type: Opaque
+            stringData:
+              WORDPRESS_DB_USER: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+              WORDPRESS_DB_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+              WORDPRESS_DB_NAME: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+              MYSQL_ROOT_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+            sops:
+              kms: []
+              gcp_kms: []
+              azure_kv: []
+              hc_vault: []
+              age:
+                - recipient: age1xxx
+                  enc: |
+                    -----BEGIN AGE ENCRYPTED FILE-----
+                    ...
+                    -----END AGE ENCRYPTED FILE-----
+              lastmodified: "2026-03-25T00:00:00Z"
+              mac: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+              pgp: []
+              encrypted_regex: ^(stringData|data)$
+              version: 3.8.1
+            """,
+            db_secret_name=db_secret_name,
+            namespace=inp.namespace,
+        ),
+        "persistentvolumeclaim.yaml": _render_template(
+            """
+            apiVersion: v1
+            kind: PersistentVolumeClaim
+            metadata:
+              name: {name}-wp-content
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/component: web
+            spec:
+              accessModes:
+                - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 10Gi
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+        ),
+        "deployment.yaml": _render_template(
+            """
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: {name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/instance: {name}
+                app.kubernetes.io/component: web
+            spec:
+              replicas: 1
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {name}
+                  app.kubernetes.io/component: web
+              template:
+                metadata:
+                  labels:
+                    app.kubernetes.io/name: {name}
+                    app.kubernetes.io/component: web
+                spec:
+                  serviceAccountName: {name}
+                  containers:
+                    - name: web
+                      image: {image_repo}
+                      imagePullPolicy: IfNotPresent
+                      ports:
+                        - name: http
+                          containerPort: 80
+                      env:
+                        - name: WORDPRESS_DB_HOST
+                          value: {db_service_name}:3306
+                        - name: WORDPRESS_DB_USER
+                          valueFrom:
+                            secretKeyRef:
+                              name: {db_secret_name}
+                              key: WORDPRESS_DB_USER
+                        - name: WORDPRESS_DB_PASSWORD
+                          valueFrom:
+                            secretKeyRef:
+                              name: {db_secret_name}
+                              key: WORDPRESS_DB_PASSWORD
+                        - name: WORDPRESS_DB_NAME
+                          valueFrom:
+                            secretKeyRef:
+                              name: {db_secret_name}
+                              key: WORDPRESS_DB_NAME
+                      readinessProbe:
+                        httpGet:
+                          path: /wp-login.php
+                          port: http
+                        initialDelaySeconds: 10
+                        periodSeconds: 10
+                      livenessProbe:
+                        httpGet:
+                          path: /wp-login.php
+                          port: http
+                        initialDelaySeconds: 20
+                        periodSeconds: 20
+                      volumeMounts:
+                        - name: wp-content
+                          mountPath: /var/www/html/wp-content
+                      resources:
+                        requests:
+                          cpu: 100m
+                          memory: 256Mi
+                        limits:
+                          cpu: 500m
+                          memory: 512Mi
+                  volumes:
+                    - name: wp-content
+                      persistentVolumeClaim:
+                        claimName: {name}-wp-content
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+            image_repo=inp.image_repo,
+            db_service_name=db_service_name,
+            db_secret_name=db_secret_name,
+        ),
+        "service.yaml": _render_template(
+            """
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: {name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/instance: {name}
+                app.kubernetes.io/component: web
+            spec:
+              type: ClusterIP
+              selector:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/component: web
+              ports:
+                - name: http
+                  port: 80
+                  targetPort: http
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+        ),
+        "ingress.yaml": _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: Ingress
+            metadata:
+              name: {name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+              annotations:
+                traefik.ingress.kubernetes.io/router.entrypoints: web
+            spec:
+              ingressClassName: traefik
+              rules:
+                - host: {dev_host}
+                  http:
+                    paths:
+                      - path: /
+                        pathType: Prefix
+                        backend:
+                          service:
+                            name: {name}
+                            port:
+                              number: 80
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+            dev_host=inp.dev_host,
+        ),
+        "mysql-service.yaml": _render_template(
+            """
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: {db_service_name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/component: mysql
+            spec:
+              clusterIP: None
+              selector:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/component: mysql
+              ports:
+                - name: mysql
+                  port: 3306
+                  targetPort: mysql
+            """,
+            db_service_name=db_service_name,
+            namespace=inp.namespace,
+            name=inp.name,
+        ),
+        "mysql-statefulset.yaml": _render_template(
+            """
+            apiVersion: apps/v1
+            kind: StatefulSet
+            metadata:
+              name: {db_service_name}
+              namespace: {namespace}
+              labels:
+                app.kubernetes.io/name: {name}
+                app.kubernetes.io/component: mysql
+            spec:
+              serviceName: {db_service_name}
+              replicas: 1
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {name}
+                  app.kubernetes.io/component: mysql
+              template:
+                metadata:
+                  labels:
+                    app.kubernetes.io/name: {name}
+                    app.kubernetes.io/component: mysql
+                spec:
+                  containers:
+                    - name: mysql
+                      image: mysql:8.0
+                      imagePullPolicy: IfNotPresent
+                      ports:
+                        - name: mysql
+                          containerPort: 3306
+                      env:
+                        - name: MYSQL_ROOT_PASSWORD
+                          valueFrom:
+                            secretKeyRef:
+                              name: {db_secret_name}
+                              key: MYSQL_ROOT_PASSWORD
+                        - name: MYSQL_USER
+                          valueFrom:
+                            secretKeyRef:
+                              name: {db_secret_name}
+                              key: WORDPRESS_DB_USER
+                        - name: MYSQL_PASSWORD
+                          valueFrom:
+                            secretKeyRef:
+                              name: {db_secret_name}
+                              key: WORDPRESS_DB_PASSWORD
+                        - name: MYSQL_DATABASE
+                          valueFrom:
+                            secretKeyRef:
+                              name: {db_secret_name}
+                              key: WORDPRESS_DB_NAME
+                      startupProbe:
+                        exec:
+                          command:
+                            - mysqladmin
+                            - ping
+                            - -h
+                            - 127.0.0.1
+                        periodSeconds: 2
+                        timeoutSeconds: 2
+                        failureThreshold: 30
+                      readinessProbe:
+                        exec:
+                          command:
+                            - mysqladmin
+                            - ping
+                            - -h
+                            - 127.0.0.1
+                        periodSeconds: 5
+                        timeoutSeconds: 3
+                        failureThreshold: 6
+                      volumeMounts:
+                        - name: mysql-data
+                          mountPath: /var/lib/mysql
+                      resources:
+                        requests:
+                          cpu: 100m
+                          memory: 256Mi
+                        limits:
+                          cpu: 500m
+                          memory: 512Mi
+              volumeClaimTemplates:
+                - metadata:
+                    name: mysql-data
+                  spec:
+                    accessModes:
+                      - ReadWriteOnce
+                    resources:
+                      requests:
+                        storage: 10Gi
+            """,
+            db_service_name=db_service_name,
+            namespace=inp.namespace,
+            name=inp.name,
+            db_secret_name=db_secret_name,
+        ),
+        "networkpolicy-default-deny.yaml": _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: default-deny
+              namespace: {namespace}
+            spec:
+              podSelector: {{}}
+              policyTypes:
+                - Ingress
+                - Egress
+            """,
+            namespace=inp.namespace,
+        ),
+        "networkpolicy-allow-dns-egress.yaml": _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-dns-egress
+              namespace: {namespace}
+            spec:
+              podSelector: {{}}
+              policyTypes:
+                - Egress
+              egress:
+                - to:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: kube-system
+                  ports:
+                    - protocol: UDP
+                      port: 53
+                    - protocol: TCP
+                      port: 53
+            """,
+            namespace=inp.namespace,
+        ),
+        "networkpolicy-allow-ingress.yaml": _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-ingress-from-traefik
+              namespace: {namespace}
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {name}
+                  app.kubernetes.io/component: web
+              policyTypes:
+                - Ingress
+              ingress:
+                - from:
+                    - namespaceSelector:
+                        matchLabels:
+                          kubernetes.io/metadata.name: kube-system
+                  ports:
+                    - protocol: TCP
+                      port: 80
+            """,
+            namespace=inp.namespace,
+            name=inp.name,
+        ),
+        "networkpolicy-allow-mysql-egress.yaml": _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-mysql-egress
+              namespace: {namespace}
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {name}
+                  app.kubernetes.io/component: web
+              policyTypes:
+                - Egress
+              egress:
+                - to:
+                    - podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: {name}
+                          app.kubernetes.io/component: mysql
+                  ports:
+                    - protocol: TCP
+                      port: 3306
+            """,
+            namespace=inp.namespace,
+            name=inp.name,
+        ),
+        "networkpolicy-allow-mysql-ingress.yaml": _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: allow-mysql-ingress
+              namespace: {namespace}
+            spec:
+              podSelector:
+                matchLabels:
+                  app.kubernetes.io/name: {name}
+                  app.kubernetes.io/component: mysql
+              policyTypes:
+                - Ingress
+              ingress:
+                - from:
+                    - podSelector:
+                        matchLabels:
+                          app.kubernetes.io/name: {name}
+                          app.kubernetes.io/component: web
+                  ports:
+                    - protocol: TCP
+                      port: 3306
+            """,
+            namespace=inp.namespace,
+            name=inp.name,
+        ),
+    }
+
+
+def _generate_wordpress_overlay_files(inp: ScaffoldServiceInput, env_name: str) -> dict[str, str]:
+    files = {
+        "kustomization.yaml": _render_template(
+            """
+            apiVersion: kustomize.config.k8s.io/v1beta1
+            kind: Kustomization
+            resources:
+              - ../../base
+            commonLabels:
+              homelab.env: {env_name}
+            patches:
+              - path: patch-deployment.yaml
+            """,
+            env_name=env_name,
+        ),
+        "patch-deployment.yaml": _render_template(
+            """
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: {name}
+              namespace: {namespace}
+            spec:
+              replicas: {replicas}
+              template:
+                spec:
+                  containers:
+                    - name: web
+                      resources:
+                        requests:
+                          cpu: {cpu_request}
+                          memory: {memory_request}
+                        limits:
+                          cpu: {cpu_limit}
+                          memory: {memory_limit}
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+            replicas="2" if env_name == "prod" else "1",
+            cpu_request="200m" if env_name == "prod" else "100m",
+            memory_request="512Mi" if env_name == "prod" else "256Mi",
+            cpu_limit="1000m" if env_name == "prod" else "500m",
+            memory_limit="1Gi" if env_name == "prod" else "512Mi",
+        ),
+    }
+
+    if env_name == "prod":
+        files["kustomization.yaml"] = _render_template(
+            """
+            apiVersion: kustomize.config.k8s.io/v1beta1
+            kind: Kustomization
+            resources:
+              - ../../base
+            commonLabels:
+              homelab.env: prod
+            patches:
+              - path: patch-deployment.yaml
+              - path: patch-ingress.yaml
+            """
+        )
+        files["patch-ingress.yaml"] = _render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: Ingress
+            metadata:
+              name: {name}
+              namespace: {namespace}
+            spec:
+              rules:
+                - host: {prod_host}
+            """,
+            name=inp.name,
+            namespace=inp.namespace,
+            prod_host=inp.prod_host,
+        )
+
+    return files
 
 def _generate_base_files(
     inp: ScaffoldServiceInput,
