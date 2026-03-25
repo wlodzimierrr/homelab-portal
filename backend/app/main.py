@@ -162,6 +162,9 @@ http_request_duration_seconds = Histogram(
     labelnames=("namespace", "app", "method", "path"),
 )
 
+# Portal deployment workflows are intentionally allowlisted to a small set of
+# repositories and Argo app targets. These constants back the GitHub/PR-driven
+# deploy, promote, and rollback endpoints later in the file.
 DEFAULT_GITHUB_OWNER = "wlodzimierrr"
 DEFAULT_PORTAL_REPO = "homelab-portal"
 DEFAULT_WORKLOADS_REPO = "homelab-workloads"
@@ -289,6 +292,10 @@ def stop_deployment_reconciler_loop() -> None:
     deployment_reconciler_thread = None
 
 
+# Response models are grouped here because this module still owns most of the API
+# surface. They double as the backend/frontend contract for auth, metadata,
+# deployments, observability, and compatibility endpoints.
+
 class MonitoringProviderStatusResponse(BaseModel):
     provider: str
     base_url: str = Field(alias="baseUrl")
@@ -335,6 +342,9 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     expires_at: str
 
+
+# Metadata responses expose the two catalog views the frontend merges together:
+# GitOps project rows and live service-registry rows.
 
 class Project(BaseModel):
     id: str
@@ -396,6 +406,9 @@ class ServiceDetailResponse(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+
+# Deployment responses model both persisted deployment records and transient locks
+# that prevent overlapping GitOps mutations for the same service/environment.
 
 class DeploymentLockResponse(BaseModel):
     service_id: str = Field(..., alias="serviceId")
@@ -533,6 +546,9 @@ class CreateDeploymentRecordRequest(BaseModel):
 
 ROLLBACK_TAG_RE = re.compile(r"^(sha-[0-9a-f]{40}|v?[0-9]+(\.[0-9]+){2}([.-][0-9A-Za-z.-]+)?)$")
 
+
+# Portal mutation payloads return PR/workflow-oriented responses because these
+# actions are implemented as GitHub/GitOps changes rather than direct cluster writes.
 
 class PortalRollbackRequest(BaseModel):
     target_environment: Literal["prod"] = Field(default="prod", alias="targetEnvironment")
@@ -840,6 +856,9 @@ class PortalServiceRollbackResponse(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+
+# Diagnostics and observability responses are used by the admin/service pages to
+# explain freshness, join drift, provider failures, and no-data states.
 
 class ServiceRegistrySyncFailure(BaseModel):
     source: str
@@ -1215,6 +1234,9 @@ class MonitoringIncidentsCompatEnvelope(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+# Release/compatibility responses preserve a simpler contract for older UI adapters
+# while the richer deployment and observability endpoints continue to evolve.
+
 class ReleaseArgoStateResponse(BaseModel):
     app_name: str = Field(alias="appName")
     sync_status: str = Field(alias="syncStatus")
@@ -1318,6 +1340,10 @@ def require_admin(
         detail="User is not authorized for admin actions",
     )
 
+
+# Internal helpers below are roughly grouped by concern: auth/database access,
+# background reconciliation, catalog loading, GitHub/GHCR deploy workflows, live
+# runtime enrichment, and observability query helpers.
 
 def _with_connection() -> psycopg.Connection:
     return psycopg.connect(get_psycopg_database_url())
@@ -1799,6 +1825,9 @@ def _extract_version_from_image_ref(image_ref: str | None) -> str | None:
     return trimmed
 
 
+# GitHub and GHCR helpers centralize environment-driven repository/token lookup so
+# deploy/promote/rollback flows all resolve the same repos, branches, and packages.
+
 def _portal_repo_slug() -> str:
     configured = os.getenv("PORTAL_DEPLOY_PORTAL_REPO", "").strip()
     if configured:
@@ -1887,6 +1916,9 @@ def _github_api_json(path: str, *, timeout_seconds: float = 10.0) -> object:
         return {}
     return json.loads(raw)
 
+
+# These helpers enforce which services are portal-managed for deploy/promote/rollback
+# operations instead of letting any arbitrary service_id mutate GitOps overlays.
 
 def _dev_deploy_target(service_id: str) -> dict[str, object]:
     target = DEV_DEPLOY_TARGETS.get(service_id)
@@ -2690,6 +2722,9 @@ def _coalesce_service_status(primary: object, fallback: object) -> str | None:
     return primary_value or fallback_value
 
 
+# Live-runtime helpers backfill service details when release traceability data
+# is missing or stale. They query Kubernetes/Argo directly and return best-effort
+# snapshots rather than failing the whole request path.
 def _list_live_deployments_for_service(
     service_row: dict[str, str | None],
 ) -> list[dict[str, object]]:
@@ -2874,6 +2909,9 @@ def _extract_live_deployment_timestamp(deployment: dict[str, object]) -> str | N
     return None
 
 
+# Normalize live deployment and Argo state into the same row shape used by
+# release history so downstream detail/history endpoints can enrich records without
+# branching on data source.
 def _load_live_service_runtime_rows(
     service_row: dict[str, str | None],
 ) -> list[dict[str, object]]:
@@ -2990,6 +3028,9 @@ def _coalesce_release_string(
     return None
 
 
+# Release rows come from CI/Argo traceability joins, but those sources can lag
+# behind the actual cluster. This merge prefers explicit release metadata first, then
+# fills gaps from the live runtime snapshot to keep the UI informative during drift.
 def _enrich_release_row_with_live_runtime(
     row: dict[str, object],
     service_row: dict[str, str | None] | None,
@@ -3070,6 +3111,9 @@ def _enrich_release_row_with_live_runtime(
     }
 
 
+# Batch enrichment resolves the best matching service row once, then overlays live
+# runtime details per release row so the history endpoint can return consistent data
+# for mixed environments and partially synced registry rows.
 def _enrich_release_rows_with_live_runtime(
     rows: list[dict[str, object]],
     *,
@@ -3137,6 +3181,9 @@ def _deployment_history_cache_ttl_seconds() -> int:
     return min(value, 300)
 
 
+# Observability range helpers normalize user/env configuration into bounded query
+# windows so Prometheus/Loki requests stay stable even when deployment records are
+# sparse or timestamps need padding.
 def _deployment_comparison_window_token() -> str:
     raw = str(os.getenv("OBS_DEPLOYMENT_COMPARISON_WINDOW", "1h") or "").strip()
     if not raw:
@@ -3264,6 +3311,9 @@ def _query_prometheus_comparison_snapshot(
     return None
 
 
+# Deployment metric comparisons are cached per exact service/window tuple because
+# the same deployment details view often re-requests snapshots while operators page
+# around related data. Missing namespace/app metadata short-circuits to no data.
 def _load_metric_snapshots_for_window(
     service_row: dict[str, str | None] | None,
     *,
@@ -4160,6 +4210,9 @@ def _build_no_window_logs_response(
     )
 
 
+# Monitoring provider failures are downgraded into structured partial responses so
+# the frontend can still render the deployment page and show provider health instead
+# of failing the entire composite endpoint.
 def _extract_provider_failure(exc: HTTPException) -> tuple[str, dict[str, object] | None]:
     detail = exc.detail
     if isinstance(detail, dict):
@@ -4254,6 +4307,9 @@ def _build_provider_error_logs_response(
     )
 
 
+# Metrics/timeline/log builders all follow the same contract: query one provider,
+# translate empty results into explicit `no_data`, and attach provider status so the
+# UI can distinguish retention gaps from provider outages.
 def _build_deployment_metrics_response(
     *,
     service_id: str,
@@ -4523,6 +4579,10 @@ def _build_deployment_logs_response(
     )
 
 
+# Primary API endpoints begin here. The order loosely follows how the frontend
+# consumes them: system/auth, metadata, deployment mutations, observability, then
+# scaffold/admin maintenance features.
+
 @app.get(
     "/health",
     response_model=HealthResponse,
@@ -4607,6 +4667,8 @@ def list_projects(
     response_model=ProjectCatalogDiagnosticsResponse,
     tags=["metadata"],
 )
+# Freshness/diagnostic endpoints intentionally compute both source age and join
+# mismatch state so operators can tell whether data is old, empty, or structurally off.
 def get_project_catalog_diagnostics(
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
@@ -4953,6 +5015,9 @@ def cancel_deployment(
     status_code=status.HTTP_202_ACCEPTED,
     tags=["metadata"],
 )
+# Deploy-to-dev is a GitOps mutation endpoint: resolve the newest portal image,
+# patch the target overlays in a branch, open a PR, then create a pending deployment
+# record/lock so the UI can track the request before Argo applies it.
 def request_portal_deploy_to_dev(
     service_id: str,
     payload: PortalDeployToDevRequest,
@@ -5159,6 +5224,8 @@ def request_portal_deploy_to_dev(
     status_code=status.HTTP_202_ACCEPTED,
     tags=["metadata"],
 )
+# Promote-to-prod follows the same GitOps pattern as deploy-to-dev, but its source
+# of truth is the current dev overlay and it always targets the prod overlays.
 def request_portal_promote_to_prod(
     service_id: str,
     payload: PortalPromoteToProdRequest,
@@ -5674,6 +5741,8 @@ def list_service_rollback_candidates(
     status_code=status.HTTP_202_ACCEPTED,
     tags=["metadata"],
 )
+# Service rollback is also PR-driven. Candidates are discovered from recent image
+# history, then the selected tag is written back into the appropriate overlay files.
 def request_service_rollback(
     service_id: str,
     payload: PortalServiceRollbackRequest,
@@ -6008,6 +6077,8 @@ def get_service_deployment_info(
     response_model=DeploymentObservabilityResponse,
     tags=["monitoring"],
 )
+# Deployment observability endpoints compose metrics, timeline, and logs around a
+# specific deployment window so regressions can be reviewed in one API call.
 def get_service_deployment_observability(
     service_id: str,
     deployment_id: str | None = Query(default=None, alias="deploymentId"),
@@ -6050,6 +6121,9 @@ def get_service_deployment_observability(
             ),
         )
 
+    # Each provider-backed section fails independently. A Prometheus/Loki outage
+    # should surface as section-level no-data with provider diagnostics, not as a
+    # hard failure for the overall deployment observability view.
     try:
         metrics = _build_deployment_metrics_response(
             service_id=service_id,
@@ -6309,6 +6383,8 @@ def get_monitoring_provider_diagnostics(
     response_model=ServiceMetricsSummaryResponse,
     tags=["monitoring"],
 )
+# The service-level observability endpoints below share the same identity resolution
+# and provider-error translation patterns, but return progressively richer views.
 def get_service_metrics_summary(
     service_id: str,
     selected_range: str = Query(
@@ -6942,6 +7018,9 @@ def get_service_logs_quickview(
     )
 
 
+# Admin feature sections that follow are intentionally grouped by ticket/feature
+# lineage because they evolved incrementally and still share helper assumptions.
+
 # ---------------------------------------------------------------------------
 # T6.4.3 — Service scaffold endpoints
 # ---------------------------------------------------------------------------
@@ -6963,7 +7042,7 @@ class ScaffoldServiceRequest(BaseModel):
     repo_url: str = Field(alias="repoUrl", default="")
     owner_email: str = Field(alias="ownerEmail")
     owner: str = ""
-    template: Literal["python-fastapi", "python-django", "python-flask", "static-nginx", "react", "vue", "wordpress", "node-express", "node-nestjs", "postgres", "mysql"] = "python-fastapi"
+    template: Literal["python-fastapi", "python-django", "python-flask", "static-nginx", "react", "nextjs", "vue", "wordpress", "node-express", "node-nestjs", "postgres", "mysql"] = "python-fastapi"
     namespace: str = ""
     dev_host: str = Field(alias="devHost", default="")
     prod_host: str = Field(alias="prodHost", default="")

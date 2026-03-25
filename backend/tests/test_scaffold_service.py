@@ -119,6 +119,101 @@ def test_catalog_entry_vue_has_dev_and_prod_envs() -> None:
     assert "name: prod" in new_entry
 
 
+def test_react_template_file_count_matches_static_nginx() -> None:
+    static_files = generate_gitops_new_files(_make_input(template="static-nginx"))
+    react_files = generate_gitops_new_files(_make_input(template="react"))
+    assert len(react_files) == len(static_files)
+
+
+def test_react_template_has_no_servicemonitor() -> None:
+    files = generate_gitops_new_files(_make_input(template="react"))
+    assert not any("servicemonitor" in path for path in files)
+
+
+def test_react_template_health_path() -> None:
+    files = generate_gitops_new_files(_make_input(template="react"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "path: /health" in deployment
+
+
+def test_react_template_container_port_80() -> None:
+    files = generate_gitops_new_files(_make_input(template="react"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "containerPort: 80" in deployment
+
+
+def test_react_template_container_name_is_web() -> None:
+    files = generate_gitops_new_files(_make_input(template="react"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "name: web" in deployment
+
+
+def test_catalog_entry_react_uses_ingress_derived_observability() -> None:
+    inp = _make_input(template="react")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: ingress-derived" in result
+
+
+def test_catalog_entry_react_has_dev_and_prod_envs() -> None:
+    inp = _make_input(template="react")
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: dev" in new_entry
+    assert "name: prod" in new_entry
+
+
+def test_react_template_network_policy_port_80() -> None:
+    files = generate_gitops_new_files(_make_input(template="react"))
+    netpol = files["apps/my-svc/base/networkpolicy-allow-ingress.yaml"]
+    assert "port: 80" in netpol
+
+
+def test_nextjs_template_file_count() -> None:
+    files = generate_gitops_new_files(_make_input(template="nextjs"))
+    assert len(files) == 17
+
+
+def test_nextjs_template_has_servicemonitor() -> None:
+    files = generate_gitops_new_files(_make_input(template="nextjs"))
+    assert any("servicemonitor" in path for path in files)
+
+
+def test_nextjs_template_health_path() -> None:
+    files = generate_gitops_new_files(_make_input(template="nextjs"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "path: /api/health" in deployment
+
+
+def test_nextjs_template_container_port_3000() -> None:
+    files = generate_gitops_new_files(_make_input(template="nextjs"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "containerPort: 3000" in deployment
+
+
+def test_nextjs_template_container_name_is_web() -> None:
+    files = generate_gitops_new_files(_make_input(template="nextjs"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "name: web" in deployment
+
+
+def test_nextjs_template_network_policy_port_3000() -> None:
+    files = generate_gitops_new_files(_make_input(template="nextjs"))
+    netpol = files["apps/my-svc/base/networkpolicy-allow-ingress.yaml"]
+    assert "port: 3000" in netpol
+
+
+def test_catalog_entry_nextjs_uses_app_native_observability() -> None:
+    inp = _make_input(template="nextjs")
+    result = build_catalog_entry_addition(_SERVICES_YAML, inp)
+    assert "mode: app-native" in result
+
+
+def test_catalog_entry_nextjs_has_dev_and_prod_envs() -> None:
+    inp = _make_input(template="nextjs")
+    new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert "name: dev" in new_entry
+    assert "name: prod" in new_entry
+
+
 def test_wordpress_template_generates_expected_file_count() -> None:
     files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
     assert len(files) == 22
@@ -479,16 +574,16 @@ def test_mysql_template_credentials_secret_has_sops_block() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_catalog_entry_postgres_uses_ingress_derived_observability() -> None:
+def test_catalog_entry_postgres_uses_no_http_observability() -> None:
     inp = _make_input(template="postgres")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "mode: ingress-derived" in result
+    assert "mode: no-http" in result
 
 
-def test_catalog_entry_mysql_uses_ingress_derived_observability() -> None:
+def test_catalog_entry_mysql_uses_no_http_observability() -> None:
     inp = _make_input(template="mysql")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "mode: ingress-derived" in result
+    assert "mode: no-http" in result
 
 
 def test_catalog_entry_postgres_single_env() -> None:

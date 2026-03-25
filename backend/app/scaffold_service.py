@@ -6,8 +6,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 
+# Scaffold generation is implemented as pure string builders so preview and submit
+# can reuse the same manifest output without talking to the filesystem.
 SERVICE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 
+# Template metadata drives both generated manifests and catalog defaults such as
+# observability mode, container naming, ports, and health probes.
 _TEMPLATES: dict[str, dict[str, object]] = {
     "python-fastapi": {
         "container_port": 8000,
@@ -65,6 +69,14 @@ _TEMPLATES: dict[str, dict[str, object]] = {
         "container_name": "web",
         "default_observability_mode": "ingress-derived",
     },
+    "nextjs": {
+        "container_port": 3000,
+        "service_port": 80,
+        "health_path": "/api/health",
+        "readiness_path": "/api/health",
+        "container_name": "web",
+        "default_observability_mode": "app-native",
+    },
     "node-express": {
         "container_port": 3000,
         "service_port": 80,
@@ -85,13 +97,13 @@ _TEMPLATES: dict[str, dict[str, object]] = {
         "db_port": 5432,
         "db_image": "postgres:17-alpine",
         "db_engine": "postgres",
-        "default_observability_mode": "ingress-derived",
+        "default_observability_mode": "no-http",
     },
     "mysql": {
         "db_port": 3306,
         "db_image": "mysql:8.0",
         "db_engine": "mysql",
-        "default_observability_mode": "ingress-derived",
+        "default_observability_mode": "no-http",
     },
 }
 
@@ -112,7 +124,7 @@ class ScaffoldServiceInput:
     repo_url: str
     owner_email: str
     owner: str
-    template: Literal["python-fastapi", "python-django", "python-flask", "static-nginx", "react", "vue", "wordpress", "node-express", "node-nestjs", "postgres", "mysql"]
+    template: Literal["python-fastapi", "python-django", "python-flask", "static-nginx", "react", "nextjs", "vue", "wordpress", "node-express", "node-nestjs", "postgres", "mysql"]
     namespace: str
     dev_host: str
     prod_host: str
@@ -132,8 +144,11 @@ def validate_service_name(name: str) -> None:
         )
 
 
+# Dispatch to the correct manifest generator for the selected scaffold template.
 def generate_gitops_new_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     """Return all NEW files keyed by path relative to the gitops root."""
+    # Databases and WordPress have bespoke layouts because they bundle extra stateful
+    # resources. Everything else follows the shared app + overlay structure below.
     if inp.template in ("postgres", "mysql"):
         return _generate_database_gitops_files(inp)
     if inp.template == "wordpress":
@@ -228,6 +243,8 @@ def update_kustomization_resources(existing: str, resource_name: str) -> str:
     return result
 
 
+# Catalog updates are generated from the same template metadata as manifests so the
+# service registry and GitOps layout stay in sync.
 def build_catalog_entry_addition(existing_services_yaml: str, inp: ScaffoldServiceInput) -> str:
     """Append a catalog entry to services.yaml content and return the new content."""
     if f"service_id: {inp.name}\n" in existing_services_yaml:
@@ -238,6 +255,8 @@ def build_catalog_entry_addition(existing_services_yaml: str, inp: ScaffoldServi
     if "services:" not in existing_services_yaml:
         raise ScaffoldError("Expected top-level services: list in services.yaml.", status_code=502)
 
+    # Database templates only register a prod environment today; application templates
+    # emit both dev and prod and can optionally publish a prod public hostname.
     observability_mode = str(_TEMPLATES[inp.template]["default_observability_mode"])
     display_name = " ".join(word.capitalize() for word in inp.name.split("-"))
     repo_url = inp.repo_url or inp.workloads_repo_url
@@ -295,6 +314,8 @@ def build_appproject_addition(existing_project_yaml: str, inp: ScaffoldServiceIn
     return existing_project_yaml + suffix + "---\n" + appproject
 
 
+# The helpers below intentionally return YAML text instead of structured objects so
+# previews match the eventual PR content byte-for-byte.
 # ---------------------------------------------------------------------------
 # Internal generation helpers (pure string functions)
 # ---------------------------------------------------------------------------
@@ -322,6 +343,8 @@ def _indent_block(value: str, spaces: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Standalone database templates differ from app templates: one prod environment,
+# stateful storage, and ingress-derived observability.
 def _generate_database_gitops_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     """Return all NEW files for a standalone postgres or mysql template."""
     files: dict[str, str] = {}
@@ -686,6 +709,8 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     }
 
 
+# WordPress is treated as its own special bundle because it pairs a web tier with
+# an in-cluster MySQL dependency and persistent content storage.
 def _generate_wordpress_gitops_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     files: dict[str, str] = {}
 
@@ -1290,6 +1315,8 @@ def _generate_wordpress_overlay_files(inp: ScaffoldServiceInput, env_name: str) 
 
     return files
 
+# Shared app-template generator: service account, deployment, service, ingress,
+# network policies, and optional ServiceMonitor for app-native observability.
 def _generate_base_files(
     inp: ScaffoldServiceInput,
     container_port: int,
@@ -1560,6 +1587,8 @@ def _generate_base_files(
     return files
 
 
+# Overlays keep environment-specific scaling, labels, and prod ingress host tweaks
+# separate from the shared base manifests.
 def _generate_overlay_files(
     inp: ScaffoldServiceInput,
     env_name: str,
@@ -1678,6 +1707,8 @@ def _generate_overlay_files(
     return files
 
 
+# Argo Application manifests are generated alongside workload files so the PR is
+# enough to register the service in GitOps without any manual bootstrap step.
 def _generate_application_manifest(
     *,
     app_name: str,

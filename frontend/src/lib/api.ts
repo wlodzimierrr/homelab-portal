@@ -822,7 +822,7 @@ export interface ScaffoldServiceRequest {
   repoUrl?: string
   ownerEmail: string
   owner?: string
-  template: 'python-fastapi' | 'python-django' | 'python-flask' | 'static-nginx' | 'react' | 'vue' | 'wordpress' | 'node-express' | 'node-nestjs' | 'postgres' | 'mysql'
+  template: 'python-fastapi' | 'python-django' | 'python-flask' | 'static-nginx' | 'react' | 'nextjs' | 'vue' | 'wordpress' | 'node-express' | 'node-nestjs' | 'postgres' | 'mysql'
   namespace?: string
   devHost?: string
   prodHost?: string
