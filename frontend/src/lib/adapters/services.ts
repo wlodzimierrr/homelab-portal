@@ -42,6 +42,7 @@ export interface ServiceRegistryItem {
   owner?: string
   repoUrl?: string
   runbookUrl?: string
+  observabilityMode?: 'app-native' | 'ingress-derived' | 'no-http'
   environmentStatuses: ServiceEnvironmentStatus[]
 }
 
@@ -201,6 +202,7 @@ function adaptApiServices(rows: ServiceRegistryApiRow[]): ServiceRegistryItem[] 
         namespace: row.namespace,
         appLabel: row.appLabel,
         argoAppName: row.argoAppName,
+        observabilityMode: row.observabilityMode,
         environmentStatuses: [
           {
             env: row.env,

@@ -1,3 +1,5 @@
+// The scaffold wizard collects enough metadata to generate both app templates and
+// GitOps catalog entries, so several fields reflect backend/workloads conventions.
 import { useCallback, useState } from 'react'
 import {
   previewScaffold,
@@ -10,7 +12,7 @@ import { cn } from '@/lib/utils'
 
 type Step = 'basic' | 'template' | 'config' | 'preview' | 'success'
 
-type TemplateId = 'python-fastapi' | 'python-django' | 'python-flask' | 'static-nginx' | 'react' | 'vue' | 'wordpress' | 'node-express' | 'node-nestjs' | 'postgres' | 'mysql'
+type TemplateId = 'python-fastapi' | 'python-django' | 'python-flask' | 'static-nginx' | 'react' | 'nextjs' | 'vue' | 'wordpress' | 'node-express' | 'node-nestjs' | 'postgres' | 'mysql'
 
 const DB_TEMPLATES: TemplateId[] = ['postgres', 'mysql']
 
@@ -39,6 +41,8 @@ interface WizardFormState {
   dbName: string
 }
 
+// The form state mirrors the scaffold API request closely so preview and submit
+// share one source of truth as the user moves between steps.
 const EMPTY_FORM: WizardFormState = {
   name: '',
   description: '',
@@ -193,6 +197,157 @@ function BasicInfoStep({
   )
 }
 
+// Template descriptions intentionally encode runtime and observability assumptions
+// because the backend generates different manifests depending on the chosen stack.
+
+interface TemplateOption {
+  key: TemplateId
+  title: string
+  description: string
+  runtime: string
+  port: number
+  observability: 'app-native' | 'ingress-derived' | 'no-http'
+}
+
+interface TemplateCategory {
+  label: string
+  templates: TemplateOption[]
+}
+
+const TEMPLATE_CATEGORIES: TemplateCategory[] = [
+  {
+    label: 'Backend',
+    templates: [
+      {
+        key: 'python-fastapi',
+        title: 'Python + FastAPI',
+        description: 'Async Python API with Uvicorn. ServiceMonitor for Prometheus scraping.',
+        runtime: 'Python',
+        port: 8000,
+        observability: 'app-native',
+      },
+      {
+        key: 'python-django',
+        title: 'Python + Django',
+        description: 'Django with Gunicorn. Trailing-slash health endpoint convention.',
+        runtime: 'Python',
+        port: 8000,
+        observability: 'app-native',
+      },
+      {
+        key: 'python-flask',
+        title: 'Python + Flask',
+        description: 'Lightweight Flask API with Gunicorn.',
+        runtime: 'Python',
+        port: 5000,
+        observability: 'app-native',
+      },
+      {
+        key: 'node-express',
+        title: 'Express.js',
+        description: 'Node.js API with prom-client metrics.',
+        runtime: 'Node.js',
+        port: 3000,
+        observability: 'app-native',
+      },
+      {
+        key: 'node-nestjs',
+        title: 'NestJS',
+        description: 'TypeScript framework with built-in health module and structured layout.',
+        runtime: 'Node.js / TS',
+        port: 3000,
+        observability: 'app-native',
+      },
+    ],
+  },
+  {
+    label: 'Frontend',
+    templates: [
+      {
+        key: 'react',
+        title: 'React (Vite)',
+        description: 'React SPA. Multi-stage Dockerfile (Node build, nginx serve).',
+        runtime: 'Node.js / nginx',
+        port: 80,
+        observability: 'ingress-derived',
+      },
+      {
+        key: 'nextjs',
+        title: 'Next.js',
+        description: 'SSR/ISR React framework. Node.js runtime with health API route.',
+        runtime: 'Node.js',
+        port: 3000,
+        observability: 'app-native',
+      },
+      {
+        key: 'vue',
+        title: 'Vue (Vite)',
+        description: 'Vue SPA. Multi-stage Dockerfile (Node build, nginx serve).',
+        runtime: 'Node.js / nginx',
+        port: 80,
+        observability: 'ingress-derived',
+      },
+      {
+        key: 'static-nginx',
+        title: 'Static site + Nginx',
+        description: 'Plain static assets served by nginx.',
+        runtime: 'nginx',
+        port: 80,
+        observability: 'ingress-derived',
+      },
+    ],
+  },
+  {
+    label: 'CMS',
+    templates: [
+      {
+        key: 'wordpress',
+        title: 'WordPress',
+        description: 'Prebuilt WordPress image with bundled MySQL and persistent wp-content.',
+        runtime: 'PHP / Apache',
+        port: 80,
+        observability: 'ingress-derived',
+      },
+    ],
+  },
+  {
+    label: 'Database',
+    templates: [
+      {
+        key: 'postgres',
+        title: 'PostgreSQL 17',
+        description: 'StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials.',
+        runtime: 'PostgreSQL',
+        port: 5432,
+        observability: 'no-http',
+      },
+      {
+        key: 'mysql',
+        title: 'MySQL 8.0',
+        description: 'StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials.',
+        runtime: 'MySQL',
+        port: 3306,
+        observability: 'no-http',
+      },
+    ],
+  },
+]
+
+function ObservabilityBadge({ mode }: { mode: string }) {
+  const tone =
+    mode === 'app-native'
+      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+      : mode === 'no-http'
+        ? 'bg-slate-500/10 text-slate-700 dark:text-slate-300'
+        : 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
+
+  return (
+    <span className={cn('inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium', tone)}>
+      {mode}
+    </span>
+  )
+}
+
 function TemplateStep({
   form,
   onChange,
@@ -200,92 +355,67 @@ function TemplateStep({
   form: WizardFormState
   onChange: (patch: Partial<WizardFormState>) => void
 }) {
-  const options: { key: TemplateId; title: string; description: string }[] = [
-    {
-      key: 'python-fastapi',
-      title: 'Python + FastAPI',
-      description:
-        'Backend API service on port 8000. Includes ServiceMonitor for Prometheus scraping (app-native observability).',
-    },
-    {
-      key: 'python-django',
-      title: 'Python + Django',
-      description:
-        'Backend API service on port 8000 with Gunicorn. Trailing-slash health endpoint convention. Includes ServiceMonitor (app-native observability).',
-    },
-    {
-      key: 'python-flask',
-      title: 'Python + Flask',
-      description:
-        'Lightweight backend API on port 5000 with Gunicorn. Includes ServiceMonitor for Prometheus scraping (app-native observability).',
-    },
-    {
-      key: 'node-express',
-      title: 'Express.js',
-      description:
-        'Backend API service on port 3000. Includes ServiceMonitor for Prometheus scraping via prom-client (app-native observability).',
-    },
-    {
-      key: 'node-nestjs',
-      title: 'NestJS',
-      description:
-        'TypeScript backend framework on port 3000. Built-in health module and structured project layout. Includes ServiceMonitor (app-native observability).',
-    },
-    {
-      key: 'static-nginx',
-      title: 'Static site + Nginx',
-      description:
-        'Frontend or static asset server on port 80. Observability via ingress metrics (ingress-derived mode).',
-    },
-    {
-      key: 'react',
-      title: 'React (Vite)',
-      description:
-        'React SPA built with Vite. Multi-stage Dockerfile (Node build → nginx serve) on port 80. Ingress-derived observability.',
-    },
-    {
-      key: 'vue',
-      title: 'Vue (Vite)',
-      description:
-        'Vue SPA built with Vite. Multi-stage Dockerfile (Node build → nginx serve) on port 80, root-path probes, and ingress-derived observability.',
-    },
-    {
-      key: 'wordpress',
-      title: 'WordPress',
-      description:
-        'Prebuilt WordPress image on port 80 with bundled MySQL, persistent wp-content storage, /wp-login.php probes, and ingress-derived observability.',
-    },
-    {
-      key: 'postgres',
-      title: 'PostgreSQL 17',
-      description:
-        'Standalone PostgreSQL 17 database. StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials stub. Ingress-derived observability mode, single prod environment.',
-    },
-    {
-      key: 'mysql',
-      title: 'MySQL 8.0',
-      description:
-        'Standalone MySQL 8.0 database. StatefulSet with PVC, ClusterIP service, SOPS-encrypted credentials stub. Ingress-derived observability mode, single prod environment.',
-    },
-  ]
+  const [search, setSearch] = useState('')
+  const query = search.trim().toLowerCase()
+
+  const filteredCategories = TEMPLATE_CATEGORIES.map((category) => ({
+    ...category,
+    templates: category.templates.filter(
+      (t) =>
+        !query ||
+        t.title.toLowerCase().includes(query) ||
+        t.description.toLowerCase().includes(query) ||
+        t.runtime.toLowerCase().includes(query) ||
+        category.label.toLowerCase().includes(query),
+    ),
+  })).filter((category) => category.templates.length > 0)
 
   return (
-    <div className="space-y-3">
-      {options.map((opt) => (
-        <button
-          key={opt.key}
-          type="button"
-          onClick={() => onChange({ template: opt.key })}
-          className={cn(
-            'w-full rounded-md border p-4 text-left transition-colors',
-            form.template === opt.key
-              ? 'border-primary bg-primary/5'
-              : 'border-border hover:border-primary/50',
-          )}
-        >
-          <p className="font-medium">{opt.title}</p>
-          <p className="mt-1 text-sm text-muted-foreground">{opt.description}</p>
-        </button>
+    <div className="space-y-4">
+      <input
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Filter templates..."
+        className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+      />
+      {filteredCategories.length === 0 ? (
+        <p className="py-6 text-center text-sm text-muted-foreground">No templates match your search.</p>
+      ) : null}
+      {filteredCategories.map((category) => (
+        <div key={category.label}>
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            {category.label}
+          </h3>
+          <div className="space-y-2">
+            {category.templates.map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => onChange({ template: opt.key })}
+                className={cn(
+                  'w-full rounded-md border p-4 text-left transition-colors',
+                  form.template === opt.key
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border hover:border-primary/50',
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <p className="font-medium">{opt.title}</p>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      {opt.runtime}
+                    </span>
+                    <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      :{opt.port}
+                    </span>
+                    <ObservabilityBadge mode={opt.observability} />
+                  </div>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">{opt.description}</p>
+              </button>
+            ))}
+          </div>
+        </div>
       ))}
     </div>
   )
@@ -608,6 +738,8 @@ function validateConfig(form: WizardFormState): string {
   return ''
 }
 
+// The wizard keeps preview generation client-driven: validate locally, call the
+// preview endpoint, then submit the same payload once the user confirms.
 export function ScaffoldServiceWizard({ onClose }: Props) {
   const [step, setStep] = useState<Step>('basic')
   const [form, setForm] = useState<WizardFormState>(EMPTY_FORM)

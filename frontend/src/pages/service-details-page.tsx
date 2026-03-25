@@ -74,6 +74,9 @@ import {
   config,
 } from '@/lib/config'
 
+// ServiceDetailsPage is the deepest single-service screen in the portal. It fans in
+// catalog metadata, release/deployment history, metrics, logs, timeline data, and
+// a few admin actions such as deploy/promote/rollback/config edits.
 interface ServiceDetailsPageProps {
   serviceId: string
   incidentServiceAlerts?: Record<string, ServiceIncidentBadge>
@@ -82,6 +85,8 @@ interface ServiceDetailsPageProps {
 type HealthStatus = 'healthy' | 'degraded' | 'unknown'
 type SyncStatus = 'synced' | 'out_of_sync' | 'unknown'
 
+// These capability checks mirror what the backend currently supports. Keeping
+// them explicit in the UI avoids showing controls that would always fail.
 function supportsServiceRollback(serviceId: string) {
   return serviceId === 'homelab-api' || serviceId === 'homelab-web'
 }
@@ -100,6 +105,7 @@ interface ServiceOverviewData {
   endpointState: 'available' | 'no_routed_endpoint' | 'metadata_missing'
   deployments: ServiceDeployment[]
   deploymentLock?: ServiceDeploymentLock | null
+  observabilityMode?: 'app-native' | 'ingress-derived' | 'no-http'
 }
 
 interface QuickLinkCardProps {
@@ -218,6 +224,8 @@ function getMetricSeverity(
   return 'healthy'
 }
 
+// Fall back to the project catalog when the richer service endpoint is missing or
+// fails, so the page can still render ownership and endpoint metadata.
 function buildFromProjects(serviceId: string, projects: Project[]): ServiceOverviewData {
   const canonicalServiceId = normalizeServiceId(serviceId)
   const matches = projects.filter((project) => {
@@ -482,6 +490,8 @@ function formatConsoleLogSource(labels: Record<string, string>, identity: Servic
   return '[service]'
 }
 
+// Distinguish upstream/provider failures from legitimate no-data cases so the UI
+// can explain whether the problem is instrumentation coverage or backend reachability.
 function normalizeProviderPanelState(
   providerStatus?: MonitoringProviderStatus,
   errorMessage?: string,
@@ -771,6 +781,9 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [toastMessage, setToastMessage] = useState('')
   const [toastVariant, setToastVariant] = useState<'success' | 'error' | 'info'>('info')
 
+  // Overview is the main fan-in loader for the page. It intentionally merges
+  // service endpoint data, project fallback metadata, deployment history, and
+  // release traceability so the page stays usable during partial backend rollout.
   const loadOverview = useCallback(async (options?: { background?: boolean }) => {
     const background = options?.background === true
 
@@ -787,6 +800,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       )
       setServiceIdentity(identity)
 
+      // Each source is allowed to fail independently; later merge logic decides
+      // which fallback data is still trustworthy enough to show.
       const [serviceResult, projectsResult, deploymentsResult, releasesResult] = await Promise.allSettled([
         getService(decodedServiceId),
         getProjects(),
@@ -829,6 +844,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               endpointState: 'no_routed_endpoint',
               deployments: releaseFallback.deployments ?? [],
               deploymentLock: serviceResult.value.deploymentLock ?? null,
+              observabilityMode: serviceResult.value.observabilityMode,
             }
           : fallback
 
@@ -897,6 +913,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     void loadOverview()
   }, [loadOverview])
 
+  // Deployment info is loaded separately because it refreshes more often during
+  // active rollout flows and should not block the rest of the page.
   const loadDeploymentInfo = useCallback(async () => {
     setDeploymentInfoLoading(true)
     setDeploymentInfoError('')
@@ -918,6 +936,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     void loadDeploymentInfo()
   }, [loadDeploymentInfo])
 
+  // Metrics, trends, and timeline each fail independently so a provider issue in
+  // one panel does not blank the rest of the service page.
   const loadMetrics = useCallback(async () => {
     setMetricsLoading(true)
     setMetricsError('')
@@ -1023,6 +1043,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     () => incidentServiceAlerts[decodedServiceId] ?? incidentServiceAlerts[serviceId],
     [decodedServiceId, incidentServiceAlerts, serviceId],
   )
+  // Pre-render deep links with the same normalized identity used by quick view so
+  // opening Grafana/Loki directly preserves the page's current service scope.
   const presetLinks = useMemo(() => {
     return logsPresets.map((preset) => ({
       ...preset,
@@ -1184,6 +1206,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     }
   }, [activeLogsPreset, logsRange, serviceIdentity])
 
+  // Rollback support is intentionally limited to a small allowlist while the
+  // backend workflow remains portal-specific.
   const loadRollbackCandidates = useCallback(async () => {
     if (!rollbackSupported) {
       setRollbackCandidates(null)
@@ -1215,6 +1239,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     }
   }, [decodedServiceId, rollbackSupported, rollbackTargetEnvironment])
 
+  // The deploy/promote/rollback handlers all follow the same pattern: submit,
+  // surface a toast, then refresh overview/deployment info in the background.
   const submitDeployRequest = useCallback(async () => {
     setDeploySubmitting(true)
     setDeployError('')
@@ -1322,6 +1348,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     void loadRollbackCandidates()
   }, [loadRollbackCandidates])
 
+  // Poll the rollout-centric data in the background so locks and workflow state
+  // settle without forcing a full page reload while an operator is watching.
   useEffect(() => {
     const interval = window.setInterval(() => {
       void loadOverview({ background: true })
@@ -1332,6 +1360,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
 
   const configSupported = supportsConfigEditing(decodedServiceId)
 
+  // Config editing is environment-scoped and only enabled for services backed by
+  // the current portal config-edit workflow.
   const loadConfig = useCallback(async (env: 'dev' | 'prod') => {
     setConfigLoading(true)
     setConfigError('')
@@ -1382,6 +1412,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     }
   }, [configSupported, configEnv, loadConfig])
 
+  // The backend returns 204 for a no-op update, which we treat as success and use
+  // to exit edit mode without showing a noisy error.
   const submitPublicHostname = useCallback(async () => {
     const trimmed = publicHostValue.trim()
     if (!trimmed) return
@@ -1586,6 +1618,42 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               </section>
             ) : null}
 
+            {overview?.observabilityMode === 'no-http' ? (
+              <section className="space-y-3">
+                <h2 className="text-sm font-semibold">Service Health</h2>
+                <p className="text-xs text-muted-foreground">
+                  This service declares <code>no-http</code> observability mode. HTTP metrics (latency, error rate,
+                  availability) are intentionally not collected.
+                </p>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  <article className="rounded-md border border-border bg-background p-4">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Pod Health</p>
+                    <p className="mt-2 text-2xl font-semibold capitalize">{overview.health}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Derived from Argo CD health status</p>
+                  </article>
+                  <article className="rounded-md border border-border bg-background p-4">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Sync Status</p>
+                    <p className="mt-2 text-2xl font-semibold capitalize">{overview.sync.replace('_', ' ')}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">GitOps desired-state alignment</p>
+                  </article>
+                  <ServiceMetricCard
+                    label="Restart Count"
+                    value={metrics.restartCount}
+                    formatValue={(value) => String(Math.round(value))}
+                    lastRefreshedAt={metrics.generatedAt}
+                    noData={metrics.noData.restartCount}
+                    isLoading={metricsLoading}
+                    staleAfterMinutes={config.metricsStaleAfterMinutes}
+                    severity={getMetricSeverity(metrics.restartCount, {
+                      warning: 1,
+                      critical: 3,
+                      direction: 'lower_is_better',
+                    })}
+                  />
+                </div>
+              </section>
+            ) : (
+            <>
             <section className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold">Service Metrics</h2>
@@ -1810,6 +1878,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 </article>
               </div>
             </section>
+            </>
+            )}
 
             <section className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">

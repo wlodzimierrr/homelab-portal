@@ -559,12 +559,21 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                         </span>
                       ) : null}
                     </div>
-                    <UptimeIndicator
-                      className="p-3"
-                      uptime24h={service.uptime24hPct}
-                      uptime7d={service.uptime7dPct}
-                      lastRefreshedAt={service.metricsLastRefreshedAt}
-                    />
+                    {service.observabilityMode === 'no-http' ? (
+                      <div className="mt-1 rounded-md border border-border/50 bg-muted/30 px-3 py-2">
+                        <p className="text-xs font-medium text-muted-foreground">Non-HTTP service</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          Health derived from pod status and sync state.
+                        </p>
+                      </div>
+                    ) : (
+                      <UptimeIndicator
+                        className="p-3"
+                        uptime24h={service.uptime24hPct}
+                        uptime7d={service.uptime7dPct}
+                        lastRefreshedAt={service.metricsLastRefreshedAt}
+                      />
+                    )}
                   </td>
                   <td className="px-3 py-3 text-muted-foreground">{service.owner ?? 'Unassigned'}</td>
                   <td className="px-3 py-3">
