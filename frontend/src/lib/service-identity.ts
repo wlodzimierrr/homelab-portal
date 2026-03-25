@@ -15,6 +15,8 @@ function safeTrim(value: string | undefined, fallback: string) {
   return normalized ? normalized : fallback
 }
 
+// Service identity is the shared contract between routing, metrics, deployments,
+// and release views. Helpers here normalize partially-known values into one shape.
 export function parseNamespaceFromInternalUrl(url?: string) {
   if (!url) {
     return undefined
@@ -49,6 +51,8 @@ export function normalizeServiceId(value: string | undefined) {
 }
 
 export function createServiceIdentity(input: Partial<ServiceIdentity> & { serviceId: string }): ServiceIdentity {
+  // Fill in reasonable defaults so callers can build links and queries even when
+  // the source data only has a subset of the final identity fields.
   const canonicalServiceId = normalizeServiceId(input.serviceId)
   const serviceId = safeTrim(canonicalServiceId, 'unknown-service')
   const env = safeTrim(input.env, DEFAULT_ENV)

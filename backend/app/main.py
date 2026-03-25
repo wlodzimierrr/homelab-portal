@@ -129,10 +129,18 @@ from app.secret_editing import (
     update_secret_manifest_document,
 )
 
+# FastAPI entrypoint for the portal backend.
+#
+# This module keeps the API surface, auth checks, background reconciliation loop,
+# and most integration helpers in one place. Comments here focus on the seams a new
+# engineer needs to reason about first: request lifecycle, auth assumptions, and
+# the endpoints that other portal layers depend on most heavily.
+
 app = FastAPI(title="Homelab Backend API", version="0.1.0")
 logger = logging.getLogger("homelab.backend.monitoring")
 
 bearer_auth = HTTPBearer(auto_error=False)
+# These caches reduce repeated observability queries for pages that poll often.
 metrics_summary_cache = TTLCache()
 timeline_cache = TTLCache()
 logs_quickview_cache = TTLCache()
@@ -213,6 +221,8 @@ def clear_observability_caches_for_tests() -> None:
 
 @app.middleware("http")
 async def observe_http_requests(request, call_next):
+    # Avoid self-observing the Prometheus scrape endpoint to keep request metrics
+    # focused on actual API traffic and prevent recursion/noise.
     if request.url.path == "/metrics":
         return await call_next(request)
 
@@ -247,6 +257,8 @@ def start_deployment_reconciler_loop() -> None:
 
     deployment_reconciler_stop.clear()
 
+    # Reconciliation runs in-process as a best-effort background loop. The API
+    # stays available even if one iteration fails.
     def _run() -> None:
         logger.info(
             "deployment_reconciler_started interval_seconds=%s",
@@ -1252,6 +1264,8 @@ class ReleaseDashboardCompatResponse(BaseModel):
 def require_bearer_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_auth),
 ) -> str:
+    # Local development uses a fixed bearer token. In deployed environments the
+    # request usually arrives with upstream auth headers instead; see get_current_user.
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1278,6 +1292,8 @@ def get_current_user(
     x_auth_user: str | None = Header(None, alias="X-Auth-Request-User"),
     x_auth_groups: str | None = Header(None, alias="X-Auth-Request-Groups"),
 ) -> tuple[str, set[str]]:
+    # Prefer identity forwarded by the auth gateway when present so admin checks
+    # can use real usernames/groups. Fall back to the dev bearer token locally.
     if x_auth_user:
         return x_auth_user, _parse_csv_header(x_auth_groups)
     return require_bearer_token(credentials), set()
@@ -4516,6 +4532,8 @@ def _build_deployment_logs_response(
 def health(
     include_providers: bool = Query(default=False, alias="includeProviders"),
 ) -> HealthResponse:
+    # Keep the default health check lightweight for liveness/readiness probes, and
+    # only fan out to Prometheus/Loki/Alertmanager when diagnostics are requested.
     if not include_providers:
         return HealthResponse(status="ok")
 
@@ -4538,6 +4556,8 @@ def metrics() -> Response:
 
 @app.post("/auth/login", response_model=LoginResponse, tags=["auth"])
 def login(payload: LoginRequest) -> LoginResponse:
+    # This is a development-only login contract that matches the frontend auth
+    # flow. Production auth is expected to be enforced by the ingress/auth proxy.
     if payload.username != "admin" or payload.password != "changeme":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -4561,6 +4581,8 @@ def list_projects(
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ProjectsResponse:
+    # Projects are GitOps-backed metadata rows, not live cluster services. The
+    # frontend may merge them with service-registry data as a compatibility layer.
     rows = _load_project_rows(env=env)
     return ProjectsResponse(
         projects=[
@@ -4689,6 +4711,8 @@ def list_services(
     namespace: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServicesResponse:
+    # Services expose the live registry view. Ownership/runbook/public URL fields
+    # are intentionally not assembled here; the frontend enriches with project data.
     rows = _load_service_rows(env=env, namespace=namespace)
     project_index = _project_catalog_index(_load_project_catalog_rows(env=env))
     return ServicesResponse(
@@ -4721,6 +4745,8 @@ def get_service(
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceDetailResponse:
     preferred_env = env or os.getenv("PORTAL_ENV", "dev")
+    # Read-through reconciliation lets detail views pick up recent GitOps changes
+    # without waiting for the background loop to run.
     _maybe_reconcile_recent_deployments(service_id=service_id, env=preferred_env)
     rows = _load_service_rows(service_id=service_id, env=env)
     if not rows:
@@ -6135,6 +6161,8 @@ def sync_service_registry(
     env: str | None = Query(default=None),
     _: str = Depends(require_admin),
 ) -> ServiceRegistrySyncResponse:
+    # Admin-triggered sync updates one of two backing catalogs: live cluster
+    # services or GitOps app metadata. The diagnostics endpoints compare both.
     with _with_connection() as conn:
         if source == "cluster_services":
             summary = sync_service_registry_from_cluster(conn, env_name=env)
@@ -6157,6 +6185,8 @@ def get_service_registry_diagnostics(
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceRegistryDiagnosticsResponse:
+    # Diagnostics intentionally combine freshness, join mismatches, and canonical
+    # identity drift so the UI can explain why catalog data looks incomplete.
     with _with_connection() as conn:
         with conn.cursor() as cur:
             if env:
@@ -6288,6 +6318,9 @@ def get_service_metrics_summary(
     ),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceMetricsSummaryResponse:
+    # Metrics depend on service identity resolution plus observability config.
+    # This endpoint is one of the main integration points between registry data
+    # and Prometheus query templates.
     config = load_observability_config()
     safe_range = _validate_selected_range(
         selected_range=selected_range,

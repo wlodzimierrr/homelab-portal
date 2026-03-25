@@ -3,6 +3,7 @@ import { Topbar } from '@/components/navigation/topbar'
 import type { ReactNode } from 'react'
 import type { IncidentSeverity } from '@/lib/incident-alerts'
 
+// Shared authenticated layout: sidebar navigation, topbar actions, and the page slot.
 interface PortalLayoutProps {
   children: ReactNode
   pathname: string

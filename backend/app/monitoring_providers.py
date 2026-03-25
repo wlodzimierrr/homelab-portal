@@ -12,6 +12,8 @@ from fastapi import HTTPException, status
 
 from app.alerts_feed import get_alertmanager_base_url
 
+# Monitoring provider helpers for health checks and JSON-fetching endpoints.
+
 
 def get_prometheus_base_url() -> str:
     return os.getenv(
@@ -69,6 +71,8 @@ def build_provider_status(
     error: str | None = None,
     probe_path: str | None = None,
 ) -> dict[str, object]:
+    # Provider payloads use camelCase because they are returned directly to the
+    # frontend API contract and reused inside error responses.
     payload: dict[str, object] = {
         "provider": provider,
         "baseUrl": base_url,
@@ -199,6 +203,8 @@ def probe_monitoring_provider(
     correlation_id: str,
     timeout_seconds: float | None = None,
 ) -> dict[str, object]:
+    # Health probes never raise for provider-specific failures; callers use the
+    # returned status envelope to build degraded-but-readable diagnostics pages.
     base_url = _provider_base_url(provider)
     probe_path = _provider_probe_path(provider)
     checked_at = datetime.now(tz=timezone.utc).isoformat()
@@ -283,6 +289,8 @@ def load_json_from_provider(
     timeout_seconds: float | None = None,
     message: str = "Monitoring provider query failed.",
 ) -> tuple[object, dict[str, object]]:
+    # Data-fetching endpoints do raise translated HTTPExceptions because callers
+    # need a consistent 502 payload when upstream monitoring is unavailable.
     checked_at = datetime.now(tz=timezone.utc).isoformat()
     timeout = timeout_seconds or get_monitoring_timeout_seconds()
     request_started = time.perf_counter()

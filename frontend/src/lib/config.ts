@@ -89,6 +89,8 @@ function readPositiveNumber(value: string | undefined, fallback: number) {
   return parsed
 }
 
+// When the portal is served from the homelab domains, provide sensible defaults
+// for deep links so local development does not need every URL configured by hand.
 function inferHomelabFrontendDefaults() {
   if (typeof window === 'undefined') {
     return {
@@ -124,6 +126,8 @@ export function buildMonitoringUrl({
   context,
   fallbackPath = '/',
 }: MonitoringUrlOptions) {
+  // This variant always returns a usable URL by falling back when templates are
+  // incomplete. It is used where a degraded deep link is still better than none.
   const renderedPath = fillTemplate(pathTemplate, values, context).rendered
   const safePath = normalizePath(renderedPath, context, fallbackPath)
 
@@ -190,6 +194,8 @@ function buildMonitoringLink({
   }
 }
 
+// Environment configuration is read once at module load and then shared by all UI
+// helpers. Values here define API targets and deep-link integration with Argo/Grafana.
 export const config = {
   apiBaseUrl: env.VITE_API_BASE_URL ?? '/api',
   argoBaseUrl: env.VITE_ARGO_BASE_URL ?? inferredHomelabDefaults.argoBaseUrl,

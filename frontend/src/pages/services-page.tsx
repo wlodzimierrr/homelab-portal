@@ -25,6 +25,8 @@ import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
 import { buildArgoAppUrl } from '@/lib/config'
 import { cn } from '@/lib/utils'
 
+// ServicesPage is the main catalog view. It merges service registry data, catalog
+// reconciliation diagnostics, incident state, and recent deployment signals.
 type HealthStatus = 'healthy' | 'degraded' | 'unknown'
 type SyncStatus = 'synced' | 'out_of_sync' | 'unknown'
 
@@ -220,6 +222,8 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
   const [wizardOpen, setWizardOpen] = useState(false)
 
   const loadServices = useCallback(async () => {
+    // These three calls are related but intentionally independent. The page can
+    // still render a useful catalog when diagnostics endpoints fail partially.
     setIsLoading(true)
     setError('')
     setWarnings([])
@@ -269,6 +273,8 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
       const alerts = await Promise.all(
         response.map(async (service) => {
           try {
+            // Deployment alerts are derived per service from recent history rather
+            // than being delivered directly by the backend.
             const identity = deriveServiceIdentity(service)
             const deployments = await getDeploymentHistory(identity, { limit: 3 })
             const summary = summarizeDeploymentAlerts(
@@ -312,6 +318,8 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
   }, [services])
 
   const filteredServices = useMemo(() => {
+    // Search intentionally spans both metadata and computed status fields so the
+    // catalog is still useful when operators only remember symptoms or an env name.
     const query = search.trim().toLowerCase()
 
     return services.filter((service) => {
@@ -343,6 +351,8 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
     })
   }, [environmentFilter, search, services])
   const projectByServiceKey = useMemo(() => {
+    // Catalog reconciliation may map several live service IDs back to one project,
+    // so index by service/env pairs instead of assuming a one-to-one relationship.
     const map = new Map<string, CatalogJoinRow>()
     for (const row of catalogRows) {
       for (const serviceId of row.serviceIds) {
@@ -562,6 +572,9 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
                   </td>
                   <td className="px-3 py-3 text-muted-foreground">
                     {(() => {
+                      // Prefer the explicit reconciliation result. If there is no
+                      // join row, fall back to a best-effort project anchor before
+                      // finally surfacing the mismatch to the user.
                       const matchingRow = service.environments
                         .map((env) => projectByServiceKey.get(`${service.id}:${env}`))
                         .find((row) => row)

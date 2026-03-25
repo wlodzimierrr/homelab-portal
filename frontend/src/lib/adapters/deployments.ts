@@ -49,6 +49,8 @@ interface DeploymentHistoryOptions {
   limit?: number
 }
 
+// Deployment history can come from the dedicated deployment-records API or, on
+// older backends, be inferred from release traceability rows.
 const deploymentEndpointFallbackStatuses = new Set([404, 405, 501])
 
 function resolveIdentity(input: ServiceIdentity | string) {
@@ -59,6 +61,8 @@ function resolveIdentity(input: ServiceIdentity | string) {
 }
 
 function normalizeDeployment(item: ServiceDeployment, identity: ServiceIdentity): DeploymentHistoryItem {
+  // Backends have evolved through a few response shapes, so normalize both the
+  // nested snapshot form and older before/after/delta fields into one contract.
   const input = item as ServiceDeployment & Record<string, unknown>
   const errorRate = getSnapshot(input, ['errorRatePct', 'errorRate'])
   const latency = getSnapshot(input, ['p95LatencyMs', 'latencyP95Ms', 'latencyMs'])
@@ -218,6 +222,8 @@ function computeRegressionScore(
 }
 
 async function getReleaseDeploymentFallback(identity: ServiceIdentity, limit: number) {
+  // Release rows are less precise than deployment records, but they preserve a
+  // useful timeline when the richer endpoint has not been enabled yet.
   const rows = await getReleaseTraceability({
     env: identity.env,
     serviceId: identity.serviceId,
@@ -251,6 +257,8 @@ export async function getDeploymentHistory(
     }
     return await getReleaseDeploymentFallback(identity, limit)
   } catch (error) {
+    // Missing endpoint statuses mean "feature not supported here", not that the
+    // service failed to load, so switch to the traceability-based fallback.
     if (isApiRequestError(error) && deploymentEndpointFallbackStatuses.has(error.status)) {
       return await getReleaseDeploymentFallback(identity, limit)
     }

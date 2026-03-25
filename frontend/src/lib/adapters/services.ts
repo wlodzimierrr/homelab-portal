@@ -10,6 +10,8 @@ import {
 import { getServiceMetricsSummary } from '@/lib/adapters/service-metrics'
 import { createServiceIdentity, normalizeServiceId, parseNamespaceFromInternalUrl, type ServiceIdentity } from '@/lib/service-identity'
 
+// This adapter reconciles three views of a service:
+// live registry rows, GitOps/project metadata, and release/metrics observability.
 export type ServiceHealth = 'healthy' | 'degraded' | 'unknown'
 export type ServiceSync = 'synced' | 'out_of_sync' | 'unknown'
 
@@ -76,6 +78,8 @@ function normalizeSyncStatus(value?: string): ServiceSync {
 }
 
 function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
+  // Projects are the fallback catalog source when the live service registry API is
+  // unavailable. Treat them as GitOps-only services and infer missing runtime fields.
   const grouped = new Map<string, ServiceRegistryItem>()
 
   for (const project of projects) {
@@ -181,6 +185,8 @@ function adaptProjectsToServices(projects: Project[]): ServiceRegistryItem[] {
 }
 
 function adaptApiServices(rows: ServiceRegistryApiRow[]): ServiceRegistryItem[] {
+  // Live registry rows are environment-scoped, so group them back into a single
+  // service record that the UI can render across multiple environments.
   const grouped = new Map<string, ServiceRegistryItem>()
 
   for (const row of rows) {
@@ -235,6 +241,8 @@ function adaptApiServices(rows: ServiceRegistryApiRow[]): ServiceRegistryItem[] 
 }
 
 function mergeProjectMetadata(services: ServiceRegistryItem[], projects: Project[]): ServiceRegistryItem[] {
+  // Prefer live-discovered services as the base shape, then enrich them with
+  // GitOps metadata such as ownership, repo links, runbooks, and public URLs.
   const byId = new Map<string, ServiceRegistryItem>()
   for (const service of services) {
       byId.set(service.id, {
@@ -349,6 +357,8 @@ function cloneService(service: ServiceRegistryItem): ServiceRegistryItem {
 }
 
 async function enrichServicesWithLiveMetadata(services: ServiceRegistryItem[]) {
+  // Release traceability and metrics are intentionally best-effort. A failure in
+  // either system should not prevent the service catalog itself from rendering.
   const releaseRows = await getReleaseTraceability({ limit: 200 }).catch(() => [])
   const releaseByKey = new Map<string, ReleaseTraceabilityRow>()
   for (const row of releaseRows) {
@@ -438,6 +448,8 @@ async function enrichServicesWithLiveMetadata(services: ServiceRegistryItem[]) {
 }
 
 export async function getServicesRegistry() {
+  // Prefer the service-centric API, then fall back to project-backed metadata for
+  // older backends. This keeps the UI compatible during backend rollout windows.
   try {
     const servicesResponse = await getServices()
     const liveServices = adaptApiServices(servicesResponse.services)
@@ -477,6 +489,8 @@ export function deriveServiceIdentity(service: ServiceRegistryItem, env?: string
 }
 
 export async function getServiceIdentity(serviceId: string, env?: string): Promise<ServiceIdentity> {
+  // Resolve against the merged registry first so downstream pages inherit the same
+  // canonical namespace/app/env assumptions as the services catalog.
   const services = await getServicesRegistry()
   const match = services.find((service) => service.id.trim().toLowerCase() === serviceId.trim().toLowerCase())
   if (!match) {

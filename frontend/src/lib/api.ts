@@ -4,6 +4,8 @@ import type { ServiceIdentity } from '@/lib/service-identity'
 
 export const UNAUTHORIZED_EVENT = 'portal:unauthorized'
 const serviceEndpointMissingStatuses = new Set([404, 405, 501])
+// Some backends are still rolling out the service-centric endpoints. Keep the older
+// pages working by allowing callers to detect "endpoint missing" explicitly.
 const enableServiceApi = import.meta.env.VITE_ENABLE_SERVICE_API !== 'false'
 
 interface RequestOptions extends Omit<RequestInit, 'headers'> {
@@ -526,6 +528,9 @@ function hasAuthMarkers(preview: string) {
 }
 
 async function detectAuthDiagnostic(response: Response, requestPath: string) {
+  // In production the frontend may sit behind an auth gateway. If an API call
+  // gets redirected to login HTML, surface a tailored error instead of a generic
+  // JSON parse failure so the UI can explain what actually happened.
   const contentType = (response.headers.get('content-type') ?? '').toLowerCase()
   const isHtmlResponse = contentType.includes('text/html') || contentType.includes('application/xhtml+xml')
   const url = response.url || ''
@@ -569,6 +574,8 @@ async function detectAuthDiagnostic(response: Response, requestPath: string) {
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}) {
+  // Centralize auth headers, JSON defaults, and API-level error translation so
+  // adapters and pages can focus on domain logic instead of fetch ceremony.
   const { skipUnauthorizedRedirect = false, headers: inputHeaders, ...init } = options
   const headers = new Headers(inputHeaders)
   const token = getToken()
@@ -613,6 +620,8 @@ export async function request<T>(path: string, options: RequestOptions = {}) {
 }
 
 async function requestServiceEndpoint<T>(path: string) {
+  // Service-specific screens use this wrapper so callers can distinguish
+  // "service API not rolled out here" from normal request failures.
   if (!enableServiceApi) {
     throw new ApiRequestError('Service endpoint is not available in this backend.', 404)
   }

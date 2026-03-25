@@ -5,6 +5,8 @@ import { login } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { Button } from '@/components/ui/button'
 
+// Login is intentionally thin: submit credentials, persist the returned token,
+// then hand control back to the app shell for post-login navigation.
 interface LoginPageProps {
   onLoginSuccess: () => void
 }
@@ -16,6 +18,8 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
+  // Keep auth side effects here so the page owns form UX, while the app shell
+  // remains responsible for route guards and redirect decisions.
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setError('')

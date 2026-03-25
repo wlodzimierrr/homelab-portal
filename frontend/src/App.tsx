@@ -21,6 +21,8 @@ import { SettingsPage } from '@/pages/settings-page'
 import { PortalLayout } from '@/components/layout/portal-layout'
 import { getServiceIdFromPath, isServiceDeploymentsPath, isServiceDetailsPath } from '@/lib/routes'
 
+// App owns the browser-level shell concerns that sit above individual pages:
+// session-aware navigation, theme persistence, incident polling, and route selection.
 type Theme = 'light' | 'dark'
 const INCIDENT_BANNER_DISMISSED_KEY = 'portal-incident-banner-dismissed'
 const INCIDENT_POLL_INTERVAL_MS = 60_000
@@ -43,6 +45,7 @@ function App() {
     return stored === 'dark' ? 'dark' : 'light'
   })
 
+  // Keep navigation state in React while still using the browser history stack.
   const navigate = useCallback((path: string, replace = false) => {
     if (replace) {
       window.history.replaceState({}, '', path)
@@ -52,17 +55,22 @@ function App() {
     window.dispatchEvent(new PopStateEvent('popstate'))
   }, [])
 
+  // This app uses lightweight path-based routing instead of a router library, so
+  // route changes are observed directly from the browser popstate event.
   useEffect(() => {
     const onPopState = () => setPathname(window.location.pathname)
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
+  // Persist the selected theme so refreshes and future visits keep the same mode.
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
     window.localStorage.setItem('portal-theme', theme)
   }, [theme])
 
+  // Guard the login route on the client. The backend still enforces auth on API
+  // requests, but this keeps the browser location aligned with the current session.
   useEffect(() => {
     if (pathname !== '/login' && !token) {
       navigate('/login', true)
@@ -74,6 +82,8 @@ function App() {
     }
   }, [navigate, pathname, token])
 
+  // API helpers emit a shared unauthorized event so the shell can clear local
+  // session state and redirect once, rather than handling 401s in every page.
   useEffect(() => {
     const handleUnauthorized = (event: Event) => {
       clearToken()
@@ -90,6 +100,7 @@ function App() {
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized)
   }, [clearToken, navigate])
 
+  // Toasts are transient shell-level feedback for auth/session events.
   useEffect(() => {
     if (!toastMessage) {
       return
@@ -99,6 +110,9 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [toastMessage])
 
+  // Incident data is polled centrally so the layout and pages can reuse one
+  // snapshot. Failures intentionally collapse to an empty state instead of
+  // surfacing a blocking error on unrelated screens.
   useEffect(() => {
     if (!token) {
       return
@@ -151,6 +165,8 @@ function App() {
   )
   const handleLoginSuccess = useCallback(() => navigate('/dashboard', true), [navigate])
 
+  // Route selection is intentionally explicit here so the app shell remains easy
+  // to reason about without an external routing abstraction.
   const content = useMemo(() => {
     if (pathname === '/login') {
       return <LoginPage onLoginSuccess={handleLoginSuccess} />
