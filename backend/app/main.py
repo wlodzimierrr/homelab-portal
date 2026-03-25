@@ -1648,7 +1648,7 @@ def _load_service_rows(
         with conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT service_id, service_name, env, namespace, app_label, argo_app_name, source, source_ref, last_synced_at
+                SELECT service_id, service_name, env, namespace, app_label, argo_app_name, source, source_ref, last_synced_at, project_id
                 FROM service_registry
                 WHERE {where_clause}
                 ORDER BY service_id ASC, env ASC
@@ -1668,6 +1668,7 @@ def _load_service_rows(
             "source": row[6],
             "source_ref": row[7],
             "last_synced_at": row[8].isoformat() if row[8] else None,
+            "project_id": row[9],
         }
         for row in rows
     ]

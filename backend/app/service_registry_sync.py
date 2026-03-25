@@ -13,6 +13,8 @@ from uuid import uuid4
 import psycopg
 from app.service_identity import normalize_service_id
 
+# Service registry sync builds the live catalog by querying Kubernetes and Argo,
+# then normalizing app identity into rows the API can serve cheaply from Postgres.
 logger = logging.getLogger("homelab.backend.service_registry_sync")
 
 DEFAULT_SYNC_NAMESPACES = ("homelab-api", "homelab-web")
@@ -32,6 +34,7 @@ class ServiceRegistryRecord:
     source: str
     source_ref: str
     last_synced_at: datetime
+    project_id: str | None = None
 
 
 def _utc_now() -> datetime:
@@ -76,6 +79,8 @@ def _build_ssl_context() -> ssl.SSLContext:
     return context
 
 
+# Cluster access prefers in-cluster service-account auth but can be overridden by
+# explicit env vars for local development and tests.
 def _kube_get_json(path: str, timeout_seconds: float = 8.0) -> dict:
     base_url = _kubernetes_api_base_url()
     if not base_url:
@@ -147,6 +152,8 @@ def _derive_argo_mapping(applications: list[dict]) -> dict[str, str]:
     return mapping
 
 
+# Deployment-derived rows provide a baseline identity map even when Services are
+# missing, while still capturing the Argo app responsible for the namespace.
 def _build_records_from_deployments(
     *,
     deployments: list[dict],
@@ -209,6 +216,8 @@ def _build_records_from_deployments(
     return records
 
 
+# Service rows refine deployment-derived identity and intentionally filter out
+# backing database services so app-level navigation stays stable.
 def _build_records_from_services_and_deployments(
     *,
     services: list[dict],
@@ -349,9 +358,10 @@ def _upsert_service_registry_records(
                     argo_app_name,
                     source,
                     source_ref,
-                    last_synced_at
+                    last_synced_at,
+                    project_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (service_id, env) DO UPDATE
                 SET service_name = EXCLUDED.service_name,
                     namespace = EXCLUDED.namespace,
@@ -360,6 +370,7 @@ def _upsert_service_registry_records(
                     source = EXCLUDED.source,
                     source_ref = EXCLUDED.source_ref,
                     last_synced_at = EXCLUDED.last_synced_at,
+                    project_id = COALESCE(EXCLUDED.project_id, service_registry.project_id),
                     updated_at = CURRENT_TIMESTAMP
                 RETURNING (xmax = 0) AS inserted
                 """,
@@ -373,6 +384,7 @@ def _upsert_service_registry_records(
                     row.source,
                     row.source_ref,
                     row.last_synced_at,
+                    row.project_id,
                 ),
             )
             was_inserted = bool(cur.fetchone()[0])
@@ -427,6 +439,8 @@ def _prune_service_registry_records(
     return deleted
 
 
+# Sync writes a fresh snapshot and prunes old rows for the selected namespaces so
+# registry consumers can rely on source_ref/last_synced_at for freshness checks.
 def sync_service_registry_from_cluster(
     conn: psycopg.Connection,
     *,

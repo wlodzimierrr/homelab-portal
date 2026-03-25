@@ -7,8 +7,22 @@ import shutil
 from app import gitops_project_sync
 
 
+class _DummyCursor:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, *_args, **_kwargs):
+        return None
+
+    rowcount = 0
+
+
 class _DummyConn:
-    pass
+    def cursor(self):
+        return _DummyCursor()
 
 
 def _write(path: Path, content: str) -> None:

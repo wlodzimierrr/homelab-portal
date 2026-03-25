@@ -15,11 +15,15 @@ from app.service_observability import normalize_observability_mode
 import yaml
 from app.service_identity import normalize_service_id
 
+# GitOps project sync parses workloads repo metadata into a project catalog that
+# complements the live service registry with ownership and intent.
 logger = logging.getLogger("homelab.backend.gitops_project_sync")
 
 DEFAULT_SOURCE = "gitops_apps"
 
 
+# Repo-path discovery tries to work in both the monorepo and containerized API
+# layouts so startup does not fail just because the workloads checkout is absent.
 def _resolve_default_workloads_repo_path(current_file: Path | None = None) -> Path:
     source_file = (current_file or Path(__file__)).resolve()
     candidates: list[Path] = []
@@ -75,6 +79,7 @@ class ServiceCatalogMetadata:
     repo_url: str | None
     runbook_url: str | None
     observability_mode: str | None
+    project_id: str | None
     envs: tuple[ServiceCatalogEnvRecord, ...]
 
 
@@ -163,6 +168,8 @@ def _first_nonempty_string(*values: object) -> str | None:
     return None
 
 
+# `services.yaml` is treated as the authoritative metadata layer for ownership,
+# docs, public hosts, and observability mode. Validation failures are collected, not fatal.
 def _load_service_catalog_metadata(
     repo_path: Path,
 ) -> tuple[dict[str, ServiceCatalogMetadata], list[dict[str, str]]]:
@@ -322,6 +329,12 @@ def _load_service_catalog_metadata(
             )
             continue
 
+        raw_project_id = _first_nonempty_string(
+            item.get("project_id"),
+            item.get("projectId"),
+        )
+        resolved_project_id = normalize_service_id(raw_project_id) if raw_project_id else None
+
         metadata_by_id[service_id] = ServiceCatalogMetadata(
             service_id=service_id,
             service_name=_first_nonempty_string(item.get("name")) or service_id,
@@ -329,6 +342,7 @@ def _load_service_catalog_metadata(
             repo_url=_first_nonempty_string(item.get("repo_url"), item.get("repoUrl")),
             runbook_url=_first_nonempty_string(item.get("runbook_url"), item.get("runbookUrl")),
             observability_mode=normalized_mode,
+            project_id=resolved_project_id,
             envs=tuple(env_records),
         )
 
@@ -379,6 +393,8 @@ def _build_source_ref(repo_path: Path, project_path: Path) -> str:
     return f"{repo_origin}@{repo_revision}:{relative_path}"
 
 
+# Discovery walks GitOps app definitions and merges them with catalog metadata so
+# each project row carries both runtime coordinates and operator-facing metadata.
 def _discover_records_from_repo(
     *,
     repo_path: Path,
@@ -649,6 +665,34 @@ def _prune_project_registry_records(
     return deleted
 
 
+def _stamp_project_ids_on_service_registry(
+    conn: psycopg.Connection,
+    service_catalog: dict[str, ServiceCatalogMetadata],
+) -> int:
+    """Update service_registry.project_id for services with explicit project ownership."""
+    stamped = 0
+    with conn.cursor() as cur:
+        for service_id, metadata in service_catalog.items():
+            # Resolve effective project_id: explicit or self-referencing default.
+            effective_project_id = metadata.project_id or service_id
+            for env_record in metadata.envs:
+                cur.execute(
+                    """
+                    UPDATE service_registry
+                    SET project_id = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE service_id = %s
+                      AND env = %s
+                      AND (project_id IS DISTINCT FROM %s)
+                    """,
+                    (effective_project_id, service_id, env_record.env, effective_project_id),
+                )
+                stamped += cur.rowcount
+    return stamped
+
+
+# Sync supports either a local checkout or a temporary clone, then upserts the
+# discovered snapshot and records validation failures for diagnostics endpoints.
 def sync_project_registry_from_gitops(
     conn: psycopg.Connection,
     *,
@@ -675,6 +719,12 @@ def sync_project_registry_from_gitops(
 
     inserted, updated = _upsert_project_registry_records(conn, unique_records)
     deleted = _prune_project_registry_records(conn, envs=envs, keep_keys=keep_keys)
+
+    # Stamp project_id onto service_registry rows for services that declare
+    # an explicit project_id in the catalog (e.g. oauth2-proxy → homelab-web).
+    service_catalog, _ = _load_service_catalog_metadata(safe_repo_path)
+    _stamp_project_ids_on_service_registry(conn, service_catalog)
+
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     summary = {

@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import TypedDict
 
 
+# Catalog reconciliation compares the GitOps project catalog with the live service
+# catalog and records where identities align, diverge, or expand one-to-many.
 class CatalogProjectRow(TypedDict, total=False):
     project_id: str
     project_name: str
@@ -18,6 +20,7 @@ class CatalogServiceRow(TypedDict, total=False):
     namespace: str
     app_label: str
     argo_app_name: str | None
+    project_id: str | None
 
 
 class CatalogJoinServiceRef(TypedDict):
@@ -57,6 +60,8 @@ class CatalogJoinResult(TypedDict):
     diagnostics: CatalogJoinDiagnostics
 
 
+# Key normalization intentionally strips formatting differences without trying to
+# be a full identity resolver; deeper canonicalization happens in service identity helpers.
 def _normalize(value: str | None) -> str:
     safe = (value or "").strip().lower()
     if not safe:
@@ -157,6 +162,8 @@ def _choose_primary_service_id(
     return str(_sort_service_rows(matched_services)[0].get("service_id", "")).strip() or None
 
 
+# The join prefers namespace/app-label matches because they are closest to runtime
+# truth, then falls back to service/project ids for older or incomplete catalog rows.
 def build_catalog_join(
     *,
     project_rows: list[CatalogProjectRow],
@@ -180,9 +187,15 @@ def build_catalog_join(
 
     services_by_primary: dict[tuple[str, str, str], list[CatalogServiceRow]] = {}
     services_by_fallback: dict[tuple[str, str], list[CatalogServiceRow]] = {}
+    # Index services by their explicit project_id for direct project→service joins.
+    services_by_project_id: dict[tuple[str, str], list[CatalogServiceRow]] = {}
     for row in filtered_services:
         services_by_primary.setdefault(_primary_join_key_for_service(row), []).append(row)
         services_by_fallback.setdefault(_fallback_join_key_for_service(row), []).append(row)
+        svc_project_id = str(row.get("project_id") or "").strip()
+        if svc_project_id:
+            svc_env = str(row.get("env", "")).strip()
+            services_by_project_id.setdefault((svc_project_id, svc_env), []).append(row)
 
     rows: list[CatalogJoinRow] = []
     matched_service_keys: set[tuple[str, str]] = set()
@@ -197,6 +210,14 @@ def build_catalog_join(
             str(row.get("env", "")).strip(),
         ),
     ):
+        # 1. Explicit project_id join: services that declare this project as parent.
+        proj_id = str(project_row.get("project_id", "")).strip()
+        proj_env = str(project_row.get("env", "")).strip()
+        explicit_children = _sort_service_rows(
+            services_by_project_id.get((proj_id, proj_env), [])
+        )
+
+        # 2. Heuristic joins: namespace/app-label match, then id fallback.
         matched_services = _sort_service_rows(
             services_by_primary.get(_primary_join_key_for_project(project_row), [])
         )
@@ -206,6 +227,15 @@ def build_catalog_join(
                 services_by_fallback.get(_fallback_join_key_for_project(project_row), [])
             )
             join_source = "fallback_service_id" if matched_services else "unmatched"
+
+        # Merge explicit children into the heuristic matches (deduplicated).
+        if explicit_children:
+            existing_ids = {str(r.get("service_id", "")).strip() for r in matched_services}
+            for child in explicit_children:
+                if str(child.get("service_id", "")).strip() not in existing_ids:
+                    matched_services.append(child)
+            matched_services = _sort_service_rows(matched_services)
+            join_source = "explicit_project_id" if explicit_children else join_source
 
         service_refs: list[CatalogJoinServiceRef] = []
         for service_row in matched_services:
