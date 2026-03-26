@@ -1,3 +1,5 @@
+// Uptime classification is intentionally small and presentation-oriented so UI
+// components can color-code metrics without reimplementing thresholds.
 export type UptimeSeverity = 'healthy' | 'warning' | 'critical' | 'unknown'
 
 export interface UptimeThresholdConfig {
@@ -31,6 +33,8 @@ export function classifyUptime(
   return 'critical'
 }
 
+// Staleness is tracked separately from severity because a stale healthy value
+// should not be shown as trustworthy fresh telemetry.
 export function isMetricStale(
   lastRefreshedAt: string | undefined,
   config: UptimeThresholdConfig = DEFAULT_UPTIME_THRESHOLD_CONFIG,
@@ -48,6 +52,8 @@ export function isMetricStale(
   return ageMs > config.staleAfterMinutes * 60 * 1000
 }
 
+// Rollups prefer the worst available state and fall back to unknown when no
+// signal is present. This keeps cards and aggregates aligned.
 export function mergeUptimeSeverities(values: UptimeSeverity[]): UptimeSeverity {
   if (values.includes('critical')) {
     return 'critical'

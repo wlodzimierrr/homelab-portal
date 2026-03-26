@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { ErrorState } from '@/components/error-state'
 import { AppLink } from '@/components/navigation/app-link'
-import { login } from '@/lib/api'
+import { login } from '@/lib/api/auth'
 import { useAuth } from '@/lib/auth'
 import { Button } from '@/components/ui/button'
 

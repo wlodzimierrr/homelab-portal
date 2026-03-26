@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button'
 
+// Compact shared error block for API-backed widgets that can optionally retry.
 interface ApiErrorProps {
   message: string
   onRetry?: () => void

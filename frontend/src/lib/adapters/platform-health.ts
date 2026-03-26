@@ -1,15 +1,11 @@
+// Platform health is a fan-in adapter: it merges service registry, deployment
+// regressions, incident feeds, provider diagnostics, and catalog freshness into one view.
 import { deriveServiceIdentity, getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
-import {
-  ApiRequestError,
-  getProjectCatalogDiagnostics,
-  getMonitoringProvidersDiagnostics,
-  getServiceRegistryDiagnostics,
-  isApiRequestError,
-  request,
-  type MonitoringProviderStatus,
-  type RegistryFreshness,
-} from '@/lib/api'
+import { getProjectCatalogDiagnostics, getServiceRegistryDiagnostics, type RegistryFreshness } from '@/lib/api/catalog'
+import { getMonitoringProvidersDiagnostics, type MonitoringProviderStatus } from '@/lib/api/observability'
+import { request } from '@/lib/http/client'
+import { ApiRequestError, isApiRequestError } from '@/lib/http/errors'
 import { summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
 
 export type IncidentSeverity = 'info' | 'warning' | 'critical'
@@ -134,6 +130,8 @@ async function getIncidentsFromApi() {
   }
 }
 
+// Deployment history is treated as an overlay on top of live service status so a
+// service can surface as risky even before its base registry health flips to degraded.
 async function buildServiceHealthItems(services: ServiceRegistryItem[]): Promise<PlatformServiceHealthItem[]> {
   return Promise.all(
     services.map(async (service) => {
@@ -187,6 +185,8 @@ function addCatalogWarning(warnings: string[], label: string, freshness: Registr
   }
 }
 
+// This loader intentionally tolerates partial failures. The page should still
+// render whatever signals are available and list gaps as warnings.
 export async function getPlatformHealthOverview(): Promise<PlatformHealthOverview> {
   const warnings: string[] = []
 

@@ -13,7 +13,7 @@ import {
 } from '@/lib/adapters/platform-health'
 import { buildGrafanaDashboardUrl } from '@/lib/config'
 import { cn } from '@/lib/utils'
-import type { MonitoringProviderStatus } from '@/lib/api'
+import type { MonitoringProviderStatus } from '@/lib/api/observability'
 
 interface SummaryCardProps {
   label: string
@@ -118,11 +118,15 @@ function CatalogStateBadge({ catalog }: { catalog: PlatformCatalogStatus }) {
   )
 }
 
+// Platform health is a read-only operational snapshot that favors breadth over
+// drill-down depth: summary counts, provider state, catalog freshness, and incidents.
 export function PlatformHealthPage() {
   const [overview, setOverview] = useState<PlatformHealthOverview | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
 
+  // The adapter already collapses partial failures into warnings, so a thrown
+  // error here usually means the top-level overview request could not be assembled at all.
   const loadOverview = useCallback(async () => {
     setIsLoading(true)
     setError('')
@@ -143,6 +147,8 @@ export function PlatformHealthPage() {
     void loadOverview()
   }, [loadOverview])
 
+  // The UI intentionally caps the incident list to keep this page scannable; full
+  // alert detail belongs in dedicated monitoring tools.
   const visibleIncidents = useMemo(() => overview?.incidents.slice(0, 12) ?? [], [overview])
 
   return (

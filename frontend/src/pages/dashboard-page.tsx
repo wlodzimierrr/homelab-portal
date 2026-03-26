@@ -4,7 +4,7 @@ import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { PageShell } from '@/components/page-shell'
-import { isApiAuthDiagnosticError, type ApiAuthDiagnostic } from '@/lib/api'
+import { isApiAuthDiagnosticError, type ApiAuthDiagnostic } from '@/lib/http/errors'
 import {
   getReleaseDashboardEntries,
   type ReleaseDashboardEntry,
@@ -116,6 +116,8 @@ function UnknownCountCard({ count, source }: { count: number; source: ReleaseDas
   return <SummaryCard label={label} value={String(count)} tone={tone} />
 }
 
+// This page is the release dashboard shell. It owns filtering, fallback-status
+// messaging, and the distinction between missing data vs. unavailable upstream fields.
 export function DashboardPage() {
   const [rows, setRows] = useState<ReleaseDashboardEntry[]>([])
   const [dataSource, setDataSource] = useState<ReleaseDashboardSource>('projects_fallback')
@@ -128,6 +130,8 @@ export function DashboardPage() {
   const [search, setSearch] = useState('')
   const [driftFilter, setDriftFilter] = useState<DriftFilter>('all')
 
+  // Auth diagnostics are surfaced separately from ordinary request failures so
+  // operators can distinguish session/gateway issues from backend/data issues.
   const loadDashboard = useCallback(async () => {
     setIsLoading(true)
     setError('')
@@ -161,6 +165,8 @@ export function DashboardPage() {
     void loadDashboard()
   }, [loadDashboard])
 
+  // Search runs across the fields operators are most likely to paste or scan
+  // for during an incident: service ids, commits, images, env, and Argo status.
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase()
 

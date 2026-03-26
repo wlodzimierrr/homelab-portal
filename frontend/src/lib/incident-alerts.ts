@@ -1,3 +1,5 @@
+// Incident helpers aggregate the raw incident feed into banner and per-service
+// signals without exposing Alertmanager-specific response details to pages.
 export type IncidentSeverity = 'info' | 'warning' | 'critical'
 
 interface IncidentInput {
@@ -58,6 +60,8 @@ function emptyServiceBadge(): ServiceIncidentBadge {
   }
 }
 
+// Only active incidents influence the current UI state. Resolved incidents are
+// still useful historically, but they should not keep service badges or banners open.
 export function buildIncidentAlertSnapshot(incidents: IncidentInput[]): IncidentAlertSnapshot {
   const serviceAlerts: Record<string, ServiceIncidentBadge> = {}
   let activeCount = 0
@@ -89,6 +93,8 @@ export function buildIncidentAlertSnapshot(incidents: IncidentInput[]): Incident
   }
 }
 
+// Critical incidents always break through dismissal, while lower severities
+// respect the user's temporary dismissal preference.
 export function shouldShowIncidentBanner(
   snapshot: IncidentAlertSnapshot,
   options: {

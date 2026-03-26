@@ -1,3 +1,5 @@
+// Deployment alert helpers turn raw deployment comparison signals into a
+// lightweight severity model that pages and summaries can share consistently.
 export type DeploymentAlertLevel = 'none' | 'warning' | 'critical'
 
 export interface DeploymentAlertThresholds {
@@ -51,6 +53,8 @@ function normalizeOutcome(value?: string) {
   return value?.trim().toLowerCase() ?? ''
 }
 
+// Individual metric signals use the same warning/critical rule so callers can
+// combine them without duplicating threshold logic.
 function evaluateThreshold(
   value: number | undefined,
   warning: number,
@@ -80,6 +84,8 @@ function evaluateThreshold(
   return { level: 'none', priority: 0 }
 }
 
+// Outcome-based failures are treated as authoritative, while metric deltas add
+// supporting reasons and priority for sorting/regression triage.
 export function evaluateDeploymentAlert(
   signal: DeploymentSignal,
   thresholds: DeploymentAlertThresholds = DEFAULT_DEPLOYMENT_ALERT_THRESHOLDS,
@@ -172,6 +178,8 @@ export function evaluateDeploymentHistoryItem(
   )
 }
 
+// Summary mode intentionally preserves the highest severity and de-duplicates
+// reasons so service-level pages can show one concise alert rollup.
 export function summarizeDeploymentAlerts(
   items: Array<{
     outcome?: string

@@ -1,4 +1,7 @@
-import { request, type MonitoringProviderStatus } from '@/lib/api'
+// Service metrics adapters translate monitoring endpoints into strongly typed
+// summary/trend models and keep no-data diagnostics explicit for the UI.
+import { request } from '@/lib/http/client'
+import type { MonitoringProviderStatus } from '@/lib/api/observability'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export type ServiceMetricsRange = '1h' | '24h' | '7d'
@@ -122,6 +125,8 @@ function emptyNoData(): ServiceMetricsNoData {
   }
 }
 
+// Older payloads may omit `noData`, so the adapter infers it from the metric
+// values instead of forcing every caller to repeat that compatibility logic.
 function normalizeNoData(payload: ServiceMetricsSummaryResponse): ServiceMetricsNoData {
   const fromApi = payload.noData ?? {}
 
@@ -229,6 +234,8 @@ function adaptTrends(
   }
 }
 
+// Observability diagnostics explain *why* metrics are missing: unsupported mode,
+// misconfiguration, or simply no retained samples in the queried window.
 function adaptObservabilityDiagnostics(
   input: Partial<ServiceMetricsObservabilityDiagnostics> | undefined,
 ): ServiceMetricsObservabilityDiagnostics | undefined {
@@ -278,6 +285,8 @@ async function getMetricTrendsFromApi(serviceId: string, range: ServiceMetricsRa
   )
 }
 
+// Empty factory helpers keep page bootstrapping simple and make loading/error
+// transitions render with the same shape as fulfilled requests.
 export function createEmptyServiceMetricsSummary(
   service: ServiceIdentity | string,
   range: ServiceMetricsRange = '24h',

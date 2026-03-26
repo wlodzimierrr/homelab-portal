@@ -1,4 +1,4 @@
-import { request } from '@/lib/api'
+import { request } from '@/lib/http/client'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export type TimelineStatus = 'healthy' | 'degraded' | 'down' | 'unknown'

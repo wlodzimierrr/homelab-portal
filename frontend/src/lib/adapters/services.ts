@@ -1,12 +1,6 @@
-import {
-  getProjects,
-  getReleaseTraceability,
-  getServices,
-  isApiRequestError,
-  type Project,
-  type ReleaseTraceabilityRow,
-  type ServiceRegistryApiRow,
-} from '@/lib/api'
+import { getProjects, getServices, type Project, type ServiceRegistryApiRow } from '@/lib/api/catalog'
+import { getReleaseTraceability, type ReleaseTraceabilityRow } from '@/lib/api/deployments'
+import { isApiRequestError } from '@/lib/http/errors'
 import { getServiceMetricsSummary } from '@/lib/adapters/service-metrics'
 import { createServiceIdentity, normalizeServiceId, parseNamespaceFromInternalUrl, type ServiceIdentity } from '@/lib/service-identity'
 

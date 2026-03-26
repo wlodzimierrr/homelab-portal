@@ -1,12 +1,13 @@
+// Release dashboard data can come from a richer live API or a projects-based
+// fallback. This adapter hides that split and returns one dashboard-oriented shape.
 import {
-  ApiRequestError,
   getCatalogReconciliation,
   getProjects,
-  isApiRequestError,
-  request,
   type CatalogJoinRow,
   type Project,
-} from '@/lib/api'
+} from '@/lib/api/catalog'
+import { request } from '@/lib/http/client'
+import { ApiRequestError, isApiRequestError } from '@/lib/http/errors'
 import { getServicesRegistry, type ServiceRegistryItem } from '@/lib/adapters/services'
 import { buildArgoAppUrl } from '@/lib/config'
 import { normalizeServiceId } from '@/lib/service-identity'
@@ -118,6 +119,8 @@ function normalizeHealthStatus(value?: string): ReleaseHealthStatus {
   return 'unknown'
 }
 
+// Live rows preserve as much traceability detail as possible, but they also
+// normalize ids and tolerate partially populated Argo/CI metadata.
 function adaptLiveReleaseRows(rows: ReleaseTraceabilityApiRow[]): ReleaseDashboardEntry[] {
   return rows
     .map((row): ReleaseDashboardEntry | null => {
@@ -199,6 +202,8 @@ function normalizeLookup(value: string) {
   return normalizeServiceId(value) || value.trim().toLowerCase()
 }
 
+// Catalog reconciliation is best-effort enrichment. Missing matches should add
+// warnings rather than hide rows, because release data is still valuable on its own.
 function joinRowsWithCatalog(rows: ReleaseDashboardEntry[], catalogRows: CatalogJoinRow[]) {
   const byProjectKey = new Map<string, CatalogJoinRow>()
   const byPrimaryServiceKey = new Map<string, CatalogJoinRow>()
@@ -288,6 +293,8 @@ async function getReleaseDashboardFromApi() {
   return adaptLiveReleaseRows(payload)
 }
 
+// The loader prefers the dedicated release API, remembers when that endpoint is
+// absent, and falls back to project/service joins for older backend deployments.
 export async function getReleaseDashboardEntries(): Promise<ReleaseDashboardResult> {
   let apiError: Error | null = null
   let baseRows: ReleaseDashboardEntry[] = []

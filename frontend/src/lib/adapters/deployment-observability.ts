@@ -1,4 +1,7 @@
-import { request, type MonitoringProviderStatus } from '@/lib/api'
+// This adapter normalizes the composite deployment observability endpoint into a
+// predictable frontend shape, including partial-provider failures and no-window cases.
+import { request } from '@/lib/http/client'
+import type { MonitoringProviderStatus } from '@/lib/api/observability'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 import type { LogsQuickViewPreset, LogsQuickViewLine } from '@/lib/adapters/logs-quickview'
 import type { ServiceHealthTimelineSegment } from '@/lib/adapters/service-health-timeline'
@@ -137,6 +140,8 @@ function asNumber(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+// The backend already sends before/after/delta snapshots, but this guard keeps
+// page code resilient to partial payloads while the API contract evolves.
 function adaptMetricSnapshot(value: unknown): DeploymentObservabilityMetricSnapshot | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined
@@ -149,6 +154,8 @@ function adaptMetricSnapshot(value: unknown): DeploymentObservabilityMetricSnaps
   }
 }
 
+// Timeline segments are validated defensively because the page renders them
+// directly into charts and needs complete start/end boundaries.
 function adaptTimelineSegments(value: ApiTimelineSegment[] | undefined): ServiceHealthTimelineSegment[] {
   if (!Array.isArray(value)) {
     return []
@@ -203,6 +210,8 @@ function adaptLogsLines(
     .filter((line): line is LogsQuickViewLine => line !== null)
 }
 
+// Request construction intentionally accepts either a deployment id or an
+// explicit time window so older history rows can still drive observability drill-downs.
 export async function getDeploymentObservability(
   service: ServiceIdentity | string,
   options: DeploymentObservabilityOptions,

@@ -1,10 +1,10 @@
 import {
   getReleaseTraceability,
   getServiceDeployments,
-  isApiRequestError,
   type ReleaseTraceabilityRow,
   type ServiceDeployment,
-} from '@/lib/api'
+} from '@/lib/api/deployments'
+import { isApiRequestError } from '@/lib/http/errors'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export interface DeploymentMetricSnapshot {

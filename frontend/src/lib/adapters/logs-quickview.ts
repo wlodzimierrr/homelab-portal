@@ -1,4 +1,5 @@
-import { request, type MonitoringProviderStatus } from '@/lib/api'
+import { request } from '@/lib/http/client'
+import type { MonitoringProviderStatus } from '@/lib/api/observability'
 import { createServiceIdentity, type ServiceIdentity } from '@/lib/service-identity'
 
 export type LogsQuickViewPreset = 'all' | 'errors' | 'restarts' | 'warnings'
