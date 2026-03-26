@@ -1,21 +1,24 @@
 // The scaffold wizard collects enough metadata to generate both app templates and
 // GitOps catalog entries, so several fields reflect backend/workloads conventions.
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
+  fetchScaffoldProjects,
   previewScaffold,
   submitScaffold,
   type BackendTemplateId,
   type BundleTopology,
   type DbTemplateId,
   type FrontendTemplateId,
+  type ScaffoldMode,
   type ScaffoldPreviewFile,
+  type ScaffoldProjectInfo,
   type ScaffoldServiceRequest,
   type ScaffoldSubmitResponse,
   type TemplateId,
 } from '@/lib/api/scaffold'
 import { cn } from '@/lib/utils'
 
-type Step = 'basic' | 'topology' | 'template' | 'config' | 'preview' | 'success'
+type Step = 'mode' | 'basic' | 'topology' | 'template' | 'config' | 'preview' | 'success'
 
 const DB_TEMPLATES: TemplateId[] = ['postgres', 'mysql']
 
@@ -28,6 +31,7 @@ function isWordPressTemplate(template: TemplateId): boolean {
 }
 
 interface WizardFormState {
+  mode: ScaffoldMode
   name: string
   description: string
   ownerEmail: string
@@ -48,11 +52,14 @@ interface WizardFormState {
   backendTemplate: BackendTemplateId
   backendImageRepo: string
   dbTemplate: DbTemplateId
+  projectId: string
+  serviceName: string
 }
 
 // The form state mirrors the scaffold API request closely so preview and submit
 // share one source of truth as the user moves between steps.
 const EMPTY_FORM: WizardFormState = {
+  mode: 'new-project',
   name: '',
   description: '',
   ownerEmail: '',
@@ -73,10 +80,17 @@ const EMPTY_FORM: WizardFormState = {
   backendTemplate: 'python-fastapi',
   backendImageRepo: '',
   dbTemplate: 'postgres',
+  projectId: '',
+  serviceName: '',
 }
 
-const STEPS: Step[] = ['basic', 'topology', 'template', 'config', 'preview']
+function stepsForMode(mode: ScaffoldMode): Step[] {
+  if (mode === 'add-to-project') return ['mode', 'basic', 'template', 'config', 'preview']
+  return ['mode', 'basic', 'topology', 'template', 'config', 'preview']
+}
+
 const STEP_LABELS: Record<Step, string> = {
+  mode: 'Mode',
   basic: 'Basic info',
   topology: 'Topology',
   template: 'Template',
@@ -89,12 +103,12 @@ interface Props {
   onClose: () => void
 }
 
-function StepIndicator({ currentStep }: { currentStep: Step }) {
-  const currentIndex = STEPS.indexOf(currentStep)
+function StepIndicator({ currentStep, steps }: { currentStep: Step; steps: Step[] }) {
+  const currentIndex = steps.indexOf(currentStep)
   return (
     <ol className="mb-6 flex items-center gap-2 text-xs">
-      {STEPS.map((step, index) => (
-        <li key={step} className="flex items-center gap-2">
+      {steps.map((s, index) => (
+        <li key={s} className="flex items-center gap-2">
           <span
             className={cn(
               'flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold',
@@ -113,9 +127,9 @@ function StepIndicator({ currentStep }: { currentStep: Step }) {
               index === currentIndex ? 'font-medium' : 'text-muted-foreground',
             )}
           >
-            {STEP_LABELS[step]}
+            {STEP_LABELS[s]}
           </span>
-          {index < STEPS.length - 1 && <span className="text-muted-foreground">›</span>}
+          {index < steps.length - 1 && <span className="text-muted-foreground">›</span>}
         </li>
       ))}
     </ol>
@@ -157,6 +171,87 @@ function TextInput({
   )
 }
 
+function ModeStep({
+  form,
+  onChange,
+  projects,
+  projectsLoading,
+}: {
+  form: WizardFormState
+  onChange: (patch: Partial<WizardFormState>) => void
+  projects: ScaffoldProjectInfo[]
+  projectsLoading: boolean
+}) {
+  const modes: { key: ScaffoldMode; title: string; description: string }[] = [
+    {
+      key: 'new-project',
+      title: 'New project',
+      description: 'Create a new project with its own namespace, manifests, and catalog entry.',
+    },
+    {
+      key: 'add-to-project',
+      title: 'Add service to existing project',
+      description: 'Add a new service component to an already-scaffolded project namespace.',
+    },
+  ]
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">What would you like to do?</p>
+      {modes.map((m) => (
+        <button
+          key={m.key}
+          type="button"
+          onClick={() => onChange({ mode: m.key })}
+          className={cn(
+            'w-full rounded-md border p-4 text-left transition-colors',
+            form.mode === m.key
+              ? 'border-primary bg-primary/5'
+              : 'border-border hover:border-primary/50',
+          )}
+        >
+          <p className="font-medium">{m.title}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{m.description}</p>
+        </button>
+      ))}
+      {form.mode === 'add-to-project' && (
+        <div className="mt-4 space-y-3 rounded-md border border-border p-4">
+          <FieldLabel htmlFor="project-select">Target project *</FieldLabel>
+          {projectsLoading ? (
+            <p className="text-sm text-muted-foreground">Loading projects...</p>
+          ) : projects.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No existing projects found. Create a new project first.</p>
+          ) : (
+            <select
+              id="project-select"
+              value={form.projectId}
+              onChange={(e) => {
+                const proj = projects.find((p) => p.projectId === e.target.value)
+                onChange({
+                  projectId: e.target.value,
+                  namespace: proj?.namespace ?? '',
+                })
+              }}
+              className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+            >
+              <option value="">Select a project...</option>
+              {projects.map((p) => (
+                <option key={p.projectId} value={p.projectId}>
+                  {p.projectId} ({p.serviceIds.length} service{p.serviceIds.length !== 1 ? 's' : ''}: {p.serviceIds.join(', ')})
+                </option>
+              ))}
+            </select>
+          )}
+          {form.projectId && (
+            <p className="text-xs text-muted-foreground">
+              Namespace: <code className="font-mono">{form.namespace || form.projectId}</code>
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function BasicInfoStep({
   form,
   onChange,
@@ -164,20 +259,41 @@ function BasicInfoStep({
   form: WizardFormState
   onChange: (patch: Partial<WizardFormState>) => void
 }) {
+  const isAddToProject = form.mode === 'add-to-project'
   return (
     <div className="space-y-4">
-      <div>
-        <FieldLabel htmlFor="svc-name" hint="Lowercase kebab-case, e.g. my-service">
-          Service name *
-        </FieldLabel>
-        <TextInput
-          id="svc-name"
-          value={form.name}
-          onChange={(v) => onChange({ name: v.toLowerCase().replace(/[^a-z0-9-]/g, '-') })}
-          placeholder="my-service"
-          required
-        />
-      </div>
+      {isAddToProject ? (
+        <div>
+          <FieldLabel htmlFor="svc-name" hint="Component suffix, e.g. worker. Full ID will be {project}-{name}.">
+            Service name *
+          </FieldLabel>
+          <TextInput
+            id="svc-name"
+            value={form.serviceName}
+            onChange={(v) => onChange({ serviceName: v.toLowerCase().replace(/[^a-z0-9-]/g, '-') })}
+            placeholder="worker"
+            required
+          />
+          {form.projectId && form.serviceName && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Service ID: <code className="font-mono">{form.projectId}-{form.serviceName}</code>
+            </p>
+          )}
+        </div>
+      ) : (
+        <div>
+          <FieldLabel htmlFor="svc-name" hint="Lowercase kebab-case, e.g. my-service">
+            Project name *
+          </FieldLabel>
+          <TextInput
+            id="svc-name"
+            value={form.name}
+            onChange={(v) => onChange({ name: v.toLowerCase().replace(/[^a-z0-9-]/g, '-') })}
+            placeholder="my-service"
+            required
+          />
+        </div>
+      )}
       <div>
         <FieldLabel htmlFor="svc-description">Description *</FieldLabel>
         <TextInput
@@ -757,6 +873,7 @@ function PreviewStep({
   submitting,
   submitError,
   onSubmit,
+  form,
 }: {
   files: ScaffoldPreviewFile[]
   loading: boolean
@@ -764,6 +881,7 @@ function PreviewStep({
   submitting: boolean
   submitError: string
   onSubmit: () => void
+  form: WizardFormState
 }) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null)
   const selectedFile = files.find((f) => f.path === selectedPath) ?? files[0] ?? null
@@ -782,10 +900,33 @@ function PreviewStep({
   const created = files.filter((f) => f.changeType === 'create')
   const modified = files.filter((f) => f.changeType === 'modify')
 
+  const isAddToProject = form.mode === 'add-to-project'
+  const isBundle = !isAddToProject && form.topology !== 'single-service'
+  const projectName = isAddToProject ? form.projectId : form.name
+  const namespace = form.namespace || projectName
+  const childServices: string[] = []
+  if (isAddToProject) {
+    childServices.push(`${form.projectId}-${form.serviceName}`)
+  } else if (isBundle) {
+    childServices.push(`${form.name}-frontend`, `${form.name}-backend`)
+    if (form.topology === 'frontend-backend-db') childServices.push(`${form.name}-db`)
+  } else {
+    childServices.push(form.name)
+  }
+  const ingressHost = form.devHost || `${projectName}.dev.homelab.local`
+  const publicHost = form.publicHost || `${projectName}.homelab.local`
+
   return (
     <div className="space-y-4">
+      <div className="rounded-md border border-border bg-muted/40 p-3 text-sm space-y-1">
+        <p><span className="font-medium text-muted-foreground">Project:</span> {projectName}</p>
+        <p><span className="font-medium text-muted-foreground">Namespace:</span> <code className="font-mono text-xs">{namespace}</code></p>
+        <p><span className="font-medium text-muted-foreground">Services:</span> {childServices.map(s => <code key={s} className="font-mono text-xs mr-2">{s}</code>)}</p>
+        <p><span className="font-medium text-muted-foreground">Ingress host:</span> <code className="font-mono text-xs">{ingressHost}</code></p>
+        {publicHost && <p><span className="font-medium text-muted-foreground">Public host:</span> <code className="font-mono text-xs">{publicHost}</code></p>}
+      </div>
       <p className="text-sm text-muted-foreground">
-        {created.length} new files + {modified.length} modified files will be committed in a single PR.
+        {created.length} new file{created.length !== 1 ? 's' : ''} + {modified.length} modified file{modified.length !== 1 ? 's' : ''} will be committed in a single PR.
       </p>
 
       <div className="grid gap-3 lg:grid-cols-[240px_1fr]">
@@ -900,16 +1041,28 @@ function SuccessStep({ result, onClose }: { result: ScaffoldSubmitResponse; onCl
   )
 }
 
+function validateMode(form: WizardFormState): string {
+  if (form.mode === 'add-to-project' && !form.projectId.trim()) return 'Please select a target project.'
+  return ''
+}
+
 function validateBasic(form: WizardFormState): string {
-  if (!form.name.trim()) return 'Service name is required.'
-  if (!/^[a-z][a-z0-9-]{1,62}$/.test(form.name)) return 'Service name must be lowercase kebab-case (e.g. my-service).'
+  if (form.mode === 'add-to-project') {
+    if (!form.serviceName.trim()) return 'Service name is required.'
+    if (!/^[a-z][a-z0-9-]{0,30}$/.test(form.serviceName)) return 'Service name must be lowercase kebab-case.'
+    const fullId = `${form.projectId}-${form.serviceName}`
+    if (!/^[a-z][a-z0-9-]{1,62}$/.test(fullId)) return `Full service ID "${fullId}" is invalid (must be kebab-case, max 63 chars).`
+  } else {
+    if (!form.name.trim()) return 'Project name is required.'
+    if (!/^[a-z][a-z0-9-]{1,62}$/.test(form.name)) return 'Project name must be lowercase kebab-case (e.g. my-service).'
+  }
   if (!form.description.trim()) return 'Description is required.'
   if (!form.ownerEmail.trim()) return 'Owner email is required.'
   return ''
 }
 
 function validateConfig(form: WizardFormState): string {
-  const isBundle = form.topology !== 'single-service'
+  const isBundle = form.mode === 'new-project' && form.topology !== 'single-service'
   if (isBundle) {
     if (!form.frontendImageRepo.trim()) return 'Frontend image repository is required.'
     if (!form.backendImageRepo.trim()) return 'Backend image repository is required.'
@@ -924,7 +1077,7 @@ function validateConfig(form: WizardFormState): string {
 // The wizard keeps preview generation client-driven: validate locally, call the
 // preview endpoint, then submit the same payload once the user confirms.
 export function ScaffoldServiceWizard({ onClose }: Props) {
-  const [step, setStep] = useState<Step>('basic')
+  const [step, setStep] = useState<Step>('mode')
   const [form, setForm] = useState<WizardFormState>(EMPTY_FORM)
   const [validationError, setValidationError] = useState('')
   const [previewFiles, setPreviewFiles] = useState<ScaffoldPreviewFile[]>([])
@@ -933,6 +1086,20 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [submitResult, setSubmitResult] = useState<ScaffoldSubmitResponse | null>(null)
+  const [projects, setProjects] = useState<ScaffoldProjectInfo[]>([])
+  const [projectsLoading, setProjectsLoading] = useState(false)
+
+  const steps = stepsForMode(form.mode)
+
+  useEffect(() => {
+    let cancelled = false
+    setProjectsLoading(true)
+    fetchScaffoldProjects()
+      .then((data) => { if (!cancelled) setProjects(data) })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setProjectsLoading(false) })
+    return () => { cancelled = true }
+  }, [])
 
   const patchForm = useCallback((patch: Partial<WizardFormState>) => {
     setForm((prev) => {
@@ -946,13 +1113,12 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
   }, [])
 
   const buildPayload = (): ScaffoldServiceRequest => {
-    const isBundle = form.topology !== 'single-service'
-    return {
-      name: form.name.trim(),
+    const isAddToProject = form.mode === 'add-to-project'
+    const isBundle = !isAddToProject && form.topology !== 'single-service'
+    const base: ScaffoldServiceRequest = {
+      name: isAddToProject ? form.projectId.trim() : form.name.trim(),
       description: form.description.trim(),
-      imageRepo: !isBundle && form.template === 'wordpress'
-        ? form.imageRepo.trim() || 'wordpress:latest'
-        : form.imageRepo.trim() || undefined,
+      imageRepo: form.imageRepo.trim() || undefined,
       repoUrl: form.repoUrl.trim() || undefined,
       ownerEmail: form.ownerEmail.trim(),
       owner: form.owner.trim(),
@@ -964,28 +1130,52 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
       dbUsername: form.dbUsername.trim() || undefined,
       dbPassword: form.dbPassword.trim() || undefined,
       dbName: form.dbName.trim() || undefined,
-      topology: form.topology,
-      ...(isBundle ? {
-        frontendTemplate: form.frontendTemplate,
-        frontendImageRepo: form.frontendImageRepo.trim(),
-        backendTemplate: form.backendTemplate,
-        backendImageRepo: form.backendImageRepo.trim(),
-        ...(form.topology === 'frontend-backend-db' ? { dbTemplate: form.dbTemplate } : {}),
-      } : {}),
+      mode: form.mode,
     }
+    if (isAddToProject) {
+      base.projectId = form.projectId.trim()
+      base.serviceName = form.serviceName.trim()
+    } else {
+      base.topology = form.topology
+      if (isBundle) {
+        base.frontendTemplate = form.frontendTemplate
+        base.frontendImageRepo = form.frontendImageRepo.trim()
+        base.backendTemplate = form.backendTemplate
+        base.backendImageRepo = form.backendImageRepo.trim()
+        if (form.topology === 'frontend-backend-db') base.dbTemplate = form.dbTemplate
+      }
+      if (!isBundle && form.template === 'wordpress') {
+        base.imageRepo = form.imageRepo.trim() || 'wordpress:latest'
+      }
+    }
+    return base
+  }
+
+  const nextStep = (current: Step): Step | null => {
+    const idx = steps.indexOf(current)
+    return idx >= 0 && idx < steps.length - 1 ? steps[idx + 1] : null
+  }
+
+  const prevStep = (current: Step): Step | null => {
+    const idx = steps.indexOf(current)
+    return idx > 0 ? steps[idx - 1] : null
   }
 
   const goNext = useCallback(async () => {
     setValidationError('')
 
-    if (step === 'basic') {
+    if (step === 'mode') {
+      const err = validateMode(form)
+      if (err) { setValidationError(err); return }
+      setStep(nextStep('mode')!)
+    } else if (step === 'basic') {
       const err = validateBasic(form)
       if (err) { setValidationError(err); return }
-      setStep('topology')
+      setStep(nextStep('basic')!)
     } else if (step === 'topology') {
-      setStep('template')
+      setStep(nextStep('topology')!)
     } else if (step === 'template') {
-      setStep('config')
+      setStep(nextStep('template')!)
     } else if (step === 'config') {
       const err = validateConfig(form)
       if (err) { setValidationError(err); return }
@@ -1003,15 +1193,13 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
         setPreviewLoading(false)
       }
     }
-  }, [step, form])
+  }, [step, form, steps])
 
   const goBack = useCallback(() => {
     setValidationError('')
-    if (step === 'topology') setStep('basic')
-    else if (step === 'template') setStep('topology')
-    else if (step === 'config') setStep('template')
-    else if (step === 'preview') setStep('config')
-  }, [step])
+    const prev = prevStep(step)
+    if (prev) setStep(prev)
+  }, [step, steps])
 
   const handleSubmit = useCallback(async () => {
     setSubmitting(true)
@@ -1037,7 +1225,9 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-border px-6 py-4">
-          <h2 className="text-base font-semibold">New project</h2>
+          <h2 className="text-base font-semibold">
+            {form.mode === 'add-to-project' ? 'Add service to project' : 'New project'}
+          </h2>
           <button
             type="button"
             onClick={onClose}
@@ -1048,12 +1238,16 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
         </div>
 
         <div className="px-6 py-5">
-          {step !== 'success' && <StepIndicator currentStep={step} />}
+          {step !== 'success' && <StepIndicator currentStep={step} steps={steps} />}
 
+          {step === 'mode' && (
+            <ModeStep form={form} onChange={patchForm} projects={projects} projectsLoading={projectsLoading} />
+          )}
           {step === 'basic' && <BasicInfoStep form={form} onChange={patchForm} />}
           {step === 'topology' && <TopologyStep form={form} onChange={patchForm} />}
-          {step === 'template' && form.topology === 'single-service' && <TemplateStep form={form} onChange={patchForm} />}
-          {step === 'template' && form.topology !== 'single-service' && <BundleTemplateStep form={form} onChange={patchForm} />}
+          {step === 'template' && form.mode === 'add-to-project' && <TemplateStep form={form} onChange={patchForm} />}
+          {step === 'template' && form.mode === 'new-project' && form.topology === 'single-service' && <TemplateStep form={form} onChange={patchForm} />}
+          {step === 'template' && form.mode === 'new-project' && form.topology !== 'single-service' && <BundleTemplateStep form={form} onChange={patchForm} />}
           {step === 'config' && <ConfigStep form={form} onChange={patchForm} />}
           {step === 'preview' && (
             <PreviewStep
@@ -1063,6 +1257,7 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
               submitting={submitting}
               submitError={submitError}
               onSubmit={handleSubmit}
+              form={form}
             />
           )}
           {step === 'success' && submitResult && (
@@ -1078,10 +1273,10 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
           <div className="flex justify-between border-t border-border px-6 py-4">
             <button
               type="button"
-              onClick={step === 'basic' ? onClose : goBack}
+              onClick={step === 'mode' ? onClose : goBack}
               className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted"
             >
-              {step === 'basic' ? 'Cancel' : 'Back'}
+              {step === 'mode' ? 'Cancel' : 'Back'}
             </button>
             <button
               type="button"

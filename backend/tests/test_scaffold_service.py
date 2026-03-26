@@ -1,15 +1,20 @@
 import pytest
 
 from app.scaffold_service import (
+    ScaffoldAddServiceInput,
     ScaffoldBundleInput,
     ScaffoldError,
     ScaffoldServiceInput,
     build_appproject_addition,
+    build_catalog_add_service_entry,
     build_catalog_bundle_entries,
     build_catalog_entry_addition,
+    generate_gitops_add_service_files,
     generate_gitops_bundle_files,
     generate_gitops_new_files,
     update_kustomization_resources,
+    update_overlay_kustomization_patches,
+    validate_add_service,
     validate_service_name,
 )
 
@@ -990,3 +995,235 @@ def test_catalog_bundle_rejects_duplicate_service_id() -> None:
     existing = _SERVICES_YAML + "  - service_id: my-proj-frontend\n    name: 'Existing'\n"
     with pytest.raises(ScaffoldError):
         build_catalog_bundle_entries(existing, _make_bundle_input())
+
+
+# ---------------------------------------------------------------------------
+# Add-to-project – generate_gitops_add_service_files
+# ---------------------------------------------------------------------------
+
+
+def _make_add_service_input(**overrides: object) -> ScaffoldAddServiceInput:
+    defaults: dict[str, object] = {
+        "project_id": "my-proj",
+        "service_name": "worker",
+        "description": "A worker service",
+        "owner_email": "ops@example.com",
+        "owner": "",
+        "namespace": "my-proj",
+        "template": "python-fastapi",
+        "image_repo": "ghcr.io/example/my-proj-worker",
+        "repo_url": "https://github.com/example/my-proj",
+        "dev_host": "my-proj.dev.homelab.local",
+        "prod_host": "",
+        "public_host": "my-proj.homelab.local",
+        "workloads_repo_url": "https://github.com/example/workloads.git",
+    }
+    defaults.update(overrides)
+    return ScaffoldAddServiceInput(**defaults)  # type: ignore[arg-type]
+
+
+def test_add_service_creates_deployment_and_service() -> None:
+    files, resources = generate_gitops_add_service_files(_make_add_service_input())
+    assert "apps/my-proj/base/worker-deployment.yaml" in files
+    assert "apps/my-proj/base/worker-service.yaml" in files
+    assert "apps/my-proj/base/serviceaccount-worker.yaml" in files
+    assert "worker-deployment.yaml" in resources
+    assert "worker-service.yaml" in resources
+    assert "serviceaccount-worker.yaml" in resources
+
+
+def test_add_service_does_not_create_namespace() -> None:
+    files, _ = generate_gitops_add_service_files(_make_add_service_input())
+    assert not any("namespace.yaml" in path for path in files)
+
+
+def test_add_service_does_not_create_default_deny_netpol() -> None:
+    files, _ = generate_gitops_add_service_files(_make_add_service_input())
+    assert not any("networkpolicy-default-deny" in path for path in files)
+    assert not any("networkpolicy-allow-dns-egress" in path for path in files)
+
+
+def test_add_service_does_not_create_argo_application() -> None:
+    files, _ = generate_gitops_add_service_files(_make_add_service_input())
+    assert not any("environments/" in path for path in files)
+
+
+def test_add_service_component_labels() -> None:
+    files, _ = generate_gitops_add_service_files(_make_add_service_input())
+    deployment = files["apps/my-proj/base/worker-deployment.yaml"]
+    assert "app.kubernetes.io/name: my-proj" in deployment
+    assert "app.kubernetes.io/component: worker" in deployment
+
+
+def test_add_service_service_id_in_deployment() -> None:
+    files, _ = generate_gitops_add_service_files(_make_add_service_input())
+    deployment = files["apps/my-proj/base/worker-deployment.yaml"]
+    assert "name: my-proj-worker" in deployment
+
+
+def test_add_service_overlay_patches() -> None:
+    files, _ = generate_gitops_add_service_files(_make_add_service_input())
+    assert "apps/my-proj/envs/dev/patch-worker-deployment.yaml" in files
+    assert "apps/my-proj/envs/prod/patch-worker-deployment.yaml" in files
+
+
+def test_add_service_servicemonitor_app_native() -> None:
+    files, resources = generate_gitops_add_service_files(_make_add_service_input(
+        template="python-fastapi",
+    ))
+    assert "apps/my-proj/base/servicemonitor-worker.yaml" in files
+    assert "servicemonitor-worker.yaml" in resources
+
+
+def test_add_service_no_servicemonitor_sidecar() -> None:
+    files, resources = generate_gitops_add_service_files(_make_add_service_input(
+        template="react",
+    ))
+    assert "apps/my-proj/base/servicemonitor-worker.yaml" not in files
+    assert "servicemonitor-worker.yaml" not in resources
+
+
+def test_add_service_database_template() -> None:
+    files, resources = generate_gitops_add_service_files(_make_add_service_input(
+        template="postgres",
+        service_name="db",
+    ))
+    assert "apps/my-proj/base/db-statefulset.yaml" in files
+    assert "apps/my-proj/base/db-service.yaml" in files
+    assert "apps/my-proj/base/db-credentials-secret.yaml" in files
+    assert "db-statefulset.yaml" in resources
+    # DB templates should NOT generate overlay patches
+    assert not any("envs/" in path for path in files)
+
+
+def test_add_service_name_validation() -> None:
+    with pytest.raises(ScaffoldError):
+        generate_gitops_add_service_files(_make_add_service_input(
+            project_id="my-proj",
+            service_name="INVALID",
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Add-to-project – validate_add_service
+# ---------------------------------------------------------------------------
+
+
+_EXISTING_BASE_KUSTOMIZATION = """\
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - backend-deployment.yaml
+  - backend-service.yaml
+  - frontend-deployment.yaml
+  - frontend-service.yaml
+  - namespace.yaml
+"""
+
+
+def test_validate_add_service_passes_for_new_service() -> None:
+    validate_add_service(
+        _make_add_service_input(),
+        _EXISTING_BASE_KUSTOMIZATION,
+        _SERVICES_YAML,
+    )  # should not raise
+
+
+def test_validate_add_service_rejects_duplicate_service_id() -> None:
+    existing_catalog = _SERVICES_YAML + "  - service_id: my-proj-worker\n    name: 'Existing'\n"
+    with pytest.raises(ScaffoldError):
+        validate_add_service(
+            _make_add_service_input(),
+            _EXISTING_BASE_KUSTOMIZATION,
+            existing_catalog,
+        )
+
+
+def test_validate_add_service_rejects_duplicate_resource() -> None:
+    kustomization = _EXISTING_BASE_KUSTOMIZATION + "  - worker-deployment.yaml\n"
+    with pytest.raises(ScaffoldError):
+        validate_add_service(
+            _make_add_service_input(),
+            kustomization,
+            _SERVICES_YAML,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Add-to-project – build_catalog_add_service_entry
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_add_service_entry_has_project_id() -> None:
+    result = build_catalog_add_service_entry(_SERVICES_YAML, _make_add_service_input())
+    assert "project_id: my-proj" in result
+
+
+def test_catalog_add_service_entry_has_correct_service_id() -> None:
+    result = build_catalog_add_service_entry(_SERVICES_YAML, _make_add_service_input())
+    assert "service_id: my-proj-worker" in result
+
+
+def test_catalog_add_service_entry_shares_argo_app() -> None:
+    result = build_catalog_add_service_entry(_SERVICES_YAML, _make_add_service_input())
+    new_entry = result[len(_SERVICES_YAML):]
+    assert "argo_app: my-proj-dev" in new_entry
+    assert "argo_app: my-proj-prod" in new_entry
+
+
+def test_catalog_add_service_entry_dev_and_prod_envs() -> None:
+    result = build_catalog_add_service_entry(_SERVICES_YAML, _make_add_service_input())
+    new_entry = result[len(_SERVICES_YAML):]
+    assert "name: dev" in new_entry
+    assert "name: prod" in new_entry
+
+
+def test_catalog_add_service_entry_rejects_duplicate() -> None:
+    existing = _SERVICES_YAML + "  - service_id: my-proj-worker\n    name: 'Existing'\n"
+    with pytest.raises(ScaffoldError):
+        build_catalog_add_service_entry(existing, _make_add_service_input())
+
+
+# ---------------------------------------------------------------------------
+# update_overlay_kustomization_patches
+# ---------------------------------------------------------------------------
+
+
+_EXISTING_OVERLAY_KUSTOMIZATION = """\
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+commonLabels:
+  homelab.env: dev
+patches:
+  - path: patch-backend-deployment.yaml
+  - path: patch-frontend-deployment.yaml
+"""
+
+
+def test_overlay_kustomization_adds_new_patch() -> None:
+    result = update_overlay_kustomization_patches(
+        _EXISTING_OVERLAY_KUSTOMIZATION,
+        "patch-worker-deployment.yaml",
+    )
+    assert "- path: patch-worker-deployment.yaml" in result
+    assert "- path: patch-backend-deployment.yaml" in result
+    assert "- path: patch-frontend-deployment.yaml" in result
+
+
+def test_overlay_kustomization_deduplicates() -> None:
+    result = update_overlay_kustomization_patches(
+        _EXISTING_OVERLAY_KUSTOMIZATION,
+        "patch-backend-deployment.yaml",
+    )
+    assert result.count("patch-backend-deployment.yaml") == 1
+
+
+def test_overlay_kustomization_sorts_patches() -> None:
+    result = update_overlay_kustomization_patches(
+        _EXISTING_OVERLAY_KUSTOMIZATION,
+        "patch-alpha-deployment.yaml",
+    )
+    lines = [l.strip() for l in result.splitlines() if l.strip().startswith("- path:")]
+    assert lines == sorted(lines)

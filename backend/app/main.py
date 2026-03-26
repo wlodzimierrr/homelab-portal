@@ -110,15 +110,20 @@ from app.observability_config import (
     render_query_template,
 )
 from app.scaffold_service import (
+    ScaffoldAddServiceInput,
     ScaffoldBundleInput,
     ScaffoldError,
     ScaffoldServiceInput,
     build_appproject_addition,
+    build_catalog_add_service_entry,
     build_catalog_bundle_entries,
     build_catalog_entry_addition,
+    generate_gitops_add_service_files,
     generate_gitops_bundle_files,
     generate_gitops_new_files,
     update_kustomization_resources,
+    update_overlay_kustomization_patches,
+    validate_add_service,
     validate_service_name,
 )
 from app.secret_editing import (
@@ -210,6 +215,7 @@ from app.api.schemas.observability import (
 from app.api.schemas.scaffold import (
     ScaffoldPreviewFile,
     ScaffoldPreviewResponse,
+    ScaffoldProjectInfo,
     ScaffoldServiceRequest,
     ScaffoldSubmitResponse,
 )
@@ -6236,18 +6242,87 @@ def _build_scaffold_bundle_input(payload: ScaffoldServiceRequest) -> ScaffoldBun
     )
 
 
+def _build_scaffold_add_service_input(payload: ScaffoldServiceRequest) -> ScaffoldAddServiceInput:
+    repo_slug = _workloads_repo_slug()
+    project_id = payload.project_id.strip().lower()
+    service_name = payload.service_name.strip().lower()
+    if not project_id:
+        raise ScaffoldError("projectId is required for add-to-project mode.", status_code=422)
+    if not service_name:
+        raise ScaffoldError("serviceName is required for add-to-project mode.", status_code=422)
+
+    namespace = payload.namespace.strip() or project_id
+    dev_host = payload.dev_host.strip() or f"{project_id}.dev.homelab.local"
+    prod_host = payload.prod_host.strip() or f"{project_id}.homelab.local"
+    base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
+    public_host = payload.public_host.strip() or f"{project_id}.{base_domain}"
+    return ScaffoldAddServiceInput(
+        project_id=project_id,
+        service_name=service_name,
+        description=payload.description.strip(),
+        owner_email=payload.owner_email.strip(),
+        owner=payload.owner.strip(),
+        namespace=namespace,
+        template=payload.template,
+        image_repo=payload.image_repo.strip(),
+        repo_url=payload.repo_url.strip(),
+        dev_host=dev_host,
+        prod_host=prod_host,
+        public_host=public_host,
+        workloads_repo_url=_workloads_gitops_repo_url(repo_slug),
+        db_username=payload.db_username.strip() or "appuser",
+        db_password=payload.db_password.strip() or "changeme",
+        db_name=payload.db_name.strip() or "appdb",
+    )
+
+
 def _generate_scaffold_files_and_updates(
     payload: ScaffoldServiceRequest,
     workloads_repo: str,
     base_branch: str,
     git_provider: object,
-) -> tuple[dict[str, str], str, str, str, str]:
+) -> tuple[dict[str, str], dict[str, str]]:
     """Shared logic for preview and submit: generate files and catalog updates.
 
-    Returns (new_files, kustomization_path, updated_kustomization,
-             updated_appproject, updated_services_yaml).
+    Returns (new_files, modified_files) where new_files are created and
+    modified_files are existing files with updated content.
     """
-    is_bundle = payload.topology != "single-service"
+    is_add_to_project = payload.mode == "add-to-project"
+    is_bundle = not is_add_to_project and payload.topology != "single-service"
+
+    if is_add_to_project:
+        inp = _build_scaffold_add_service_input(payload)
+
+        base_kust_path = f"apps/{inp.project_id}/base/kustomization.yaml"
+        base_kustomization_raw = git_provider.read_file(workloads_repo, base_branch, base_kust_path)  # type: ignore[union-attr]
+        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
+
+        validate_add_service(inp, base_kustomization_raw, services_yaml_raw)
+
+        new_files, new_resources = generate_gitops_add_service_files(inp)
+        modified_files: dict[str, str] = {}
+
+        # Update the project's base kustomization with new resources
+        updated_base_kust = base_kustomization_raw
+        for resource in new_resources:
+            updated_base_kust = update_kustomization_resources(updated_base_kust, resource)
+        modified_files[base_kust_path] = updated_base_kust
+
+        # Update overlay kustomizations with new patch references
+        is_db = inp.template in ("postgres", "mysql")
+        if not is_db:
+            patch_filename = f"patch-{inp.service_name}-deployment.yaml"
+            for env_name in ("dev", "prod"):
+                overlay_kust_path = f"apps/{inp.project_id}/envs/{env_name}/kustomization.yaml"
+                overlay_kust_raw = git_provider.read_file(workloads_repo, base_branch, overlay_kust_path)  # type: ignore[union-attr]
+                modified_files[overlay_kust_path] = update_overlay_kustomization_patches(
+                    overlay_kust_raw, patch_filename,
+                )
+
+        modified_files[_WORKLOADS_CATALOG_PATH] = build_catalog_add_service_entry(
+            services_yaml_raw, inp,
+        )
+        return new_files, modified_files
 
     if is_bundle:
         inp = _build_scaffold_bundle_input(payload)
@@ -6258,8 +6333,6 @@ def _generate_scaffold_files_and_updates(
         services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
 
         new_files = generate_gitops_bundle_files(inp)
-        updated_kustomization = update_kustomization_resources(kustomization_raw, f"{inp.name}-app.yaml")
-        updated_services_yaml = build_catalog_bundle_entries(services_yaml_raw, inp)
         # Reuse single-service AppProject builder — same shape, just needs a dummy ScaffoldServiceInput
         single_inp = ScaffoldServiceInput(
             name=inp.name, description=inp.description, image_repo="",
@@ -6268,7 +6341,11 @@ def _generate_scaffold_files_and_updates(
             dev_host=inp.dev_host, prod_host=inp.prod_host, public_host=inp.public_host,
             workloads_repo_url=inp.workloads_repo_url,
         )
-        updated_appproject = build_appproject_addition(appproject_raw, single_inp)
+        modified_files = {
+            kustomization_path: update_kustomization_resources(kustomization_raw, f"{inp.name}-app.yaml"),
+            _WORKLOADS_APPPROJECT_PATH: build_appproject_addition(appproject_raw, single_inp),
+            _WORKLOADS_CATALOG_PATH: build_catalog_bundle_entries(services_yaml_raw, inp),
+        }
     else:
         inp_single = _build_scaffold_input(payload)
         validate_service_name(inp_single.name)
@@ -6278,11 +6355,13 @@ def _generate_scaffold_files_and_updates(
         services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
 
         new_files = generate_gitops_new_files(inp_single)
-        updated_kustomization = update_kustomization_resources(kustomization_raw, f"{inp_single.name}-app.yaml")
-        updated_services_yaml = build_catalog_entry_addition(services_yaml_raw, inp_single)
-        updated_appproject = build_appproject_addition(appproject_raw, inp_single)
+        modified_files = {
+            kustomization_path: update_kustomization_resources(kustomization_raw, f"{inp_single.name}-app.yaml"),
+            _WORKLOADS_APPPROJECT_PATH: build_appproject_addition(appproject_raw, inp_single),
+            _WORKLOADS_CATALOG_PATH: build_catalog_entry_addition(services_yaml_raw, inp_single),
+        }
 
-    return new_files, kustomization_path, updated_kustomization, updated_appproject, updated_services_yaml
+    return new_files, modified_files
 
 
 @app.post("/scaffold/preview", response_model=ScaffoldPreviewResponse, tags=["scaffold"])
@@ -6294,8 +6373,8 @@ def scaffold_preview(
 
     try:
         git_provider = build_default_git_provider()
-        new_files, kustomization_path, updated_kustomization, updated_appproject, updated_services_yaml = (
-            _generate_scaffold_files_and_updates(payload, workloads_repo, base_branch, git_provider)
+        new_files, modified_files = _generate_scaffold_files_and_updates(
+            payload, workloads_repo, base_branch, git_provider,
         )
     except ScaffoldError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -6311,9 +6390,8 @@ def scaffold_preview(
         for path, content in sorted(new_files.items())
     ]
     preview_files += [
-        ScaffoldPreviewFile(path=kustomization_path, content=updated_kustomization, changeType="modify"),
-        ScaffoldPreviewFile(path=_WORKLOADS_APPPROJECT_PATH, content=updated_appproject, changeType="modify"),
-        ScaffoldPreviewFile(path=_WORKLOADS_CATALOG_PATH, content=updated_services_yaml, changeType="modify"),
+        ScaffoldPreviewFile(path=path, content=content, changeType="modify")
+        for path, content in sorted(modified_files.items())
     ]
     return ScaffoldPreviewResponse(files=preview_files)
 
@@ -6334,8 +6412,8 @@ def scaffold_submit(
 
     try:
         git_provider = build_default_git_provider()
-        new_files, kustomization_path, updated_kustomization, updated_appproject, updated_services_yaml = (
-            _generate_scaffold_files_and_updates(payload, workloads_repo, base_branch, git_provider)
+        new_files, modified_files = _generate_scaffold_files_and_updates(
+            payload, workloads_repo, base_branch, git_provider,
         )
     except ScaffoldError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -6348,29 +6426,32 @@ def scaffold_submit(
     except GitServiceError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
-    all_files: dict[str, str] = {
-        **new_files,
-        kustomization_path: updated_kustomization,
-        _WORKLOADS_APPPROJECT_PATH: updated_appproject,
-        _WORKLOADS_CATALOG_PATH: updated_services_yaml,
-    }
+    all_files: dict[str, str] = {**new_files, **modified_files}
 
     timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
     namespace = payload.namespace.strip() or name
-    is_bundle = payload.topology != "single-service"
-    kind_label = f"{payload.topology} project" if is_bundle else "service"
-    template_label = (
-        f"{payload.frontend_template} + {payload.backend_template}"
-        + (f" + {payload.db_template}" if payload.db_template and payload.topology == "frontend-backend-db" else "")
-        if is_bundle
-        else payload.template
-    )
+    is_add_to_project = payload.mode == "add-to-project"
+    is_bundle = not is_add_to_project and payload.topology != "single-service"
+    if is_add_to_project:
+        service_id = f"{payload.project_id.strip().lower()}-{payload.service_name.strip().lower()}"
+        kind_label = f"service to {payload.project_id.strip().lower()}"
+        template_label = payload.template
+    elif is_bundle:
+        kind_label = f"{payload.topology} project"
+        template_label = (
+            f"{payload.frontend_template} + {payload.backend_template}"
+            + (f" + {payload.db_template}" if payload.db_template and payload.topology == "frontend-backend-db" else "")
+        )
+    else:
+        kind_label = "service"
+        template_label = payload.template
     branch_name = f"scaffold/{name}-{timestamp}"
-    pr_title = f"feat(scaffold): add {name} {kind_label}"
+    pr_title = f"feat(scaffold): add {service_id if is_add_to_project else name} {kind_label}"
+    project_name = payload.project_id.strip().lower() if is_add_to_project else name
     pr_body = (
-        f"## Scaffold: {name}\n\n"
+        f"## Scaffold: {service_id if is_add_to_project else name}\n\n"
         f"**Description:** {payload.description}\n"
-        f"**Topology:** {payload.topology}\n"
+        f"**Mode:** {payload.mode}\n"
         f"**Template:** {template_label}\n"
         f"**Namespace:** {namespace}\n"
         f"**Repository:** {payload.repo_url}\n\n"
@@ -6380,7 +6461,7 @@ def scaffold_submit(
         f"- [ ] Create image pull secret in `{namespace}` if using GHCR private images\n"
         f"- [ ] Update `runbook_url` in `services.yaml` once a runbook exists\n"
         f"- [ ] Verify kustomize renders without errors: "
-        f"`./scripts/render-kustomize.sh apps/{name}/envs/dev`\n"
+        f"`./scripts/render-kustomize.sh apps/{project_name}/envs/dev`\n"
     )
 
     try:
@@ -6389,7 +6470,7 @@ def scaffold_submit(
             workloads_repo,
             branch_name,
             all_files,
-            f"feat(scaffold): add {name} {kind_label} manifests and catalog entry",
+            f"feat(scaffold): add {service_id if is_add_to_project else name} {kind_label} manifests and catalog entry",
         )
         pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)
     except GitServiceConfigurationError as exc:
@@ -6408,6 +6489,56 @@ def scaffold_submit(
         filesCommitted=sorted(all_files),
         initiatedAt=initiated_at.isoformat(),
     )
+
+
+@app.get("/scaffold/projects", response_model=list[ScaffoldProjectInfo], tags=["scaffold"])
+def scaffold_list_projects() -> list[ScaffoldProjectInfo]:
+    """List existing projects available for the add-to-project scaffold mode."""
+    import yaml as _yaml
+
+    workloads_repo = _workloads_repo_slug()
+    base_branch = _workloads_base_branch()
+
+    try:
+        git_provider = build_default_git_provider()
+        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
+    except GitServiceConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except (GitServiceAuthError, GitServiceError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    try:
+        data = _yaml.safe_load(services_yaml_raw)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Failed to parse services.yaml: {exc}") from exc
+
+    if not isinstance(data, dict) or "services" not in data:
+        return []
+
+    # Group services by project_id
+    projects: dict[str, dict[str, object]] = {}
+    for svc in data["services"]:
+        if not isinstance(svc, dict):
+            continue
+        service_id = svc.get("service_id", "")
+        project_id = svc.get("project_id", service_id)
+        if project_id not in projects:
+            # Derive namespace from first env entry
+            ns = project_id
+            envs = svc.get("envs", [])
+            if envs and isinstance(envs[0], dict):
+                ns = envs[0].get("namespace", project_id)
+            projects[project_id] = {"namespace": ns, "service_ids": []}
+        projects[project_id]["service_ids"].append(service_id)  # type: ignore[union-attr]
+
+    return [
+        ScaffoldProjectInfo(
+            projectId=pid,
+            namespace=str(info["namespace"]),
+            serviceIds=info["service_ids"],  # type: ignore[arg-type]
+        )
+        for pid, info in sorted(projects.items())
+    ]
 
 
 # ---------------------------------------------------------------------------

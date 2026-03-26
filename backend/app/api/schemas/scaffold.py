@@ -25,6 +25,18 @@ class ScaffoldServiceRequest(BaseModel):
     backend_template: Literal["python-fastapi", "python-django", "python-flask", "node-express", "node-nestjs"] | None = Field(alias="backendTemplate", default=None)
     backend_image_repo: str = Field(alias="backendImageRepo", default="")
     db_template: Literal["postgres", "mysql"] | None = Field(alias="dbTemplate", default=None)
+    # Add-to-project fields
+    mode: Literal["new-project", "add-to-project"] = Field(default="new-project")
+    project_id: str = Field(alias="projectId", default="")
+    service_name: str = Field(alias="serviceName", default="")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ScaffoldProjectInfo(BaseModel):
+    project_id: str = Field(alias="projectId")
+    namespace: str
+    service_ids: list[str] = Field(alias="serviceIds")
 
     model_config = ConfigDict(populate_by_name=True)
 

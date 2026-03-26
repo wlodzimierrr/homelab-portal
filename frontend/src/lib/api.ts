@@ -628,6 +628,8 @@ export type BackendTemplateId = 'python-fastapi' | 'python-django' | 'python-fla
 export type DbTemplateId = 'postgres' | 'mysql'
 export type TemplateId = FrontendTemplateId | BackendTemplateId | DbTemplateId | 'wordpress'
 
+export type ScaffoldMode = 'new-project' | 'add-to-project'
+
 export interface ScaffoldServiceRequest {
   name: string
   description: string
@@ -649,6 +651,15 @@ export interface ScaffoldServiceRequest {
   backendTemplate?: BackendTemplateId
   backendImageRepo?: string
   dbTemplate?: DbTemplateId
+  mode?: ScaffoldMode
+  projectId?: string
+  serviceName?: string
+}
+
+export interface ScaffoldProjectInfo {
+  projectId: string
+  namespace: string
+  serviceIds: string[]
 }
 
 export interface ScaffoldPreviewFile {
@@ -681,6 +692,10 @@ export function submitScaffold(payload: ScaffoldServiceRequest) {
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+export function fetchScaffoldProjects() {
+  return request<ScaffoldProjectInfo[]>('/scaffold/projects')
 }
 
 export interface UpdatePublicHostnameResponse {
