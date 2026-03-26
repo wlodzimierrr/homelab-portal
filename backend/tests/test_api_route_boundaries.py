@@ -8,6 +8,7 @@ from fastapi.routing import APIRoute
 
 import app.main as app_main
 from app.api.endpoints import deployments as deployment_endpoints
+from app.api.endpoints import observability as observability_endpoints
 from app.api.endpoints import scaffold as scaffold_endpoints
 from app.api.schemas.catalog import Project, ProjectsResponse
 from app.api.schemas.deployments import (
@@ -84,7 +85,7 @@ def test_split_route_modules_register_expected_main_handlers() -> None:
         (
             "/services/{service_id}/metrics/summary",
             "GET",
-            app_main.get_service_metrics_summary,
+            observability_endpoints.get_service_metrics_summary,
             app_main.ServiceMetricsSummaryResponse,
             ["monitoring"],
         ),
@@ -173,7 +174,7 @@ def test_observability_handler_uses_current_service_builder() -> None:
     with _override_backend_service_builders(
         build_observability_service=lambda: _FakeObservabilityService()
     ):
-        response = app_main.get_monitoring_provider_diagnostics(_=("alice", {"admin"}))
+        response = observability_endpoints.get_monitoring_provider_diagnostics(_=("alice", {"admin"}))
 
     assert response.overall_status == "healthy"
     assert response.providers[0].provider == "prometheus"
