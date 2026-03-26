@@ -1,10 +1,13 @@
 import pytest
 
 from app.scaffold_service import (
+    ScaffoldBundleInput,
     ScaffoldError,
     ScaffoldServiceInput,
     build_appproject_addition,
+    build_catalog_bundle_entries,
     build_catalog_entry_addition,
+    generate_gitops_bundle_files,
     generate_gitops_new_files,
     update_kustomization_resources,
     validate_service_name,
@@ -811,3 +814,179 @@ def test_catalog_entry_nestjs_has_dev_and_prod_envs() -> None:
     new_entry = build_catalog_entry_addition(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
     assert "name: dev" in new_entry
     assert "name: prod" in new_entry
+
+
+# ---------------------------------------------------------------------------
+# Bundle topology – generate_gitops_bundle_files
+# ---------------------------------------------------------------------------
+
+
+def _make_bundle_input(**overrides: object) -> ScaffoldBundleInput:
+    defaults: dict[str, object] = {
+        "name": "my-proj",
+        "description": "A test bundle project",
+        "owner_email": "ops@example.com",
+        "owner": "",
+        "namespace": "my-proj",
+        "dev_host": "my-proj.dev.homelab.local",
+        "prod_host": "",
+        "public_host": "my-proj.homelab.local",
+        "workloads_repo_url": "https://github.com/example/workloads.git",
+        "repo_url": "https://github.com/example/my-proj",
+        "topology": "frontend-backend",
+        "frontend_template": "react",
+        "frontend_image_repo": "ghcr.io/example/my-proj-frontend",
+        "backend_template": "python-fastapi",
+        "backend_image_repo": "ghcr.io/example/my-proj-backend",
+    }
+    defaults.update(overrides)
+    return ScaffoldBundleInput(**defaults)  # type: ignore[arg-type]
+
+
+def test_bundle_frontend_backend_file_count() -> None:
+    files = generate_gitops_bundle_files(_make_bundle_input())
+    # Base: kustomization, namespace, 2 SA, 2 deployment, 2 service, ingress,
+    #   3 netpol (default-deny, allow-dns, allow-ingress),
+    #   2 netpol (frontend↔backend), 2 servicemonitor (react=sidecar → no, fastapi=app-native → yes)
+    # react is sidecar so no frontend servicemonitor; fastapi is app-native
+    assert f"apps/my-proj/base/kustomization.yaml" in files
+    assert f"apps/my-proj/base/namespace.yaml" in files
+    assert f"apps/my-proj/base/frontend-deployment.yaml" in files
+    assert f"apps/my-proj/base/backend-deployment.yaml" in files
+    assert f"apps/my-proj/base/frontend-service.yaml" in files
+    assert f"apps/my-proj/base/backend-service.yaml" in files
+    assert f"apps/my-proj/base/ingress.yaml" in files
+    assert f"apps/my-proj/base/networkpolicy-default-deny.yaml" in files
+    assert f"apps/my-proj/base/networkpolicy-allow-dns-egress.yaml" in files
+    assert f"apps/my-proj/base/networkpolicy-allow-ingress.yaml" in files
+    assert f"apps/my-proj/base/networkpolicy-allow-frontend-to-backend.yaml" in files
+    assert f"apps/my-proj/base/networkpolicy-allow-backend-from-frontend.yaml" in files
+    # No db files for frontend-backend topology
+    assert f"apps/my-proj/base/db-statefulset.yaml" not in files
+    assert f"apps/my-proj/base/db-service.yaml" not in files
+
+
+def test_bundle_frontend_backend_db_has_db_files() -> None:
+    files = generate_gitops_bundle_files(_make_bundle_input(
+        topology="frontend-backend-db",
+        db_template="postgres",
+    ))
+    assert f"apps/my-proj/base/db-credentials-secret.yaml" in files
+    assert f"apps/my-proj/base/db-statefulset.yaml" in files
+    assert f"apps/my-proj/base/db-service.yaml" in files
+    assert f"apps/my-proj/base/networkpolicy-allow-backend-to-db.yaml" in files
+    assert f"apps/my-proj/base/networkpolicy-allow-db-from-backend.yaml" in files
+
+
+def test_bundle_frontend_deployment_has_backend_url() -> None:
+    files = generate_gitops_bundle_files(_make_bundle_input())
+    frontend_deploy = files["apps/my-proj/base/frontend-deployment.yaml"]
+    assert "BACKEND_URL" in frontend_deploy
+    assert "my-proj-backend" in frontend_deploy
+
+
+def test_bundle_backend_deployment_with_db_has_database_url() -> None:
+    files = generate_gitops_bundle_files(_make_bundle_input(
+        topology="frontend-backend-db",
+        db_template="postgres",
+    ))
+    backend_deploy = files["apps/my-proj/base/backend-deployment.yaml"]
+    assert "DATABASE_URL" in backend_deploy
+
+
+def test_bundle_component_labels() -> None:
+    files = generate_gitops_bundle_files(_make_bundle_input())
+    frontend_deploy = files["apps/my-proj/base/frontend-deployment.yaml"]
+    backend_deploy = files["apps/my-proj/base/backend-deployment.yaml"]
+    assert "app.kubernetes.io/component: frontend" in frontend_deploy
+    assert "app.kubernetes.io/component: backend" in backend_deploy
+    assert "app.kubernetes.io/name: my-proj" in frontend_deploy
+    assert "app.kubernetes.io/name: my-proj" in backend_deploy
+
+
+def test_bundle_ingress_routes_to_frontend() -> None:
+    files = generate_gitops_bundle_files(_make_bundle_input())
+    ingress = files["apps/my-proj/base/ingress.yaml"]
+    assert "my-proj-frontend" in ingress
+
+
+def test_bundle_overlay_files_exist() -> None:
+    files = generate_gitops_bundle_files(_make_bundle_input())
+    assert "apps/my-proj/envs/dev/kustomization.yaml" in files
+    assert "apps/my-proj/envs/prod/kustomization.yaml" in files
+    assert "apps/my-proj/envs/dev/patch-frontend-deployment.yaml" in files
+    assert "apps/my-proj/envs/dev/patch-backend-deployment.yaml" in files
+
+
+def test_bundle_argo_application_manifests() -> None:
+    files = generate_gitops_bundle_files(_make_bundle_input())
+    assert "environments/dev/workloads/my-proj-app.yaml" in files
+    assert "environments/prod/workloads/my-proj-app.yaml" in files
+
+
+def test_bundle_servicemonitor_app_native_backend() -> None:
+    """FastAPI backend is app-native, so a ServiceMonitor should be generated."""
+    files = generate_gitops_bundle_files(_make_bundle_input(
+        backend_template="python-fastapi",
+    ))
+    assert "apps/my-proj/base/servicemonitor-backend.yaml" in files
+
+
+def test_bundle_no_servicemonitor_sidecar_frontend() -> None:
+    """React frontend is sidecar-only, no ServiceMonitor for frontend."""
+    files = generate_gitops_bundle_files(_make_bundle_input(
+        frontend_template="react",
+    ))
+    assert "apps/my-proj/base/servicemonitor-frontend.yaml" not in files
+
+
+def test_bundle_servicemonitor_nextjs_frontend() -> None:
+    """Next.js frontend is app-native, should get a ServiceMonitor."""
+    files = generate_gitops_bundle_files(_make_bundle_input(
+        frontend_template="nextjs",
+    ))
+    assert "apps/my-proj/base/servicemonitor-frontend.yaml" in files
+
+
+def test_bundle_name_validation() -> None:
+    with pytest.raises(ScaffoldError):
+        generate_gitops_bundle_files(_make_bundle_input(name="INVALID"))
+
+
+# ---------------------------------------------------------------------------
+# Bundle topology – build_catalog_bundle_entries
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_bundle_entries_appends_frontend_and_backend() -> None:
+    inp = _make_bundle_input()
+    result = build_catalog_bundle_entries(_SERVICES_YAML, inp)
+    assert "service_id: my-proj-frontend" in result
+    assert "service_id: my-proj-backend" in result
+    assert "homelab-api" in result  # original preserved
+
+
+def test_catalog_bundle_entries_have_project_id() -> None:
+    inp = _make_bundle_input()
+    result = build_catalog_bundle_entries(_SERVICES_YAML, inp)
+    assert "project_id: my-proj" in result
+
+
+def test_catalog_bundle_entries_dev_and_prod_envs() -> None:
+    inp = _make_bundle_input()
+    new_entries = build_catalog_bundle_entries(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    assert new_entries.count("name: dev") == 2
+    assert new_entries.count("name: prod") == 2
+
+
+def test_catalog_bundle_entries_shared_namespace() -> None:
+    inp = _make_bundle_input()
+    new_entries = build_catalog_bundle_entries(_SERVICES_YAML, inp)[len(_SERVICES_YAML):]
+    # Both frontend and backend share the project namespace
+    assert new_entries.count("namespace: my-proj") == 4  # 2 envs x 2 services
+
+
+def test_catalog_bundle_rejects_duplicate_service_id() -> None:
+    existing = _SERVICES_YAML + "  - service_id: my-proj-frontend\n    name: 'Existing'\n"
+    with pytest.raises(ScaffoldError):
+        build_catalog_bundle_entries(existing, _make_bundle_input())

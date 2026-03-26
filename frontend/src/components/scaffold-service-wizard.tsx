@@ -4,15 +4,18 @@ import { useCallback, useState } from 'react'
 import {
   previewScaffold,
   submitScaffold,
+  type BackendTemplateId,
+  type BundleTopology,
+  type DbTemplateId,
+  type FrontendTemplateId,
   type ScaffoldPreviewFile,
   type ScaffoldServiceRequest,
   type ScaffoldSubmitResponse,
-} from '@/lib/api'
+  type TemplateId,
+} from '@/lib/api/scaffold'
 import { cn } from '@/lib/utils'
 
-type Step = 'basic' | 'template' | 'config' | 'preview' | 'success'
-
-type TemplateId = 'python-fastapi' | 'python-django' | 'python-flask' | 'static-nginx' | 'react' | 'nextjs' | 'vue' | 'wordpress' | 'node-express' | 'node-nestjs' | 'postgres' | 'mysql'
+type Step = 'basic' | 'topology' | 'template' | 'config' | 'preview' | 'success'
 
 const DB_TEMPLATES: TemplateId[] = ['postgres', 'mysql']
 
@@ -29,6 +32,7 @@ interface WizardFormState {
   description: string
   ownerEmail: string
   owner: string
+  topology: BundleTopology
   template: TemplateId
   imageRepo: string
   repoUrl: string
@@ -39,6 +43,11 @@ interface WizardFormState {
   dbUsername: string
   dbPassword: string
   dbName: string
+  frontendTemplate: FrontendTemplateId
+  frontendImageRepo: string
+  backendTemplate: BackendTemplateId
+  backendImageRepo: string
+  dbTemplate: DbTemplateId
 }
 
 // The form state mirrors the scaffold API request closely so preview and submit
@@ -48,6 +57,7 @@ const EMPTY_FORM: WizardFormState = {
   description: '',
   ownerEmail: '',
   owner: '',
+  topology: 'single-service',
   template: 'python-fastapi',
   imageRepo: '',
   repoUrl: '',
@@ -58,11 +68,17 @@ const EMPTY_FORM: WizardFormState = {
   dbUsername: '',
   dbPassword: '',
   dbName: '',
+  frontendTemplate: 'react',
+  frontendImageRepo: '',
+  backendTemplate: 'python-fastapi',
+  backendImageRepo: '',
+  dbTemplate: 'postgres',
 }
 
-const STEPS: Step[] = ['basic', 'template', 'config', 'preview']
+const STEPS: Step[] = ['basic', 'topology', 'template', 'config', 'preview']
 const STEP_LABELS: Record<Step, string> = {
   basic: 'Basic info',
+  topology: 'Topology',
   template: 'Template',
   config: 'Configuration',
   preview: 'Review & confirm',
@@ -193,6 +209,54 @@ function BasicInfoStep({
           placeholder="platform"
         />
       </div>
+    </div>
+  )
+}
+
+const TOPOLOGY_OPTIONS: { key: BundleTopology; title: string; description: string }[] = [
+  {
+    key: 'single-service',
+    title: 'Single service',
+    description: 'One service, one namespace. The standard scaffold for APIs, frontends, databases, or CMS.',
+  },
+  {
+    key: 'frontend-backend',
+    title: 'Frontend + Backend',
+    description: 'Two services sharing one namespace. Generates a frontend and backend with inter-service network policies.',
+  },
+  {
+    key: 'frontend-backend-db',
+    title: 'Frontend + Backend + Database',
+    description: 'Full-stack bundle: frontend, backend, and a bundled database in one namespace.',
+  },
+]
+
+function TopologyStep({
+  form,
+  onChange,
+}: {
+  form: WizardFormState
+  onChange: (patch: Partial<WizardFormState>) => void
+}) {
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground">How many services should this project contain?</p>
+      {TOPOLOGY_OPTIONS.map((opt) => (
+        <button
+          key={opt.key}
+          type="button"
+          onClick={() => onChange({ topology: opt.key })}
+          className={cn(
+            'w-full rounded-md border p-4 text-left transition-colors',
+            form.topology === opt.key
+              ? 'border-primary bg-primary/5'
+              : 'border-border hover:border-primary/50',
+          )}
+        >
+          <p className="font-medium">{opt.title}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{opt.description}</p>
+        </button>
+      ))}
     </div>
   )
 }
@@ -421,6 +485,85 @@ function TemplateStep({
   )
 }
 
+const FRONTEND_CATEGORY = TEMPLATE_CATEGORIES.find((c) => c.label === 'Frontend')!
+const BACKEND_CATEGORY = TEMPLATE_CATEGORIES.find((c) => c.label === 'Backend')!
+const DB_CATEGORY = TEMPLATE_CATEGORIES.find((c) => c.label === 'Database')!
+
+function TemplatePicker({
+  label,
+  options,
+  selected,
+  onSelect,
+}: {
+  label: string
+  options: TemplateOption[]
+  selected: string
+  onSelect: (key: string) => void
+}) {
+  return (
+    <div>
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</h3>
+      <div className="space-y-2">
+        {options.map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            onClick={() => onSelect(opt.key)}
+            className={cn(
+              'w-full rounded-md border p-3 text-left transition-colors',
+              selected === opt.key
+                ? 'border-primary bg-primary/5'
+                : 'border-border hover:border-primary/50',
+            )}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <p className="text-sm font-medium">{opt.title}</p>
+              <div className="flex shrink-0 items-center gap-2">
+                <ObservabilityBadge mode={opt.observability} />
+              </div>
+            </div>
+            <p className="mt-0.5 text-xs text-muted-foreground">{opt.description}</p>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function BundleTemplateStep({
+  form,
+  onChange,
+}: {
+  form: WizardFormState
+  onChange: (patch: Partial<WizardFormState>) => void
+}) {
+  const showDb = form.topology === 'frontend-backend-db'
+  return (
+    <div className="space-y-5">
+      <TemplatePicker
+        label="Frontend template"
+        options={FRONTEND_CATEGORY.templates}
+        selected={form.frontendTemplate}
+        onSelect={(key) => onChange({ frontendTemplate: key as FrontendTemplateId })}
+      />
+      <TemplatePicker
+        label="Backend template"
+        options={BACKEND_CATEGORY.templates}
+        selected={form.backendTemplate}
+        onSelect={(key) => onChange({ backendTemplate: key as BackendTemplateId })}
+      />
+      {showDb && (
+        <TemplatePicker
+          label="Database template"
+          options={DB_CATEGORY.templates}
+          selected={form.dbTemplate}
+          onSelect={(key) => onChange({ dbTemplate: key as DbTemplateId })}
+        />
+      )}
+    </div>
+  )
+}
+
 function ConfigStep({
   form,
   onChange,
@@ -428,12 +571,15 @@ function ConfigStep({
   form: WizardFormState
   onChange: (patch: Partial<WizardFormState>) => void
 }) {
-  const isDb = isDatabaseTemplate(form.template)
-  const isWordPress = isWordPressTemplate(form.template)
+  const isBundle = form.topology !== 'single-service'
+  const isDb = !isBundle && isDatabaseTemplate(form.template)
+  const isWordPress = !isBundle && isWordPressTemplate(form.template)
+  const hasDbBundle = form.topology === 'frontend-backend-db'
 
   return (
     <div className="space-y-4">
-      {!isDb && !isWordPress && (
+      {/* Single-service image repo */}
+      {!isBundle && !isDb && !isWordPress && (
         <div>
           <FieldLabel htmlFor="svc-image-repo" hint="e.g. ghcr.io/wlodzimierrr/my-service (without tag)">
             Image repository *
@@ -447,6 +593,36 @@ function ConfigStep({
           />
         </div>
       )}
+      {/* Bundle image repos */}
+      {isBundle && (
+        <>
+          <div>
+            <FieldLabel htmlFor="svc-frontend-image" hint="Container image for the frontend service">
+              Frontend image repository *
+            </FieldLabel>
+            <TextInput
+              id="svc-frontend-image"
+              value={form.frontendImageRepo}
+              onChange={(v) => onChange({ frontendImageRepo: v })}
+              placeholder={`ghcr.io/org/${form.name || 'my-project'}-frontend`}
+              required
+            />
+          </div>
+          <div>
+            <FieldLabel htmlFor="svc-backend-image" hint="Container image for the backend service">
+              Backend image repository *
+            </FieldLabel>
+            <TextInput
+              id="svc-backend-image"
+              value={form.backendImageRepo}
+              onChange={(v) => onChange({ backendImageRepo: v })}
+              placeholder={`ghcr.io/org/${form.name || 'my-project'}-backend`}
+              required
+            />
+          </div>
+        </>
+      )}
+      {/* Source repo */}
       {!isDb && (
         <div>
           <FieldLabel htmlFor="svc-repo-url">
@@ -467,7 +643,7 @@ function ConfigStep({
         </p>
       )}
       <div>
-        <FieldLabel htmlFor="svc-namespace" hint={`Defaults to service name: ${form.name || '<name>'}`}>
+        <FieldLabel htmlFor="svc-namespace" hint={`Defaults to project name: ${form.name || '<name>'}`}>
           Kubernetes namespace
         </FieldLabel>
         <TextInput
@@ -477,7 +653,8 @@ function ConfigStep({
           placeholder={form.name || 'my-service'}
         />
       </div>
-      {isDb && (
+      {/* Database credentials (standalone DB or bundle with DB) */}
+      {(isDb || hasDbBundle) && (
         <>
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
@@ -516,6 +693,7 @@ function ConfigStep({
           </div>
         </>
       )}
+      {/* Ingress hosts */}
       {isDb ? (
         <div>
           <FieldLabel htmlFor="svc-prod-host" hint={`Default: ${form.name || '<name>'}.homelab.local`}>
@@ -731,7 +909,12 @@ function validateBasic(form: WizardFormState): string {
 }
 
 function validateConfig(form: WizardFormState): string {
-  if (!isDatabaseTemplate(form.template)) {
+  const isBundle = form.topology !== 'single-service'
+  if (isBundle) {
+    if (!form.frontendImageRepo.trim()) return 'Frontend image repository is required.'
+    if (!form.backendImageRepo.trim()) return 'Backend image repository is required.'
+    if (!form.repoUrl.trim()) return 'Source repository URL is required.'
+  } else if (!isDatabaseTemplate(form.template)) {
     if (!isWordPressTemplate(form.template) && !form.imageRepo.trim()) return 'Image repository is required.'
     if (!form.repoUrl.trim()) return 'Source repository URL is required.'
   }
@@ -762,24 +945,35 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
     setValidationError('')
   }, [])
 
-  const buildPayload = (): ScaffoldServiceRequest => ({
-    name: form.name.trim(),
-    description: form.description.trim(),
-    imageRepo: form.template === 'wordpress'
-      ? form.imageRepo.trim() || 'wordpress:latest'
-      : form.imageRepo.trim() || undefined,
-    repoUrl: form.repoUrl.trim() || undefined,
-    ownerEmail: form.ownerEmail.trim(),
-    owner: form.owner.trim(),
-    template: form.template,
-    namespace: form.namespace.trim() || undefined,
-    devHost: form.devHost.trim() || undefined,
-    prodHost: form.prodHost.trim() || undefined,
-    publicHost: form.publicHost.trim() || undefined,
-    dbUsername: form.dbUsername.trim() || undefined,
-    dbPassword: form.dbPassword.trim() || undefined,
-    dbName: form.dbName.trim() || undefined,
-  })
+  const buildPayload = (): ScaffoldServiceRequest => {
+    const isBundle = form.topology !== 'single-service'
+    return {
+      name: form.name.trim(),
+      description: form.description.trim(),
+      imageRepo: !isBundle && form.template === 'wordpress'
+        ? form.imageRepo.trim() || 'wordpress:latest'
+        : form.imageRepo.trim() || undefined,
+      repoUrl: form.repoUrl.trim() || undefined,
+      ownerEmail: form.ownerEmail.trim(),
+      owner: form.owner.trim(),
+      template: form.template,
+      namespace: form.namespace.trim() || undefined,
+      devHost: form.devHost.trim() || undefined,
+      prodHost: form.prodHost.trim() || undefined,
+      publicHost: form.publicHost.trim() || undefined,
+      dbUsername: form.dbUsername.trim() || undefined,
+      dbPassword: form.dbPassword.trim() || undefined,
+      dbName: form.dbName.trim() || undefined,
+      topology: form.topology,
+      ...(isBundle ? {
+        frontendTemplate: form.frontendTemplate,
+        frontendImageRepo: form.frontendImageRepo.trim(),
+        backendTemplate: form.backendTemplate,
+        backendImageRepo: form.backendImageRepo.trim(),
+        ...(form.topology === 'frontend-backend-db' ? { dbTemplate: form.dbTemplate } : {}),
+      } : {}),
+    }
+  }
 
   const goNext = useCallback(async () => {
     setValidationError('')
@@ -787,6 +981,8 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
     if (step === 'basic') {
       const err = validateBasic(form)
       if (err) { setValidationError(err); return }
+      setStep('topology')
+    } else if (step === 'topology') {
       setStep('template')
     } else if (step === 'template') {
       setStep('config')
@@ -811,7 +1007,8 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
 
   const goBack = useCallback(() => {
     setValidationError('')
-    if (step === 'template') setStep('basic')
+    if (step === 'topology') setStep('basic')
+    else if (step === 'template') setStep('topology')
     else if (step === 'config') setStep('template')
     else if (step === 'preview') setStep('config')
   }, [step])
@@ -840,7 +1037,7 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-border px-6 py-4">
-          <h2 className="text-base font-semibold">New service</h2>
+          <h2 className="text-base font-semibold">New project</h2>
           <button
             type="button"
             onClick={onClose}
@@ -854,7 +1051,9 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
           {step !== 'success' && <StepIndicator currentStep={step} />}
 
           {step === 'basic' && <BasicInfoStep form={form} onChange={patchForm} />}
-          {step === 'template' && <TemplateStep form={form} onChange={patchForm} />}
+          {step === 'topology' && <TopologyStep form={form} onChange={patchForm} />}
+          {step === 'template' && form.topology === 'single-service' && <TemplateStep form={form} onChange={patchForm} />}
+          {step === 'template' && form.topology !== 'single-service' && <BundleTemplateStep form={form} onChange={patchForm} />}
           {step === 'config' && <ConfigStep form={form} onChange={patchForm} />}
           {step === 'preview' && (
             <PreviewStep

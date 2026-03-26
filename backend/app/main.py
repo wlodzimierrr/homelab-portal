@@ -15,7 +15,6 @@ from urllib import request as urlrequest
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, field_validator
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from app.alerts_feed import (
@@ -97,7 +96,6 @@ from app.release_traceability import (
     load_argo_metadata_rows,
     load_ci_metadata_rows,
 )
-from app.service_identity import is_canonical_service_id
 from app.service_observability import (
     build_service_metrics_observability_diagnostics,
     normalize_observability_mode,
@@ -112,10 +110,13 @@ from app.observability_config import (
     render_query_template,
 )
 from app.scaffold_service import (
+    ScaffoldBundleInput,
     ScaffoldError,
     ScaffoldServiceInput,
     build_appproject_addition,
+    build_catalog_bundle_entries,
     build_catalog_entry_addition,
+    generate_gitops_bundle_files,
     generate_gitops_new_files,
     update_kustomization_resources,
     validate_service_name,
@@ -127,6 +128,90 @@ from app.secret_editing import (
     enforce_secret_edit_rate_limit,
     resolve_secret_edit_target,
     update_secret_manifest_document,
+)
+from app.api.schemas.auth import LoginRequest, LoginResponse
+from app.api.schemas.catalog import (
+    CatalogJoinDiagnosticsResponse,
+    CatalogJoinResponse,
+    CreateProjectRequest,
+    DeploymentLockResponse,
+    Project,
+    ProjectCatalogDiagnosticsResponse,
+    ProjectsResponse,
+    ServiceDetailResponse,
+    ServiceIdentityDiagnosticsResponse,
+    ServiceIdentityDriftRowResponse,
+    ServiceIdentityMonitoringSelectorResponse,
+    ServiceRegistryDiagnosticsResponse,
+    ServiceRegistryFreshnessResponse,
+    ServiceRegistryJoinMismatchResponse,
+    ServiceRegistrySyncFailure,
+    ServiceRegistrySyncResponse,
+    ServiceRow,
+    ServicesResponse,
+    CatalogJoinRowResponse,
+    CatalogJoinServiceRefResponse,
+)
+from app.api.schemas.deployments import (
+    CreateDeploymentRecordRequest,
+    DeploymentReconcileResponse,
+    DeploymentRecordResponse,
+    PortalDeployToDevRequest,
+    PortalDeployToDevResponse,
+    PortalPromoteToProdRequest,
+    PortalPromoteToProdResponse,
+    PortalRollbackRequest,
+    PortalRollbackResponse,
+    PortalServiceRollbackCandidatesResponse,
+    PortalServiceRollbackCandidate,
+    PortalServiceRollbackRequest,
+    PortalServiceRollbackResponse,
+    PortalSetConfigRequest,
+    PortalSetConfigResponse,
+    PortalSetSecretRequest,
+    PortalSetSecretResponse,
+    ROLLBACK_TAG_RE,
+    ReleaseArgoStateResponse,
+    ReleaseDashboardCompatResponse,
+    ReleaseDashboardCompatRow,
+    ReleaseDriftStateResponse,
+    ReleaseTraceabilityResponse,
+    ServiceConfigEntry,
+    ServiceConfigResponse,
+    ServiceDeploymentInfoResponse,
+    ServiceDeploymentsResponse,
+    UpdatePublicHostnameRequest,
+    UpdatePublicHostnameResponse,
+)
+from app.api.schemas.observability import (
+    ActiveAlertResponse,
+    ActiveAlertsResponse,
+    DeploymentObservabilityContextResponse,
+    DeploymentObservabilityLogsResponse,
+    DeploymentObservabilityMetricSnapshotResponse,
+    DeploymentObservabilityMetricsResponse,
+    DeploymentObservabilityResponse,
+    DeploymentObservabilityTimelineResponse,
+    HealthResponse,
+    LogsQuickViewResponse,
+    MonitoringIncidentCompatResponse,
+    MonitoringIncidentsCompatEnvelope,
+    MonitoringProviderErrorDetailResponse,
+    MonitoringProviderStatusResponse,
+    MonitoringProvidersDiagnosticsResponse,
+    QuickViewLogLineResponse,
+    ServiceHealthTimelineSegmentResponse,
+    ServiceMetricTrendPointResponse,
+    ServiceMetricTrendSeriesResponse,
+    ServiceMetricsObservabilityDiagnosticsResponse,
+    ServiceMetricsSummaryResponse,
+    ServiceMetricsTrendsResponse,
+)
+from app.api.schemas.scaffold import (
+    ScaffoldPreviewFile,
+    ScaffoldPreviewResponse,
+    ScaffoldServiceRequest,
+    ScaffoldSubmitResponse,
 )
 
 # FastAPI entrypoint for the portal backend.
@@ -292,349 +377,19 @@ def stop_deployment_reconciler_loop() -> None:
     deployment_reconciler_thread = None
 
 
-# Response models are grouped here because this module still owns most of the API
-# surface. They double as the backend/frontend contract for auth, metadata,
-# deployments, observability, and compatibility endpoints.
+# Backend request/response contracts now live in app.api.schemas.* so route
+# handlers here can focus on orchestration instead of schema ownership.
 
-class MonitoringProviderStatusResponse(BaseModel):
-    provider: str
-    base_url: str = Field(alias="baseUrl")
-    status: str
-    reachable: bool
-    checked_at: str = Field(alias="checkedAt")
-    correlation_id: str | None = Field(default=None, alias="correlationId")
-    latency_ms: int | None = Field(default=None, alias="latencyMs")
-    http_status: int | None = Field(default=None, alias="httpStatus")
-    error: str | None = None
-    probe_path: str | None = Field(default=None, alias="probePath")
+# Request/response schemas now live under app.api.schemas.* so this module can
+# focus on route orchestration, auth flow, and integration behavior.
 
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class HealthResponse(BaseModel):
-    status: str = "ok"
-    providers: list[MonitoringProviderStatusResponse] | None = None
-
-
-class MonitoringProviderErrorDetailResponse(BaseModel):
-    message: str
-    correlation_id: str | None = Field(default=None, alias="correlationId")
-    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class MonitoringProvidersDiagnosticsResponse(BaseModel):
-    generated_at: str = Field(alias="generatedAt")
-    overall_status: str = Field(alias="overallStatus")
-    providers: list[MonitoringProviderStatusResponse]
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class LoginRequest(BaseModel):
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
-
-
-class LoginResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    expires_at: str
-
-
-# Metadata responses expose the two catalog views the frontend merges together:
-# GitOps project rows and live service-registry rows.
-
-class Project(BaseModel):
-    id: str
-    name: str
-    environment: str
-    owner: str | None = None
-    repo_url: str | None = Field(default=None, alias="repoUrl")
-    runbook_url: str | None = Field(default=None, alias="runbookUrl")
-    observability_mode: str | None = Field(default=None, alias="observabilityMode")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ProjectsResponse(BaseModel):
-    projects: list[Project]
-
-
-class CreateProjectRequest(BaseModel):
-    id: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    environment: str = Field(min_length=1)
-
-
-class ServiceRow(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    service_name: str = Field(alias="serviceName")
-    env: str
-    namespace: str
-    app_label: str = Field(alias="appLabel")
-    argo_app_name: str | None = Field(default=None, alias="argoAppName")
-    source: str
-    source_ref: str | None = Field(default=None, alias="sourceRef")
-    last_synced_at: str | None = Field(default=None, alias="lastSyncedAt")
-    observability_mode: str | None = Field(default=None, alias="observabilityMode")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServicesResponse(BaseModel):
-    services: list[ServiceRow]
-
-
-class ServiceDetailResponse(BaseModel):
-    id: str
-    name: str
-    namespace: str
-    env: str
-    app_label: str = Field(alias="appLabel")
-    argo_app_name: str | None = Field(default=None, alias="argoAppName")
-    version: str | None = None
-    health: str | None = None
-    sync: str | None = None
-    source: str
-    source_ref: str | None = Field(default=None, alias="sourceRef")
-    last_synced_at: str | None = Field(default=None, alias="lastSyncedAt")
-    observability_mode: str | None = Field(default=None, alias="observabilityMode")
-    public_host: str | None = Field(default=None, alias="publicHost")
-    deployment_lock: "DeploymentLockResponse | None" = Field(default=None, alias="deploymentLock")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-# Deployment responses model both persisted deployment records and transient locks
-# that prevent overlapping GitOps mutations for the same service/environment.
-
-class DeploymentLockResponse(BaseModel):
-    service_id: str = Field(..., alias="serviceId")
-    env: str
-    deployment_id: str = Field(..., alias="deploymentId")
-    request_key: str = Field(..., alias="requestKey")
-    action: str
-    status: str
-    argo_app: str | None = Field(default=None, alias="argoApp")
-    requested_by: str | None = Field(default=None, alias="requestedBy")
-    requested_at: str | None = Field(default=None, alias="requestedAt")
-    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
-    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
-    git_ref: str | None = Field(default=None, alias="gitRef")
-    deploy_reason: str | None = Field(default=None, alias="deployReason")
-    locked_at: str | None = Field(default=None, alias="lockedAt")
-    expires_at: str | None = Field(default=None, alias="expiresAt")
-    metadata: dict[str, Any] | None = None
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DeploymentRecordResponse(BaseModel):
-    id: str
-    service_id: str = Field(alias="serviceId")
-    env: str
-    action: str
-    version: str | None = None
-    status: str | None = None
-    requested_at: str | None = Field(default=None, alias="requestedAt")
-    requested_by: str | None = Field(default=None, alias="requestedBy")
-    deployed_at: str | None = Field(default=None, alias="deployedAt")
-    commit_sha: str | None = Field(default=None, alias="commitSha")
-    image_ref: str | None = Field(default=None, alias="imageRef")
-    previous_image_ref: str | None = Field(default=None, alias="previousImageRef")
-    git_ref: str | None = Field(default=None, alias="gitRef")
-    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
-    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
-    compare_url: str | None = Field(default=None, alias="compareUrl")
-    merge_sha: str | None = Field(default=None, alias="mergeSha")
-    argo_app: str | None = Field(default=None, alias="argoApp")
-    sync_status: str | None = Field(default=None, alias="syncStatus")
-    health_status: str | None = Field(default=None, alias="healthStatus")
-    deploy_reason: str | None = Field(default=None, alias="deployReason")
-    started_at: str | None = Field(default=None, alias="startedAt")
-    finished_at: str | None = Field(default=None, alias="finishedAt")
-    deploy_window_start: str | None = Field(default=None, alias="deployWindowStart")
-    deploy_window_end: str | None = Field(default=None, alias="deployWindowEnd")
-    failure_reason: str | None = Field(default=None, alias="failureReason")
-    result: str | None = None
-    result_reason: str | None = Field(default=None, alias="resultReason")
-    error_rate_pct: dict[str, float] | None = Field(default=None, alias="errorRatePct")
-    p95_latency_ms: dict[str, float] | None = Field(default=None, alias="p95LatencyMs")
-    availability_pct: dict[str, float] | None = Field(default=None, alias="availabilityPct")
-    metrics_source: Literal["live_query", "stored_snapshot", "none"] | None = Field(
-        default=None, alias="metricsSource"
-    )
-    metadata: dict[str, Any] | None = None
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceDeploymentsResponse(BaseModel):
-    deployments: list[DeploymentRecordResponse]
-
-
-class ServiceDeploymentInfoResponse(BaseModel):
-    deployment_id: str | None = Field(default=None, alias="deploymentId")
-    service_id: str = Field(alias="serviceId")
-    env: str | None = None
-    action: str | None = None
-    deployed_image: str | None = Field(default=None, alias="deployedImage")
-    previous_image: str | None = Field(default=None, alias="previousImage")
-    image_digest: str | None = Field(default=None, alias="imageDigest")
-    git_commit: str | None = Field(default=None, alias="gitCommit")
-    deployed_timestamp: str | None = Field(default=None, alias="deployedTimestamp")
-    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
-    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
-    compare_url: str | None = Field(default=None, alias="compareUrl")
-    deploy_reason: str | None = Field(default=None, alias="deployReason")
-    result: str | None = None
-    result_reason: str | None = Field(default=None, alias="resultReason")
-    commit_url: str | None = Field(default=None, alias="commitUrl")
-    image_url: str | None = Field(default=None, alias="imageUrl")
-    argo_app: str | None = Field(default=None, alias="argoApp")
-    sync_status: str | None = Field(default=None, alias="syncStatus")
-    health_status: str | None = Field(default=None, alias="healthStatus")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DeploymentReconcileResponse(BaseModel):
-    pull_requests_scanned: int = Field(alias="pullRequestsScanned")
-    records_upserted: int = Field(alias="recordsUpserted")
-    status_counts: dict[str, int] = Field(alias="statusCounts")
-    generated_at: str = Field(alias="generatedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class CreateDeploymentRecordRequest(BaseModel):
-    service_id: str = Field(..., alias="serviceId", min_length=1)
-    env: str = Field(min_length=1)
-    action: Literal["deploy", "promote", "rollback", "config-change"]
-    status: Literal["pending", "deploying", "live", "failed"] = "pending"
-    requested_at: datetime | None = Field(default=None, alias="requestedAt")
-    requested_by: str | None = Field(default=None, alias="requestedBy")
-    pr_url: str | None = Field(default=None, alias="gitPrUrl")
-    pr_number: int | None = Field(default=None, alias="gitPrNumber")
-    merge_sha: str | None = Field(default=None, alias="mergeSha")
-    target_image: str | None = Field(default=None, alias="imageRef")
-    previous_image: str | None = Field(default=None, alias="previousImageRef")
-    argo_app: str | None = Field(default=None, alias="argoApp")
-    sync_status: str | None = Field(default=None, alias="syncStatus")
-    health_status: str | None = Field(default=None, alias="healthStatus")
-    started_at: datetime | None = Field(default=None, alias="startedAt")
-    finished_at: datetime | None = Field(default=None, alias="finishedAt")
-    deploy_window_start: datetime | None = Field(default=None, alias="deployWindowStart")
-    deploy_window_end: datetime | None = Field(default=None, alias="deployWindowEnd")
-    deploy_reason: str | None = Field(default=None, alias="deployReason")
-    compare_url: str | None = Field(default=None, alias="compareUrl")
-    git_ref: str | None = Field(default=None, alias="gitRef")
-    request_key: str | None = Field(default=None, alias="requestKey")
-    metadata: dict[str, Any] | None = None
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    @field_validator("service_id")
-    @classmethod
-    def validate_canonical_service_id(cls, value: str) -> str:
-        if not is_canonical_service_id(value):
-            raise ValueError("serviceId must use canonical lowercase-hyphen identity")
-        return value
-
-
-ROLLBACK_TAG_RE = re.compile(r"^(sha-[0-9a-f]{40}|v?[0-9]+(\.[0-9]+){2}([.-][0-9A-Za-z.-]+)?)$")
-
-
-# Portal mutation payloads return PR/workflow-oriented responses because these
-# actions are implemented as GitHub/GitOps changes rather than direct cluster writes.
-
-class PortalRollbackRequest(BaseModel):
-    target_environment: Literal["prod"] = Field(default="prod", alias="targetEnvironment")
-    rollback_api_tag: str = Field(..., alias="rollbackApiTag", min_length=1)
-    rollback_web_tag: str = Field(..., alias="rollbackWebTag", min_length=1)
-    reason: str = Field(..., min_length=5, max_length=500)
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    @field_validator("rollback_api_tag", "rollback_web_tag")
-    @classmethod
-    def validate_rollback_tag(cls, value: str) -> str:
-        normalized = value.strip()
-        if not ROLLBACK_TAG_RE.fullmatch(normalized):
-            raise ValueError("rollback tags must use sha-<40 hex> or semver format")
-        return normalized
-
-    @field_validator("reason")
-    @classmethod
-    def validate_reason(cls, value: str) -> str:
-        normalized = value.strip()
-        if len(normalized) < 5:
-            raise ValueError("reason must be at least 5 characters long")
-        return normalized
-
-
-class PortalRollbackResponse(BaseModel):
-    status: Literal["accepted"]
-    action: Literal["rollback"]
-    target_environment: str = Field(alias="targetEnvironment")
-    rollback_api_tag: str = Field(alias="rollbackApiTag")
-    rollback_web_tag: str = Field(alias="rollbackWebTag")
-    reason: str
-    requested_by: str = Field(alias="requestedBy")
-    repository: str
-    workflow_file: str = Field(alias="workflowFile")
-    workflow_ref: str = Field(alias="workflowRef")
-    workflow_url: str = Field(alias="workflowUrl")
-    initiated_at: str = Field(alias="initiatedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
-
+# Portal mutation operations still raise local exception types because route
+# handlers map them directly to HTTP responses later in the file.
 
 class PortalDeployToDevError(Exception):
     def __init__(self, message: str, *, status_code: int = status.HTTP_502_BAD_GATEWAY):
         super().__init__(message)
         self.status_code = status_code
-
-
-class PortalDeployToDevRequest(BaseModel):
-    deploy_reason: str = Field(..., alias="deployReason", min_length=5, max_length=500)
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    @field_validator("deploy_reason")
-    @classmethod
-    def validate_reason(cls, value: str) -> str:
-        normalized = value.strip()
-        if len(normalized) < 5:
-            raise ValueError("deployReason must be at least 5 characters long")
-        return normalized
-
-
-class PortalDeployToDevResponse(BaseModel):
-    status: Literal["accepted", "noop"]
-    action: Literal["deploy"]
-    service_id: str = Field(alias="serviceId")
-    target_environment: str = Field(alias="targetEnvironment")
-    requested_by: str = Field(alias="requestedBy")
-    repository: str
-    base_branch: str = Field(alias="baseBranch")
-    branch_name: str | None = Field(default=None, alias="branchName")
-    deployment_id: str | None = Field(default=None, alias="deploymentId")
-    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
-    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
-    previous_tag: str | None = Field(default=None, alias="previousTag")
-    new_tag: str | None = Field(default=None, alias="newTag")
-    previous_image_ref: str | None = Field(default=None, alias="previousImageRef")
-    new_image_ref: str | None = Field(default=None, alias="newImageRef")
-    compare_url: str | None = Field(default=None, alias="compareUrl")
-    source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
-    source_workflow_run_url: str | None = Field(default=None, alias="sourceWorkflowRunUrl")
-    message: str | None = None
-    initiated_at: str = Field(alias="initiatedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
 
 
 class PortalPromoteToProdError(Exception):
@@ -643,645 +398,11 @@ class PortalPromoteToProdError(Exception):
         self.status_code = status_code
 
 
-class PortalPromoteToProdRequest(BaseModel):
-    deploy_reason: str = Field(..., alias="deployReason", min_length=5, max_length=500)
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    @field_validator("deploy_reason")
-    @classmethod
-    def validate_reason(cls, value: str) -> str:
-        normalized = value.strip()
-        if len(normalized) < 5:
-            raise ValueError("deployReason must be at least 5 characters long")
-        return normalized
-
-
-class PortalPromoteToProdResponse(BaseModel):
-    status: Literal["accepted", "noop"]
-    action: Literal["promote"]
-    service_id: str = Field(alias="serviceId")
-    target_environment: Literal["prod"] = Field(alias="targetEnvironment")
-    requested_by: str = Field(alias="requestedBy")
-    repository: str
-    base_branch: str = Field(alias="baseBranch")
-    branch_name: str | None = Field(default=None, alias="branchName")
-    deployment_id: str | None = Field(default=None, alias="deploymentId")
-    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
-    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
-    previous_tag: str | None = Field(default=None, alias="previousTag")
-    new_tag: str | None = Field(default=None, alias="newTag")
-    previous_image_ref: str | None = Field(default=None, alias="previousImageRef")
-    new_image_ref: str | None = Field(default=None, alias="newImageRef")
-    compare_url: str | None = Field(default=None, alias="compareUrl")
-    source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
-    message: str | None = None
-    initiated_at: str = Field(alias="initiatedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class PortalSetSecretRequest(BaseModel):
-    env: Literal["dev", "prod"]
-    secret_key: str = Field(..., alias="secretKey", min_length=1, max_length=128)
-    secret_value: str = Field(..., alias="secretValue", min_length=1, max_length=10_000)
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    @field_validator("secret_key")
-    @classmethod
-    def validate_secret_key(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("secretKey must not be empty")
-        return normalized
-
-    @field_validator("secret_value")
-    @classmethod
-    def validate_secret_value(cls, value: str) -> str:
-        if value == "":
-            raise ValueError("secretValue must not be empty")
-        return value
-
-
-class PortalSetSecretResponse(BaseModel):
-    status: Literal["accepted"]
-    service_id: str = Field(alias="serviceId")
-    env: Literal["dev", "prod"]
-    secret_key: str = Field(alias="secretKey")
-    requested_by: str = Field(alias="requestedBy")
-    repository: str
-    base_branch: str = Field(alias="baseBranch")
-    branch_name: str = Field(alias="branchName")
-    git_pr_url: str = Field(alias="gitPrUrl")
-    git_pr_number: int = Field(alias="gitPrNumber")
-    secret_file_path: str = Field(alias="secretFilePath")
-    message: str | None = None
-    initiated_at: str = Field(alias="initiatedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class PortalSetConfigRequest(BaseModel):
-    env: Literal["dev", "prod"]
-    config_key: str = Field(..., alias="configKey", min_length=1, max_length=128)
-    config_value: str = Field(..., alias="configValue", min_length=1, max_length=10_000)
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    @field_validator("config_key")
-    @classmethod
-    def validate_config_key(cls, value: str) -> str:
-        normalized = value.strip().upper()
-        if not normalized:
-            raise ValueError("configKey must not be empty")
-        return normalized
-
-    @field_validator("config_value")
-    @classmethod
-    def validate_config_value(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("configValue must not be empty")
-        return normalized
-
-
-class PortalSetConfigResponse(BaseModel):
-    status: Literal["accepted", "noop"]
-    service_id: str = Field(alias="serviceId")
-    env: Literal["dev", "prod"]
-    config_key: str = Field(alias="configKey")
-    previous_value: str = Field(alias="previousValue")
-    config_value: str = Field(alias="configValue")
-    requested_by: str = Field(alias="requestedBy")
-    repository: str
-    base_branch: str = Field(alias="baseBranch")
-    branch_name: str | None = Field(default=None, alias="branchName")
-    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
-    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
-    config_file_path: str = Field(alias="configFilePath")
-    message: str | None = None
-    initiated_at: str = Field(alias="initiatedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceConfigEntry(BaseModel):
-    key: str
-    value: str
-    allowed_values: list[str] = Field(alias="allowedValues")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceConfigResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    env: Literal["dev", "prod"]
-    entries: list[ServiceConfigEntry]
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
 class PortalServiceRollbackError(Exception):
     def __init__(self, message: str, *, status_code: int = status.HTTP_502_BAD_GATEWAY):
         super().__init__(message)
         self.status_code = status_code
 
-
-class PortalServiceRollbackCandidate(BaseModel):
-    tag: str
-    image_ref: str = Field(alias="imageRef")
-    compare_url: str | None = Field(default=None, alias="compareUrl")
-    source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
-    published_at: str | None = Field(default=None, alias="publishedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class PortalServiceRollbackCandidatesResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    target_environment: Literal["dev", "prod"] = Field(alias="targetEnvironment")
-    current_tag: str | None = Field(default=None, alias="currentTag")
-    current_image_ref: str | None = Field(default=None, alias="currentImageRef")
-    candidates: list[PortalServiceRollbackCandidate]
-    generated_at: str = Field(alias="generatedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class PortalServiceRollbackRequest(BaseModel):
-    target_environment: Literal["dev", "prod"] = Field(default="dev", alias="targetEnvironment")
-    rollback_tag: str = Field(..., alias="rollbackTag", min_length=1)
-    deploy_reason: str = Field(..., alias="deployReason", min_length=5, max_length=500)
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    @field_validator("rollback_tag")
-    @classmethod
-    def validate_rollback_tag(cls, value: str) -> str:
-        normalized = value.strip()
-        if not ROLLBACK_TAG_RE.fullmatch(normalized):
-            raise ValueError("rollbackTag must use sha-<40 hex> or semver format")
-        return normalized
-
-    @field_validator("deploy_reason")
-    @classmethod
-    def validate_reason(cls, value: str) -> str:
-        normalized = value.strip()
-        if len(normalized) < 5:
-            raise ValueError("deployReason must be at least 5 characters long")
-        return normalized
-
-
-class PortalServiceRollbackResponse(BaseModel):
-    status: Literal["accepted", "noop"]
-    action: Literal["rollback"]
-    service_id: str = Field(alias="serviceId")
-    target_environment: Literal["dev", "prod"] = Field(alias="targetEnvironment")
-    requested_by: str = Field(alias="requestedBy")
-    repository: str
-    base_branch: str = Field(alias="baseBranch")
-    branch_name: str | None = Field(default=None, alias="branchName")
-    deployment_id: str | None = Field(default=None, alias="deploymentId")
-    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
-    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
-    previous_tag: str | None = Field(default=None, alias="previousTag")
-    new_tag: str | None = Field(default=None, alias="newTag")
-    previous_image_ref: str | None = Field(default=None, alias="previousImageRef")
-    new_image_ref: str | None = Field(default=None, alias="newImageRef")
-    compare_url: str | None = Field(default=None, alias="compareUrl")
-    source_commit_sha: str | None = Field(default=None, alias="sourceCommitSha")
-    message: str | None = None
-    initiated_at: str = Field(alias="initiatedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-# Diagnostics and observability responses are used by the admin/service pages to
-# explain freshness, join drift, provider failures, and no-data states.
-
-class ServiceRegistrySyncFailure(BaseModel):
-    source: str
-    scope: str
-    error: str
-
-
-class ServiceRegistrySyncResponse(BaseModel):
-    correlation_id: str = Field(alias="correlationId")
-    source: str
-    env: str
-    namespaces: list[str]
-    discovered: int
-    upserted: int
-    inserted: int
-    updated: int
-    deleted: int = 0
-    source_failures: list[ServiceRegistrySyncFailure] = Field(alias="sourceFailures")
-    generated_at: str = Field(alias="generatedAt")
-    duration_ms: int = Field(alias="durationMs")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceRegistryFreshnessResponse(BaseModel):
-    row_count: int = Field(alias="rowCount")
-    last_synced_at: str | None = Field(alias="lastSyncedAt")
-    warning_after_minutes: int = Field(alias="warningAfterMinutes")
-    stale_after_minutes: int = Field(alias="staleAfterMinutes")
-    is_empty: bool = Field(alias="isEmpty")
-    is_warning: bool = Field(alias="isWarning")
-    is_stale: bool = Field(alias="isStale")
-    state: str
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceRegistryJoinMismatchResponse(BaseModel):
-    ci_unmatched_count: int = Field(alias="ciUnmatchedCount")
-    argo_unmatched_count: int = Field(alias="argoUnmatchedCount")
-    ci_unmatched_keys: list[str] = Field(alias="ciUnmatchedKeys")
-    argo_unmatched_keys: list[str] = Field(alias="argoUnmatchedKeys")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class CatalogJoinServiceRefResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    service_name: str = Field(alias="serviceName")
-    namespace: str
-    app_label: str = Field(alias="appLabel")
-    argo_app_name: str | None = Field(default=None, alias="argoAppName")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class CatalogJoinRowResponse(BaseModel):
-    project_id: str = Field(alias="projectId")
-    project_name: str = Field(alias="projectName")
-    env: str
-    namespace: str
-    app_label: str = Field(alias="appLabel")
-    join_source: str = Field(alias="joinSource")
-    primary_service_id: str | None = Field(default=None, alias="primaryServiceId")
-    service_count: int = Field(alias="serviceCount")
-    service_ids: list[str] = Field(alias="serviceIds")
-    services: list[CatalogJoinServiceRefResponse]
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class CatalogJoinDiagnosticsResponse(BaseModel):
-    project_only_count: int = Field(alias="projectOnlyCount")
-    service_only_count: int = Field(alias="serviceOnlyCount")
-    one_to_many_count: int = Field(alias="oneToManyCount")
-    ambiguous_join_count: int = Field(alias="ambiguousJoinCount")
-    project_only_keys: list[str] = Field(alias="projectOnlyKeys")
-    service_only_keys: list[str] = Field(alias="serviceOnlyKeys")
-    one_to_many_keys: list[str] = Field(alias="oneToManyKeys")
-    ambiguous_join_keys: list[str] = Field(alias="ambiguousJoinKeys")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ProjectCatalogDiagnosticsResponse(BaseModel):
-    generated_at: str = Field(alias="generatedAt")
-    env: str | None = None
-    freshness: ServiceRegistryFreshnessResponse
-    catalog_join: CatalogJoinDiagnosticsResponse = Field(alias="catalogJoin")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class CatalogJoinResponse(BaseModel):
-    generated_at: str = Field(alias="generatedAt")
-    env: str | None = None
-    rows: list[CatalogJoinRowResponse]
-    diagnostics: CatalogJoinDiagnosticsResponse
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceIdentityMonitoringSelectorResponse(BaseModel):
-    namespace: str
-    app_label: str = Field(alias="appLabel")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceIdentityDriftRowResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    env: str
-    project_id: str | None = Field(default=None, alias="projectId")
-    catalog_linked: bool = Field(alias="catalogLinked")
-    namespace: str
-    expected_namespace: str | None = Field(default=None, alias="expectedNamespace")
-    app_label: str = Field(alias="appLabel")
-    expected_app_label: str | None = Field(default=None, alias="expectedAppLabel")
-    argo_app_name: str | None = Field(default=None, alias="argoAppName")
-    expected_argo_app_name: str | None = Field(default=None, alias="expectedArgoAppName")
-    release_argo_app_name: str | None = Field(default=None, alias="releaseArgoAppName")
-    observability_mode: str | None = Field(default=None, alias="observabilityMode")
-    gitops_path: str | None = Field(default=None, alias="gitopsPath")
-    expected_gitops_path: str | None = Field(default=None, alias="expectedGitopsPath")
-    monitoring_selector: ServiceIdentityMonitoringSelectorResponse = Field(alias="monitoringSelector")
-    violations: list[str]
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceIdentityDiagnosticsResponse(BaseModel):
-    drift_count: int = Field(alias="driftCount")
-    ok_count: int = Field(alias="okCount")
-    drift_keys: list[str] = Field(alias="driftKeys")
-    rows: list[ServiceIdentityDriftRowResponse]
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceRegistryDiagnosticsResponse(BaseModel):
-    generated_at: str = Field(alias="generatedAt")
-    env: str | None = None
-    freshness: ServiceRegistryFreshnessResponse
-    join_mismatch: ServiceRegistryJoinMismatchResponse = Field(alias="joinMismatch")
-    catalog_join: CatalogJoinDiagnosticsResponse = Field(alias="catalogJoin")
-    identity_drift: ServiceIdentityDiagnosticsResponse = Field(alias="identityDrift")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceMetricsSummaryResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    uptime_pct: float | None = Field(default=None, alias="uptimePct")
-    p95_latency_ms: float | None = Field(default=None, alias="p95LatencyMs")
-    error_rate_pct: float | None = Field(default=None, alias="errorRatePct")
-    restart_count: float | None = Field(default=None, alias="restartCount")
-    window_start: str = Field(alias="windowStart")
-    window_end: str = Field(alias="windowEnd")
-    generated_at: str = Field(alias="generatedAt")
-    no_data: dict[str, bool] = Field(alias="noData")
-    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
-    observability_diagnostics: "ServiceMetricsObservabilityDiagnosticsResponse" = Field(
-        alias="observabilityDiagnostics"
-    )
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceMetricTrendPointResponse(BaseModel):
-    timestamp: str
-    value: float
-
-
-class ServiceMetricTrendSeriesResponse(BaseModel):
-    query_status: Literal["ok", "no_data"] = Field(alias="queryStatus")
-    query_message: str | None = Field(default=None, alias="queryMessage")
-    query_source: Literal["app_metrics", "traefik_fallback"] | None = Field(
-        default=None,
-        alias="querySource",
-    )
-    latest_value: float | None = Field(default=None, alias="latestValue")
-    point_count: int = Field(alias="pointCount")
-    points: list[ServiceMetricTrendPointResponse]
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceMetricsTrendsResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    range_value: str = Field(alias="range")
-    window_start: str = Field(alias="windowStart")
-    window_end: str = Field(alias="windowEnd")
-    generated_at: str = Field(alias="generatedAt")
-    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
-    p95_latency_ms: ServiceMetricTrendSeriesResponse = Field(alias="p95LatencyMs")
-    error_rate_pct: ServiceMetricTrendSeriesResponse = Field(alias="errorRatePct")
-    observability_diagnostics: "ServiceMetricsObservabilityDiagnosticsResponse" = Field(
-        alias="observabilityDiagnostics"
-    )
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceMetricsObservabilityDiagnosticsResponse(BaseModel):
-    mode: Literal["app-native", "ingress-derived", "no-http"] | None = None
-    authority: Literal["app", "ingress", "none"] | None = None
-    status: Literal["ok", "unsupported", "no_retained_data", "misconfigured", "unknown"]
-    reason: str
-    message: str
-    missing_metrics: list[str] = Field(alias="missingMetrics")
-    source_available: bool | None = Field(default=None, alias="sourceAvailable")
-    service_series_available: bool | None = Field(default=None, alias="serviceSeriesAvailable")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ServiceHealthTimelineSegmentResponse(BaseModel):
-    start: str
-    end: str
-    status: str
-    reason: str | None = None
-
-
-class QuickViewLogLineResponse(BaseModel):
-    timestamp: str
-    message: str
-    labels: dict[str, str]
-
-
-class LogsQuickViewResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    preset: str
-    range_value: str = Field(alias="range")
-    generated_at: str = Field(alias="generatedAt")
-    limit: int
-    returned: int
-    more_available: bool = Field(alias="moreAvailable")
-    next_cursor: str | None = Field(default=None, alias="nextCursor")
-    lines: list[QuickViewLogLineResponse]
-    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DeploymentObservabilityContextResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    env: str | None = None
-    deployment_id: str | None = Field(default=None, alias="deploymentId")
-    action: str | None = None
-    status: str | None = None
-    window_start: str | None = Field(default=None, alias="windowStart")
-    window_end: str | None = Field(default=None, alias="windowEnd")
-    window_source: Literal["deployment_record", "explicit_window"] = Field(alias="windowSource")
-    evidence_status: Literal["resolved", "missing"] = Field(alias="evidenceStatus")
-    evidence_message: str | None = Field(default=None, alias="evidenceMessage")
-    compare_url: str | None = Field(default=None, alias="compareUrl")
-    git_pr_url: str | None = Field(default=None, alias="gitPrUrl")
-    git_pr_number: int | None = Field(default=None, alias="gitPrNumber")
-    deploy_reason: str | None = Field(default=None, alias="deployReason")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DeploymentObservabilityMetricSnapshotResponse(BaseModel):
-    before: float | None = None
-    after: float | None = None
-    delta: float | None = None
-
-
-class DeploymentObservabilityMetricsResponse(BaseModel):
-    query_status: Literal["ok", "no_data", "no_deployment_window"] = Field(alias="queryStatus")
-    query_message: str | None = Field(default=None, alias="queryMessage")
-    window_start: str | None = Field(default=None, alias="windowStart")
-    window_end: str | None = Field(default=None, alias="windowEnd")
-    generated_at: str | None = Field(default=None, alias="generatedAt")
-    error_rate_pct: DeploymentObservabilityMetricSnapshotResponse | None = Field(
-        default=None,
-        alias="errorRatePct",
-    )
-    p95_latency_ms: DeploymentObservabilityMetricSnapshotResponse | None = Field(
-        default=None,
-        alias="p95LatencyMs",
-    )
-    availability_pct: DeploymentObservabilityMetricSnapshotResponse | None = Field(
-        default=None,
-        alias="availabilityPct",
-    )
-    no_data: dict[str, bool] = Field(alias="noData")
-    provider_status: MonitoringProviderStatusResponse | None = Field(default=None, alias="providerStatus")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DeploymentObservabilityTimelineResponse(BaseModel):
-    query_status: Literal["ok", "no_data", "no_deployment_window"] = Field(alias="queryStatus")
-    query_message: str | None = Field(default=None, alias="queryMessage")
-    service_id: str = Field(alias="serviceId")
-    window_start: str | None = Field(default=None, alias="windowStart")
-    window_end: str | None = Field(default=None, alias="windowEnd")
-    generated_at: str | None = Field(default=None, alias="generatedAt")
-    provider_status: MonitoringProviderStatusResponse | None = Field(default=None, alias="providerStatus")
-    segments: list[ServiceHealthTimelineSegmentResponse]
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DeploymentObservabilityLogsResponse(BaseModel):
-    query_status: Literal["ok", "no_data", "no_deployment_window"] = Field(alias="queryStatus")
-    query_message: str | None = Field(default=None, alias="queryMessage")
-    service_id: str = Field(alias="serviceId")
-    preset: str
-    generated_at: str | None = Field(default=None, alias="generatedAt")
-    window_start: str | None = Field(default=None, alias="windowStart")
-    window_end: str | None = Field(default=None, alias="windowEnd")
-    limit: int
-    returned: int
-    more_available: bool = Field(alias="moreAvailable")
-    lines: list[QuickViewLogLineResponse]
-    provider_status: MonitoringProviderStatusResponse | None = Field(default=None, alias="providerStatus")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class DeploymentObservabilityResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    context: DeploymentObservabilityContextResponse
-    metrics: DeploymentObservabilityMetricsResponse
-    health_timeline: DeploymentObservabilityTimelineResponse = Field(alias="healthTimeline")
-    logs_quick_view: DeploymentObservabilityLogsResponse = Field(alias="logsQuickView")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ActiveAlertResponse(BaseModel):
-    id: str
-    severity: str
-    title: str
-    description: str | None = None
-    starts_at: str = Field(alias="startsAt")
-    labels: dict[str, str]
-    service_id: str | None = Field(default=None, alias="serviceId")
-    env: str | None = None
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ActiveAlertsResponse(BaseModel):
-    alerts: list[ActiveAlertResponse]
-    provider_status: MonitoringProviderStatusResponse = Field(alias="providerStatus")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class MonitoringIncidentCompatResponse(BaseModel):
-    id: str
-    severity: str
-    title: str
-    status: str = "active"
-    started_at: str = Field(alias="startedAt")
-    source: str = "alertmanager"
-    service_id: str | None = Field(default=None, alias="serviceId")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class MonitoringIncidentsCompatEnvelope(BaseModel):
-    incidents: list[MonitoringIncidentCompatResponse]
-    provider_status: MonitoringProviderStatusResponse | None = Field(
-        default=None,
-        alias="providerStatus",
-    )
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-# Release/compatibility responses preserve a simpler contract for older UI adapters
-# while the richer deployment and observability endpoints continue to evolve.
-
-class ReleaseArgoStateResponse(BaseModel):
-    app_name: str = Field(alias="appName")
-    sync_status: str = Field(alias="syncStatus")
-    health_status: str = Field(alias="healthStatus")
-    revision: str | None = None
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ReleaseDriftStateResponse(BaseModel):
-    is_drifted: bool = Field(alias="isDrifted")
-    expected_revision: str | None = Field(default=None, alias="expectedRevision")
-    live_revision: str | None = Field(default=None, alias="liveRevision")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ReleaseTraceabilityResponse(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    env: str
-    commit_sha: str | None = Field(default=None, alias="commitSha")
-    image_ref: str | None = Field(default=None, alias="imageRef")
-    deployed_at: str | None = Field(default=None, alias="deployedAt")
-    argo: ReleaseArgoStateResponse
-    drift: ReleaseDriftStateResponse
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ReleaseDashboardCompatRow(BaseModel):
-    service_id: str = Field(alias="serviceId")
-    service_name: str = Field(alias="serviceName")
-    environment: str
-    commit_sha: str | None = Field(default=None, alias="commitSha")
-    image: str | None = None
-    sync: str
-    health: str
-    drift: bool
-    deployed_at: str | None = Field(default=None, alias="deployedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ReleaseDashboardCompatResponse(BaseModel):
-    releases: list[ReleaseDashboardCompatRow]
 
 def require_bearer_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_auth),
@@ -7036,45 +6157,6 @@ def _kustomization_path_for(inp: "ScaffoldServiceInput") -> str:
     return _WORKLOADS_PROD_KUSTOMIZATION_PATH if inp.template in ("postgres", "mysql") else _WORKLOADS_KUSTOMIZATION_PATH
 
 
-class ScaffoldServiceRequest(BaseModel):
-    name: str
-    description: str
-    image_repo: str = Field(alias="imageRepo", default="")
-    repo_url: str = Field(alias="repoUrl", default="")
-    owner_email: str = Field(alias="ownerEmail")
-    owner: str = ""
-    template: Literal["python-fastapi", "python-django", "python-flask", "static-nginx", "react", "nextjs", "vue", "wordpress", "node-express", "node-nestjs", "postgres", "mysql"] = "python-fastapi"
-    namespace: str = ""
-    dev_host: str = Field(alias="devHost", default="")
-    prod_host: str = Field(alias="prodHost", default="")
-    public_host: str = Field(alias="publicHost", default="")
-    db_username: str = Field(alias="dbUsername", default="")
-    db_password: str = Field(alias="dbPassword", default="")
-    db_name: str = Field(alias="dbName", default="")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ScaffoldPreviewFile(BaseModel):
-    path: str
-    content: str
-    change_type: str = Field(alias="changeType")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class ScaffoldPreviewResponse(BaseModel):
-    files: list[ScaffoldPreviewFile]
-
-
-class ScaffoldSubmitResponse(BaseModel):
-    pr_url: str = Field(alias="prUrl")
-    pr_number: int = Field(alias="prNumber")
-    branch_name: str = Field(alias="branchName")
-    files_committed: list[str] = Field(alias="filesCommitted")
-    initiated_at: str = Field(alias="initiatedAt")
-
-    model_config = ConfigDict(populate_by_name=True)
 
 
 def _workloads_gitops_repo_url(repo_slug: str) -> str:
@@ -7111,6 +6193,98 @@ def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInp
     )
 
 
+def _build_scaffold_bundle_input(payload: ScaffoldServiceRequest) -> ScaffoldBundleInput:
+    repo_slug = _workloads_repo_slug()
+    name = payload.name.strip().lower()
+    namespace = payload.namespace.strip() or name
+    dev_host = payload.dev_host.strip() or f"{name}.dev.homelab.local"
+    prod_host = payload.prod_host.strip() or f"{name}.homelab.local"
+    base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
+    public_host = payload.public_host.strip() or f"{name}.{base_domain}"
+
+    if not payload.frontend_template:
+        raise ScaffoldError("frontendTemplate is required for bundle topologies.", status_code=422)
+    if not payload.backend_template:
+        raise ScaffoldError("backendTemplate is required for bundle topologies.", status_code=422)
+    if not payload.frontend_image_repo.strip():
+        raise ScaffoldError("frontendImageRepo is required for bundle topologies.", status_code=422)
+    if not payload.backend_image_repo.strip():
+        raise ScaffoldError("backendImageRepo is required for bundle topologies.", status_code=422)
+    if payload.topology == "frontend-backend-db" and not payload.db_template:
+        raise ScaffoldError("dbTemplate is required for frontend-backend-db topology.", status_code=422)
+
+    return ScaffoldBundleInput(
+        name=name,
+        description=payload.description.strip(),
+        owner_email=payload.owner_email.strip(),
+        owner=payload.owner.strip(),
+        namespace=namespace,
+        dev_host=dev_host,
+        prod_host=prod_host,
+        public_host=public_host,
+        workloads_repo_url=_workloads_gitops_repo_url(repo_slug),
+        repo_url=payload.repo_url.strip(),
+        topology=payload.topology,
+        frontend_template=payload.frontend_template,
+        frontend_image_repo=payload.frontend_image_repo.strip(),
+        backend_template=payload.backend_template,
+        backend_image_repo=payload.backend_image_repo.strip(),
+        db_template=payload.db_template,
+        db_username=payload.db_username.strip() or "appuser",
+        db_password=payload.db_password.strip() or "changeme",
+        db_name=payload.db_name.strip() or "appdb",
+    )
+
+
+def _generate_scaffold_files_and_updates(
+    payload: ScaffoldServiceRequest,
+    workloads_repo: str,
+    base_branch: str,
+    git_provider: object,
+) -> tuple[dict[str, str], str, str, str, str]:
+    """Shared logic for preview and submit: generate files and catalog updates.
+
+    Returns (new_files, kustomization_path, updated_kustomization,
+             updated_appproject, updated_services_yaml).
+    """
+    is_bundle = payload.topology != "single-service"
+
+    if is_bundle:
+        inp = _build_scaffold_bundle_input(payload)
+        validate_service_name(inp.name)
+        kustomization_path = _WORKLOADS_KUSTOMIZATION_PATH
+        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)  # type: ignore[union-attr]
+        appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)  # type: ignore[union-attr]
+        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
+
+        new_files = generate_gitops_bundle_files(inp)
+        updated_kustomization = update_kustomization_resources(kustomization_raw, f"{inp.name}-app.yaml")
+        updated_services_yaml = build_catalog_bundle_entries(services_yaml_raw, inp)
+        # Reuse single-service AppProject builder — same shape, just needs a dummy ScaffoldServiceInput
+        single_inp = ScaffoldServiceInput(
+            name=inp.name, description=inp.description, image_repo="",
+            repo_url=inp.repo_url, owner_email=inp.owner_email, owner=inp.owner,
+            template="python-fastapi", namespace=inp.namespace,
+            dev_host=inp.dev_host, prod_host=inp.prod_host, public_host=inp.public_host,
+            workloads_repo_url=inp.workloads_repo_url,
+        )
+        updated_appproject = build_appproject_addition(appproject_raw, single_inp)
+    else:
+        inp_single = _build_scaffold_input(payload)
+        validate_service_name(inp_single.name)
+        kustomization_path = _kustomization_path_for(inp_single)
+        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)  # type: ignore[union-attr]
+        appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)  # type: ignore[union-attr]
+        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
+
+        new_files = generate_gitops_new_files(inp_single)
+        updated_kustomization = update_kustomization_resources(kustomization_raw, f"{inp_single.name}-app.yaml")
+        updated_services_yaml = build_catalog_entry_addition(services_yaml_raw, inp_single)
+        updated_appproject = build_appproject_addition(appproject_raw, inp_single)
+
+    return new_files, kustomization_path, updated_kustomization, updated_appproject, updated_services_yaml
+
+
 @app.post("/scaffold/preview", response_model=ScaffoldPreviewResponse, tags=["scaffold"])
 def scaffold_preview(
     payload: ScaffoldServiceRequest,
@@ -7119,19 +6293,10 @@ def scaffold_preview(
     base_branch = _workloads_base_branch()
 
     try:
-        inp = _build_scaffold_input(payload)
-        validate_service_name(inp.name)
-
         git_provider = build_default_git_provider()
-        kustomization_path = _kustomization_path_for(inp)
-        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)
-        appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)
-        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
-
-        new_files = generate_gitops_new_files(inp)
-        updated_kustomization = update_kustomization_resources(kustomization_raw, f"{inp.name}-app.yaml")
-        updated_services_yaml = build_catalog_entry_addition(services_yaml_raw, inp)
-        updated_appproject = build_appproject_addition(appproject_raw, inp)
+        new_files, kustomization_path, updated_kustomization, updated_appproject, updated_services_yaml = (
+            _generate_scaffold_files_and_updates(payload, workloads_repo, base_branch, git_provider)
+        )
     except ScaffoldError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except GitServiceConfigurationError as exc:
@@ -7165,21 +6330,13 @@ def scaffold_submit(
     initiated_at = datetime.now(tz=timezone.utc)
     workloads_repo = _workloads_repo_slug()
     base_branch = _workloads_base_branch()
+    name = payload.name.strip().lower()
 
     try:
-        inp = _build_scaffold_input(payload)
-        validate_service_name(inp.name)
-
         git_provider = build_default_git_provider()
-        kustomization_path = _kustomization_path_for(inp)
-        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)
-        appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)
-        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
-
-        new_files = generate_gitops_new_files(inp)
-        updated_kustomization = update_kustomization_resources(kustomization_raw, f"{inp.name}-app.yaml")
-        updated_services_yaml = build_catalog_entry_addition(services_yaml_raw, inp)
-        updated_appproject = build_appproject_addition(appproject_raw, inp)
+        new_files, kustomization_path, updated_kustomization, updated_appproject, updated_services_yaml = (
+            _generate_scaffold_files_and_updates(payload, workloads_repo, base_branch, git_provider)
+        )
     except ScaffoldError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except GitServiceConfigurationError as exc:
@@ -7199,22 +6356,31 @@ def scaffold_submit(
     }
 
     timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
-    branch_name = f"scaffold/{inp.name}-{timestamp}"
-    pr_title = f"feat(scaffold): add {inp.name} service"
+    namespace = payload.namespace.strip() or name
+    is_bundle = payload.topology != "single-service"
+    kind_label = f"{payload.topology} project" if is_bundle else "service"
+    template_label = (
+        f"{payload.frontend_template} + {payload.backend_template}"
+        + (f" + {payload.db_template}" if payload.db_template and payload.topology == "frontend-backend-db" else "")
+        if is_bundle
+        else payload.template
+    )
+    branch_name = f"scaffold/{name}-{timestamp}"
+    pr_title = f"feat(scaffold): add {name} {kind_label}"
     pr_body = (
-        f"## Scaffold: {inp.name}\n\n"
-        f"**Description:** {inp.description}\n"
-        f"**Template:** {inp.template}\n"
-        f"**Namespace:** {inp.namespace}\n"
-        f"**Image:** {inp.image_repo}\n"
-        f"**Repository:** {inp.repo_url}\n\n"
+        f"## Scaffold: {name}\n\n"
+        f"**Description:** {payload.description}\n"
+        f"**Topology:** {payload.topology}\n"
+        f"**Template:** {template_label}\n"
+        f"**Namespace:** {namespace}\n"
+        f"**Repository:** {payload.repo_url}\n\n"
         f"Generated by the homelab portal scaffold wizard.\n\n"
         f"### Checklist\n"
         f"- [ ] Review generated manifests\n"
-        f"- [ ] Create image pull secret in `{inp.namespace}` if using GHCR private images\n"
+        f"- [ ] Create image pull secret in `{namespace}` if using GHCR private images\n"
         f"- [ ] Update `runbook_url` in `services.yaml` once a runbook exists\n"
         f"- [ ] Verify kustomize renders without errors: "
-        f"`./scripts/render-kustomize.sh apps/{inp.name}/envs/dev`\n"
+        f"`./scripts/render-kustomize.sh apps/{name}/envs/dev`\n"
     )
 
     try:
@@ -7223,7 +6389,7 @@ def scaffold_submit(
             workloads_repo,
             branch_name,
             all_files,
-            f"feat(scaffold): add {inp.name} service manifests and catalog entry",
+            f"feat(scaffold): add {name} {kind_label} manifests and catalog entry",
         )
         pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)
     except GitServiceConfigurationError as exc:
@@ -7249,18 +6415,6 @@ def scaffold_submit(
 # ---------------------------------------------------------------------------
 
 
-class UpdatePublicHostnameRequest(BaseModel):
-    public_host: str = Field(alias="publicHost")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class UpdatePublicHostnameResponse(BaseModel):
-    pr_url: str = Field(alias="prUrl")
-    pr_number: int = Field(alias="prNumber")
-    branch_name: str = Field(alias="branchName")
-
-    model_config = ConfigDict(populate_by_name=True)
 
 
 def _read_current_public_host_from_services_yaml(services_yaml: str, service_id: str) -> str | None:
