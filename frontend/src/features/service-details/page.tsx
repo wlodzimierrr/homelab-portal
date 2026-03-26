@@ -684,6 +684,67 @@ const timelineWindowOptions: Array<{ value: TimelineWindow; label: string }> = [
   { value: '7d', label: '7d' },
 ]
 
+function AdoptServiceSection({ serviceId }: { serviceId: string }) {
+  const [projectId, setProjectId] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [result, setResult] = useState<{ status: string; message: string; prUrl?: string } | null>(null)
+  const [error, setError] = useState('')
+
+  const handleAdopt = useCallback(async () => {
+    if (!projectId.trim()) return
+    setSubmitting(true)
+    setError('')
+    setResult(null)
+    try {
+      const { adoptService } = await import('@/lib/api')
+      const response = await adoptService(serviceId, projectId.trim())
+      setResult({ status: response.status, message: response.message, prUrl: response.prUrl ?? undefined })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to adopt service.')
+    } finally {
+      setSubmitting(false)
+    }
+  }, [projectId, serviceId])
+
+  return (
+    <section className="space-y-3">
+      <h2 className="text-sm font-semibold">Adopt into Project</h2>
+      <p className="text-xs text-muted-foreground">
+        Link this standalone service to a parent project. This is a metadata-only change (Phase 1 soft-link)
+        that creates a PR to add <code>project_id</code> to the service catalog entry.
+      </p>
+      <div className="flex items-end gap-2">
+        <label className="flex-1 space-y-1">
+          <span className="text-xs font-medium text-muted-foreground">Project ID</span>
+          <input
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
+            placeholder="e.g. my-project"
+            className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm"
+            disabled={submitting}
+          />
+        </label>
+        <Button onClick={() => void handleAdopt()} disabled={submitting || !projectId.trim()} variant="outline">
+          {submitting ? 'Adopting...' : 'Adopt'}
+        </Button>
+      </div>
+      {error ? (
+        <p className="text-xs text-rose-600 dark:text-rose-400">{error}</p>
+      ) : null}
+      {result ? (
+        <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm">
+          <p className="text-emerald-900 dark:text-emerald-200">{result.message}</p>
+          {result.prUrl ? (
+            <a href={result.prUrl} target="_blank" rel="noreferrer" className="mt-1 block text-xs text-primary hover:underline">
+              View PR
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
 export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: ServiceDetailsPageProps) {
   const {
     decodedServiceId,
@@ -2121,6 +2182,10 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 </div>
               )}
             </section>
+
+            {!projectContext ? (
+              <AdoptServiceSection serviceId={decodedServiceId} />
+            ) : null}
 
             <AdminControlsSection
               configSupported={configSupported}

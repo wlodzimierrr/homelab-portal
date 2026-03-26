@@ -232,6 +232,14 @@ from app.api.schemas.observability import (
     ServiceMetricsSummaryResponse,
     ServiceMetricsTrendsResponse,
 )
+from app.api.schemas.migration import (
+    AdoptServiceRequest,
+    AdoptServiceResponse,
+    MigrationConsolidateRequest,
+    MigrationConsolidateResponse,
+    MigrationValidateRequest,
+    MigrationValidateResponse,
+)
 from app.api.schemas.scaffold import (
     ScaffoldPreviewFile,
     ScaffoldPreviewResponse,
@@ -4276,6 +4284,33 @@ def scaffold_submit(
 
 def scaffold_list_projects() -> list[ScaffoldProjectInfo]:
     return _get_scaffold_admin_service().scaffold_list_projects()
+
+
+# ---------------------------------------------------------------------------
+# T5.3.4 — Service adoption and migration
+# ---------------------------------------------------------------------------
+
+
+def adopt_service(
+    service_id: str,
+    payload: AdoptServiceRequest,
+    _admin: str = Depends(require_admin),
+) -> AdoptServiceResponse:
+    return _get_scaffold_admin_service().adopt_service(service_id=service_id, payload=payload)
+
+
+def validate_migration(
+    payload: MigrationValidateRequest,
+    _admin: str = Depends(require_admin),
+) -> MigrationValidateResponse:
+    return _get_scaffold_admin_service().validate_migration(payload=payload)
+
+
+def consolidate_migration(
+    payload: MigrationConsolidateRequest,
+    _admin: str = Depends(require_admin),
+) -> MigrationConsolidateResponse:
+    return _get_scaffold_admin_service().consolidate_migration(payload=payload)
 
 
 # ---------------------------------------------------------------------------

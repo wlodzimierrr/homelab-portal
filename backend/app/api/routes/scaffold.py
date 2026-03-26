@@ -32,3 +32,29 @@ def register_routes(app: FastAPI, main_module: ModuleType) -> None:
         response_model=list[main_module.ScaffoldProjectInfo],
         tags=["scaffold"],
     )
+
+    # T5.3.4 — Service adoption and migration
+    app.add_api_route(
+        "/services/{service_id}/adopt",
+        endpoint=wrap_sync_endpoint(main_module.adopt_service),
+        methods=["POST"],
+        response_model=main_module.AdoptServiceResponse,
+        tags=["migration"],
+    )
+
+    app.add_api_route(
+        "/migration/validate",
+        endpoint=wrap_sync_endpoint(main_module.validate_migration),
+        methods=["POST"],
+        response_model=main_module.MigrationValidateResponse,
+        tags=["migration"],
+    )
+
+    app.add_api_route(
+        "/migration/consolidate",
+        endpoint=wrap_sync_endpoint(main_module.consolidate_migration),
+        methods=["POST"],
+        response_model=main_module.MigrationConsolidateResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        tags=["migration"],
+    )

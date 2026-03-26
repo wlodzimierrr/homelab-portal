@@ -710,3 +710,21 @@ export function updateServicePublicHostname(serviceId: string, publicHost: strin
     body: JSON.stringify({ publicHost }),
   })
 }
+
+// T5.3.4 — Service adoption / migration
+
+export interface AdoptServiceResponse {
+  status: 'accepted' | 'noop'
+  serviceId: string
+  projectId: string
+  prUrl?: string
+  prNumber?: number
+  message: string
+}
+
+export function adoptService(serviceId: string, projectId: string) {
+  return request<AdoptServiceResponse>(`/services/${encodeURIComponent(serviceId)}/adopt`, {
+    method: 'POST',
+    body: JSON.stringify({ projectId }),
+  })
+}

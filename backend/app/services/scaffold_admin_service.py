@@ -46,6 +46,15 @@ from app.api.schemas.deployments import (
     UpdatePublicHostnameRequest,
     UpdatePublicHostnameResponse,
 )
+from app.api.schemas.migration import (
+    AdoptServiceRequest,
+    AdoptServiceResponse,
+    MigrationConflictResponse,
+    MigrationConsolidateRequest,
+    MigrationConsolidateResponse,
+    MigrationValidateRequest,
+    MigrationValidateResponse,
+)
 from app.api.schemas.scaffold import (
     ScaffoldPreviewFile,
     ScaffoldPreviewResponse,
@@ -53,6 +62,11 @@ from app.api.schemas.scaffold import (
     ScaffoldServiceRequest,
     ScaffoldSubmitResponse,
 )
+from app.migration_consolidation import (
+    generate_consolidation_changes,
+    update_services_yaml_project_id,
+)
+from app.migration_validation import validate_migration
 
 
 @dataclass(frozen=True)
@@ -547,3 +561,315 @@ class ScaffoldAdminService:
             prNumber=pr["number"],
             branchName=branch_name,
         )
+
+    # ------------------------------------------------------------------
+    # Service adoption / migration
+    # ------------------------------------------------------------------
+
+    def adopt_service(
+        self,
+        *,
+        service_id: str,
+        payload: AdoptServiceRequest,
+    ) -> AdoptServiceResponse:
+        """Phase 1 soft-link: add project_id to a service entry in services.yaml via PR."""
+        import yaml as _yaml
+
+        project_id = payload.project_id.strip().lower()
+        workloads_repo = self.deps.workloads_repo_slug()
+        base_branch = self.deps.workloads_base_branch()
+
+        try:
+            git_provider = build_default_git_provider()
+            services_yaml_raw = git_provider.read_file(
+                workloads_repo, base_branch, self.deps.workloads_catalog_path
+            )
+        except Exception as exc:
+            self._raise_git_service_http_exception(exc, not_found_is_404=True)
+            raise
+
+        # Parse and check current state
+        data = _yaml.safe_load(services_yaml_raw)
+        if not isinstance(data, dict) or "services" not in data:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="services.yaml is empty or invalid.")
+
+        entry = next(
+            (s for s in data["services"] if isinstance(s, dict) and s.get("service_id") == service_id),
+            None,
+        )
+        if entry is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Service '{service_id}' not found in services.yaml.")
+
+        current_project_id = entry.get("project_id")
+        if current_project_id == project_id:
+            return AdoptServiceResponse(
+                status="noop",
+                serviceId=service_id,
+                projectId=project_id,
+                message=f"Service '{service_id}' is already linked to project '{project_id}'.",
+            )
+
+        try:
+            updated_yaml = update_services_yaml_project_id(services_yaml_raw, service_id, project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+        initiated_at = datetime.now(tz=timezone.utc)
+        timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
+        branch_name = f"adopt/{service_id}-{timestamp}"
+        pr_title = f"feat(adopt): link {service_id} to project {project_id}"
+        pr_body = (
+            f"## Service adoption: {service_id}\n\n"
+            f"**Project:** {project_id}\n"
+            f"**Action:** Add `project_id: {project_id}` to service entry\n\n"
+            f"This is a metadata-only change (Phase 1 soft-link). "
+            f"No namespace or manifest changes are included.\n\n"
+            f"After merge, run catalog sync to update the portal.\n"
+        )
+
+        try:
+            git_provider.create_branch(workloads_repo, base_branch, branch_name)
+            git_provider.commit_to_branch(
+                workloads_repo,
+                branch_name,
+                {self.deps.workloads_catalog_path: updated_yaml},
+                f"feat(adopt): link {service_id} to project {project_id}",
+            )
+            pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)
+        except Exception as exc:
+            self._raise_git_service_http_exception(exc)
+            raise
+
+        return AdoptServiceResponse(
+            status="accepted",
+            serviceId=service_id,
+            projectId=project_id,
+            prUrl=pr["url"],
+            prNumber=pr["number"],
+            message=f"PR created to link '{service_id}' to project '{project_id}'.",
+        )
+
+    def validate_migration(
+        self,
+        *,
+        payload: MigrationValidateRequest,
+    ) -> MigrationValidateResponse:
+        """Pre-flight validation for namespace consolidation."""
+        import yaml as _yaml
+
+        service_id = payload.service_id.strip().lower()
+        target_project_id = payload.target_project_id.strip().lower()
+        target_namespace = payload.target_namespace.strip().lower()
+        workloads_repo = self.deps.workloads_repo_slug()
+        base_branch = self.deps.workloads_base_branch()
+
+        try:
+            git_provider = build_default_git_provider()
+            services_yaml_raw = git_provider.read_file(
+                workloads_repo, base_branch, self.deps.workloads_catalog_path
+            )
+        except Exception as exc:
+            self._raise_git_service_http_exception(exc)
+            raise
+
+        data = _yaml.safe_load(services_yaml_raw)
+        entry = next(
+            (s for s in (data or {}).get("services", []) if isinstance(s, dict) and s.get("service_id") == service_id),
+            None,
+        )
+        if entry is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Service '{service_id}' not found.")
+
+        current_namespace = service_id
+        envs = entry.get("envs", [])
+        if envs and isinstance(envs[0], dict):
+            current_namespace = envs[0].get("namespace", service_id)
+
+        source_argo = envs[0].get("argo_app") if envs and isinstance(envs[0], dict) else None
+
+        # Read service manifests
+        service_manifests = self._read_project_base_manifests(
+            git_provider, workloads_repo, base_branch, service_id
+        )
+        target_manifests = self._read_project_base_manifests(
+            git_provider, workloads_repo, base_branch, target_project_id
+        )
+
+        # Find target argo app name
+        target_entry = next(
+            (s for s in (data or {}).get("services", [])
+             if isinstance(s, dict) and s.get("service_id") == target_project_id),
+            None,
+        )
+        target_argo = None
+        if target_entry:
+            target_envs = target_entry.get("envs", [])
+            if target_envs and isinstance(target_envs[0], dict):
+                target_argo = target_envs[0].get("argo_app")
+
+        result = validate_migration(
+            service_id=service_id,
+            current_namespace=current_namespace,
+            target_namespace=target_namespace,
+            service_manifests=service_manifests,
+            target_project_manifests=target_manifests,
+            source_argo_app_name=source_argo,
+            target_project_argo_app_name=target_argo,
+        )
+
+        return MigrationValidateResponse(
+            isSafe=result.is_safe,
+            serviceId=service_id,
+            currentNamespace=result.current_namespace,
+            targetNamespace=target_namespace,
+            conflicts=[
+                MigrationConflictResponse(
+                    kind=c.kind, severity=c.severity, message=c.message, details=c.details
+                )
+                for c in result.conflicts
+            ],
+        )
+
+    def consolidate_migration(
+        self,
+        *,
+        payload: MigrationConsolidateRequest,
+    ) -> MigrationConsolidateResponse:
+        """Phase 2: generate a PR that moves service manifests into the target project namespace."""
+        import yaml as _yaml
+
+        service_id = payload.service_id.strip().lower()
+        target_project_id = payload.target_project_id.strip().lower()
+        target_namespace = payload.target_namespace.strip().lower()
+        workloads_repo = self.deps.workloads_repo_slug()
+        base_branch = self.deps.workloads_base_branch()
+
+        # First validate
+        validation = self.validate_migration(
+            payload=MigrationValidateRequest(
+                serviceId=service_id,
+                targetProjectId=target_project_id,
+                targetNamespace=target_namespace,
+            )
+        )
+        if not validation.is_safe and not payload.acknowledge_conflicts:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Migration has {len(validation.conflicts)} conflict(s). "
+                    f"Set acknowledgeConflicts=true to proceed anyway."
+                ),
+            )
+
+        try:
+            git_provider = build_default_git_provider()
+            services_yaml_raw = git_provider.read_file(
+                workloads_repo, base_branch, self.deps.workloads_catalog_path
+            )
+            target_kustomization_raw = git_provider.read_file(
+                workloads_repo, base_branch, f"apps/{target_project_id}/base/kustomization.yaml"
+            )
+        except Exception as exc:
+            self._raise_git_service_http_exception(exc, not_found_is_404=True)
+            raise
+
+        service_manifests = self._read_project_base_manifests(
+            git_provider, workloads_repo, base_branch, service_id
+        )
+
+        # Detect source ArgoCD Application files
+        source_argo_paths: list[str] = []
+        for env in ("dev", "prod"):
+            argo_path = f"environments/{env}/workloads/{service_id}-app.yaml"
+            try:
+                git_provider.read_file(workloads_repo, base_branch, argo_path)
+                source_argo_paths.append(argo_path)
+            except Exception:
+                pass
+
+        new_files, modified_files = generate_consolidation_changes(
+            service_id=service_id,
+            target_project_id=target_project_id,
+            target_namespace=target_namespace,
+            service_base_manifests=service_manifests,
+            target_kustomization_yaml=target_kustomization_raw,
+            services_yaml=services_yaml_raw,
+            source_argo_app_paths=source_argo_paths,
+        )
+
+        all_files = {**new_files, **modified_files}
+        initiated_at = datetime.now(tz=timezone.utc)
+        timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
+        branch_name = f"migrate/{service_id}-to-{target_project_id}-{timestamp}"
+        pr_title = f"feat(migrate): consolidate {service_id} into {target_project_id}"
+        conflict_summary = ""
+        if validation.conflicts:
+            conflict_lines = "\n".join(f"- [{c.severity}] {c.message}" for c in validation.conflicts)
+            conflict_summary = f"\n### Pre-flight conflicts (acknowledged)\n{conflict_lines}\n"
+        pr_body = (
+            f"## Namespace consolidation: {service_id} -> {target_project_id}\n\n"
+            f"**Target namespace:** {target_namespace}\n"
+            f"**Files created:** {len(new_files)}\n"
+            f"**Files modified:** {len(modified_files)}\n"
+            f"{conflict_summary}\n"
+            f"### Checklist\n"
+            f"- [ ] Verify secrets exist in namespace `{target_namespace}`\n"
+            f"- [ ] Verify ingress routes resolve after sync\n"
+            f"- [ ] Remove old empty namespace if no resources remain\n"
+        )
+
+        try:
+            git_provider.create_branch(workloads_repo, base_branch, branch_name)
+            git_provider.commit_to_branch(
+                workloads_repo,
+                branch_name,
+                all_files,
+                f"feat(migrate): consolidate {service_id} into {target_project_id} namespace",
+            )
+            pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)
+        except Exception as exc:
+            self._raise_git_service_http_exception(exc)
+            raise
+
+        return MigrationConsolidateResponse(
+            status="accepted",
+            prUrl=pr["url"],
+            prNumber=pr["number"],
+            branchName=branch_name,
+            filesChanged=sorted(all_files.keys()),
+        )
+
+    def _read_project_base_manifests(
+        self,
+        git_provider: object,
+        repo: str,
+        branch: str,
+        project_id: str,
+    ) -> dict[str, str]:
+        """Read all YAML files from apps/{project_id}/base/."""
+        import yaml as _yaml
+
+        manifests: dict[str, str] = {}
+        kustomization_path = f"apps/{project_id}/base/kustomization.yaml"
+        try:
+            kustomization_raw = git_provider.read_file(repo, branch, kustomization_path)  # type: ignore[union-attr]
+        except Exception:
+            return manifests
+
+        try:
+            data = _yaml.safe_load(kustomization_raw)
+        except _yaml.YAMLError:
+            return manifests
+
+        if not isinstance(data, dict):
+            return manifests
+
+        for resource in data.get("resources", []):
+            file_path = f"apps/{project_id}/base/{resource}"
+            try:
+                content = git_provider.read_file(repo, branch, file_path)  # type: ignore[union-attr]
+                manifests[file_path] = content
+            except Exception:
+                continue
+
+        return manifests
