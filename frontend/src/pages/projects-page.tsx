@@ -8,11 +8,11 @@ import {
   getCatalogReconciliation,
   getProjectCatalogDiagnostics,
   getProjects,
-  type CatalogJoinRow,
   type CatalogJoinDiagnostics,
+  type CatalogJoinRow,
   type Project,
   type ProjectCatalogDiagnosticsResponse,
-} from '@/lib/api'
+} from '@/lib/api/catalog'
 import { cn } from '@/lib/utils'
 
 function projectAnchor(projectId: string, env: string) {
@@ -76,6 +76,8 @@ function SummaryCard({ label, value, meta }: { label: string; value: string; met
   )
 }
 
+// Projects page shows the GitOps-owned catalog, then overlays reconciliation and
+// freshness diagnostics so operators can tell whether missing links are structural or stale.
 export function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([])
   const [catalogRows, setCatalogRows] = useState<CatalogJoinRow[]>([])
@@ -84,6 +86,8 @@ export function ProjectsPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
 
+  // Project rows, reconciliation rows, and freshness diagnostics load in parallel
+  // because each source can fail independently and still leave the page partially useful.
   const loadProjects = useCallback(async () => {
     setIsLoading(true)
     setError('')
@@ -137,6 +141,8 @@ export function ProjectsPage() {
     () => [...projects].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
     [projects],
   )
+  // A keyed lookup keeps render logic simple when stitching each project row to
+  // its best matching live-service join result.
   const catalogByProjectKey = useMemo(() => {
     const map = new Map<string, CatalogJoinRow>()
     for (const row of catalogRows) {
@@ -243,9 +249,14 @@ export function ProjectsPage() {
                   </a>
                 </p>
               ) : null}
+              {catalogByProjectKey.get(`${project.id}:${project.environment}`)?.namespace ? (
+                <p className="text-muted-foreground">
+                  Namespace: <span className="font-mono text-xs">{catalogByProjectKey.get(`${project.id}:${project.environment}`)?.namespace}</span>
+                </p>
+              ) : null}
               {catalogByProjectKey.get(`${project.id}:${project.environment}`)?.primaryServiceId ? (
                 <p className="text-muted-foreground">
-                  Service:{' '}
+                  Primary service:{' '}
                   <AppLink
                     to={`/services/${encodeURIComponent(catalogByProjectKey.get(`${project.id}:${project.environment}`)?.primaryServiceId ?? '')}`}
                     className="text-primary hover:underline"
@@ -256,7 +267,18 @@ export function ProjectsPage() {
               ) : null}
               {(catalogByProjectKey.get(`${project.id}:${project.environment}`)?.serviceCount ?? 0) > 1 ? (
                 <p className="text-muted-foreground">
-                  Linked services: {catalogByProjectKey.get(`${project.id}:${project.environment}`)?.serviceIds.join(', ')}
+                  Child services:{' '}
+                  {catalogByProjectKey.get(`${project.id}:${project.environment}`)?.serviceIds.map((sid, i) => (
+                    <span key={sid}>
+                      {i > 0 ? ', ' : ''}
+                      <AppLink
+                        to={`/services/${encodeURIComponent(sid)}`}
+                        className="text-primary hover:underline"
+                      >
+                        {sid}
+                      </AppLink>
+                    </span>
+                  ))}
                 </p>
               ) : null}
             </li>

@@ -11,7 +11,7 @@ import {
   type CatalogJoinDiagnostics,
   type CatalogJoinRow,
   type ServiceRegistryDiagnosticsResponse,
-} from '@/lib/api'
+} from '@/lib/api/catalog'
 import { getDeploymentHistory } from '@/lib/adapters/deployments'
 import { UptimeIndicator } from '@/components/uptime-indicator'
 import {
@@ -219,6 +219,7 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [environmentFilter, setEnvironmentFilter] = useState('all')
+  const [projectFilter, setProjectFilter] = useState('all')
   const [wizardOpen, setWizardOpen] = useState(false)
 
   const loadServices = useCallback(async () => {
@@ -317,6 +318,29 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
     return [...unique].sort((a, b) => a.localeCompare(b))
   }, [services])
 
+  const projectOptions = useMemo(() => {
+    const unique = new Set<string>()
+    for (const row of catalogRows) {
+      unique.add(row.projectId)
+    }
+    return [...unique].sort((a, b) => a.localeCompare(b))
+  }, [catalogRows])
+
+  const projectByServiceKey = useMemo(() => {
+    // Catalog reconciliation may map several live service IDs back to one project,
+    // so index by service/env pairs instead of assuming a one-to-one relationship.
+    const map = new Map<string, CatalogJoinRow>()
+    for (const row of catalogRows) {
+      for (const serviceId of row.serviceIds) {
+        map.set(`${serviceId}:${row.env}`, row)
+      }
+      if (row.primaryServiceId) {
+        map.set(`${row.primaryServiceId}:${row.env}`, row)
+      }
+    }
+    return map
+  }, [catalogRows])
+
   const filteredServices = useMemo(() => {
     // Search intentionally spans both metadata and computed status fields so the
     // catalog is still useful when operators only remember symptoms or an env name.
@@ -328,6 +352,16 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
 
       if (!matchesEnvironment) {
         return false
+      }
+
+      if (projectFilter !== 'all') {
+        const belongsToProject = service.environments.some((env) => {
+          const row = projectByServiceKey.get(`${service.id}:${env}`)
+          return row?.projectId === projectFilter
+        })
+        if (!belongsToProject) {
+          return false
+        }
       }
 
       if (!query) {
@@ -349,21 +383,7 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
 
       return searchable.includes(query)
     })
-  }, [environmentFilter, search, services])
-  const projectByServiceKey = useMemo(() => {
-    // Catalog reconciliation may map several live service IDs back to one project,
-    // so index by service/env pairs instead of assuming a one-to-one relationship.
-    const map = new Map<string, CatalogJoinRow>()
-    for (const row of catalogRows) {
-      for (const serviceId of row.serviceIds) {
-        map.set(`${serviceId}:${row.env}`, row)
-      }
-      if (row.primaryServiceId) {
-        map.set(`${row.primaryServiceId}:${row.env}`, row)
-      }
-    }
-    return map
-  }, [catalogRows])
+  }, [environmentFilter, projectFilter, projectByServiceKey, search, services])
   const mismatchCount =
     (diagnostics?.catalogJoin.projectOnlyCount ?? 0) +
     (diagnostics?.catalogJoin.serviceOnlyCount ?? 0) +
@@ -475,7 +495,7 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
         </div>
       ) : null}
 
-      <div className="mb-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+      <div className="mb-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px_220px]">
         <label className="space-y-1">
           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Search</span>
           <input
@@ -496,6 +516,21 @@ export function ServicesPage({ incidentServiceAlerts = {} }: ServicesPageProps) 
             {environmentOptions.map((env) => (
               <option key={env} value={env}>
                 {env}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Project</span>
+          <select
+            value={projectFilter}
+            onChange={(event) => setProjectFilter(event.target.value)}
+            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+          >
+            <option value="all">All projects</option>
+            {projectOptions.map((pid) => (
+              <option key={pid} value={pid}>
+                {pid}
               </option>
             ))}
           </select>
