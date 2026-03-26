@@ -11,9 +11,14 @@ from urllib import parse as urlparse
 from urllib import request as urlrequest
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+from app.api.deps import (
+    get_current_user,
+    require_admin,
+    require_bearer_token,
+)
 
 from app.alerts_feed import (
     get_alertmanager_base_url,
@@ -105,23 +110,6 @@ from app.observability_config import (
     load_observability_config,
     parse_duration_token,
     render_query_template,
-)
-from app.scaffold_service import (
-    ScaffoldAddServiceInput,
-    ScaffoldBundleInput,
-    ScaffoldError,
-    ScaffoldServiceInput,
-    build_appproject_addition,
-    build_catalog_add_service_entry,
-    build_catalog_bundle_entries,
-    build_catalog_entry_addition,
-    generate_gitops_add_service_files,
-    generate_gitops_bundle_files,
-    generate_gitops_new_files,
-    update_kustomization_resources,
-    update_overlay_kustomization_patches,
-    validate_add_service,
-    validate_service_name,
 )
 from app.secret_editing import (
     SecretEditingError,
@@ -282,7 +270,6 @@ from app.runtime_config import (
 app = create_api_app()
 logger = logging.getLogger("homelab.backend.monitoring")
 
-bearer_auth = HTTPBearer(auto_error=False)
 _observability_caches = create_observability_caches()
 # These caches reduce repeated observability queries for pages that poll often.
 metrics_summary_cache = _observability_caches.metrics_summary_cache
@@ -326,67 +313,8 @@ class PortalServiceRollbackError(Exception):
         self.status_code = status_code
 
 
-def require_bearer_token(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_auth),
-) -> str:
-    # Local development uses a fixed bearer token. In deployed environments the
-    # request usually arrives with upstream auth headers instead; see get_current_user.
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing bearer token",
-        )
-
-    if credentials.credentials != "dev-static-token":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
-
-    return credentials.credentials
-
-
-def _parse_csv_header(value: str | None) -> set[str]:
-    if not value:
-        return set()
-    return {item.strip() for item in value.split(",") if item.strip()}
-
-
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_auth),
-    x_auth_user: str | None = Header(None, alias="X-Auth-Request-User"),
-    x_auth_groups: str | None = Header(None, alias="X-Auth-Request-Groups"),
-) -> tuple[str, set[str]]:
-    # Prefer identity forwarded by the auth gateway when present so admin checks
-    # can use real usernames/groups. Fall back to the dev bearer token locally.
-    if x_auth_user:
-        return x_auth_user, _parse_csv_header(x_auth_groups)
-    return require_bearer_token(credentials), set()
-
-
-def require_admin(
-    identity: tuple[str, set[str]] = Depends(get_current_user),
-) -> str:
-    user, groups = identity
-    if user == "dev-static-token":
-        return user
-
-    admin_users = _parse_csv_header(os.getenv("PORTAL_ADMIN_USERS", "admin"))
-    admin_groups = _parse_csv_header(
-        os.getenv("PORTAL_ADMIN_GROUPS", "team-admins")
-    )
-    if user in admin_users or groups.intersection(admin_groups):
-        return user
-
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="User is not authorized for admin actions",
-    )
-
-
-# Internal helpers below are roughly grouped by concern: auth/database access,
-# background reconciliation, catalog loading, GitHub/GHCR deploy workflows, live
-# runtime enrichment, and observability query helpers.
+# Auth dependencies (require_bearer_token, get_current_user, require_admin)
+# now live in app.api.deps and are re-exported into this namespace above.
 
 def _with_connection() -> psycopg.Connection:
     return psycopg.connect(get_psycopg_database_url())
@@ -3613,6 +3541,10 @@ def _get_observability_service() -> ObservabilityService:
     return get_backend_service_builders(app).build_observability_service()
 
 
+def _get_scaffold_admin_service() -> ScaffoldAdminService:
+    return get_backend_service_builders(app).build_scaffold_admin_service()
+
+
 # Primary API endpoints begin here. The order loosely follows how the frontend
 # consumes them: system/auth, metadata, deployment mutations, observability, then
 # scaffold/admin maintenance features.
@@ -4059,396 +3991,16 @@ def get_service_logs_quickview(
     )
 
 
-# Admin feature sections that follow are intentionally grouped by ticket/feature
-# lineage because they evolved incrementally and still share helper assumptions.
-
-# ---------------------------------------------------------------------------
-# T6.4.3 — Service scaffold endpoints
-# ---------------------------------------------------------------------------
-
-_WORKLOADS_KUSTOMIZATION_PATH = "environments/dev/workloads/kustomization.yaml"
-_WORKLOADS_PROD_KUSTOMIZATION_PATH = "environments/prod/workloads/kustomization.yaml"
-_WORKLOADS_APPPROJECT_PATH = "bootstrap/project-homelab.yaml"
-_WORKLOADS_CATALOG_PATH = "services.yaml"
-
-
-def _kustomization_path_for(inp: "ScaffoldServiceInput") -> str:
-    return _WORKLOADS_PROD_KUSTOMIZATION_PATH if inp.template in ("postgres", "mysql") else _WORKLOADS_KUSTOMIZATION_PATH
-
-def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInput:
-    repo_slug = _workloads_repo_slug()
-    name = payload.name.strip().lower()
-    namespace = payload.namespace.strip() or name
-    dev_host = payload.dev_host.strip() or f"{name}.dev.homelab.local"
-    prod_host = payload.prod_host.strip() or f"{name}.homelab.local"
-    base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
-    public_host = payload.public_host.strip() or f"{name}.{base_domain}"
-    image_repo = payload.image_repo.strip()
-    if payload.template == "wordpress" and not image_repo:
-        image_repo = "wordpress:latest"
-    return ScaffoldServiceInput(
-        name=name,
-        description=payload.description.strip(),
-        image_repo=image_repo,
-        repo_url=payload.repo_url.strip(),
-        owner_email=payload.owner_email.strip(),
-        owner=payload.owner.strip(),
-        template=payload.template,
-        namespace=namespace,
-        dev_host=dev_host,
-        prod_host=prod_host,
-        public_host=public_host,
-        workloads_repo_url=_workloads_gitops_repo_url(repo_slug),
-        db_username=payload.db_username.strip() or "appuser",
-        db_password=payload.db_password.strip() or "changeme",
-        db_name=payload.db_name.strip() or "appdb",
-    )
-
-
-def _build_scaffold_bundle_input(payload: ScaffoldServiceRequest) -> ScaffoldBundleInput:
-    repo_slug = _workloads_repo_slug()
-    name = payload.name.strip().lower()
-    namespace = payload.namespace.strip() or name
-    dev_host = payload.dev_host.strip() or f"{name}.dev.homelab.local"
-    prod_host = payload.prod_host.strip() or f"{name}.homelab.local"
-    base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
-    public_host = payload.public_host.strip() or f"{name}.{base_domain}"
-
-    if not payload.frontend_template:
-        raise ScaffoldError("frontendTemplate is required for bundle topologies.", status_code=422)
-    if not payload.backend_template:
-        raise ScaffoldError("backendTemplate is required for bundle topologies.", status_code=422)
-    if not payload.frontend_image_repo.strip():
-        raise ScaffoldError("frontendImageRepo is required for bundle topologies.", status_code=422)
-    if not payload.backend_image_repo.strip():
-        raise ScaffoldError("backendImageRepo is required for bundle topologies.", status_code=422)
-    if payload.topology == "frontend-backend-db" and not payload.db_template:
-        raise ScaffoldError("dbTemplate is required for frontend-backend-db topology.", status_code=422)
-
-    return ScaffoldBundleInput(
-        name=name,
-        description=payload.description.strip(),
-        owner_email=payload.owner_email.strip(),
-        owner=payload.owner.strip(),
-        namespace=namespace,
-        dev_host=dev_host,
-        prod_host=prod_host,
-        public_host=public_host,
-        workloads_repo_url=_workloads_gitops_repo_url(repo_slug),
-        repo_url=payload.repo_url.strip(),
-        topology=payload.topology,
-        frontend_template=payload.frontend_template,
-        frontend_image_repo=payload.frontend_image_repo.strip(),
-        backend_template=payload.backend_template,
-        backend_image_repo=payload.backend_image_repo.strip(),
-        db_template=payload.db_template,
-        db_username=payload.db_username.strip() or "appuser",
-        db_password=payload.db_password.strip() or "changeme",
-        db_name=payload.db_name.strip() or "appdb",
-    )
-
-
-def _build_scaffold_add_service_input(payload: ScaffoldServiceRequest) -> ScaffoldAddServiceInput:
-    repo_slug = _workloads_repo_slug()
-    project_id = payload.project_id.strip().lower()
-    service_name = payload.service_name.strip().lower()
-    if not project_id:
-        raise ScaffoldError("projectId is required for add-to-project mode.", status_code=422)
-    if not service_name:
-        raise ScaffoldError("serviceName is required for add-to-project mode.", status_code=422)
-
-    namespace = payload.namespace.strip() or project_id
-    dev_host = payload.dev_host.strip() or f"{project_id}.dev.homelab.local"
-    prod_host = payload.prod_host.strip() or f"{project_id}.homelab.local"
-    base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
-    public_host = payload.public_host.strip() or f"{project_id}.{base_domain}"
-    return ScaffoldAddServiceInput(
-        project_id=project_id,
-        service_name=service_name,
-        description=payload.description.strip(),
-        owner_email=payload.owner_email.strip(),
-        owner=payload.owner.strip(),
-        namespace=namespace,
-        template=payload.template,
-        image_repo=payload.image_repo.strip(),
-        repo_url=payload.repo_url.strip(),
-        dev_host=dev_host,
-        prod_host=prod_host,
-        public_host=public_host,
-        workloads_repo_url=_workloads_gitops_repo_url(repo_slug),
-        db_username=payload.db_username.strip() or "appuser",
-        db_password=payload.db_password.strip() or "changeme",
-        db_name=payload.db_name.strip() or "appdb",
-    )
-
-
-def _generate_scaffold_files_and_updates(
-    payload: ScaffoldServiceRequest,
-    workloads_repo: str,
-    base_branch: str,
-    git_provider: object,
-) -> tuple[dict[str, str], dict[str, str]]:
-    """Shared logic for preview and submit: generate files and catalog updates.
-
-    Returns (new_files, modified_files) where new_files are created and
-    modified_files are existing files with updated content.
-    """
-    is_add_to_project = payload.mode == "add-to-project"
-    is_bundle = not is_add_to_project and payload.topology != "single-service"
-
-    if is_add_to_project:
-        inp = _build_scaffold_add_service_input(payload)
-
-        base_kust_path = f"apps/{inp.project_id}/base/kustomization.yaml"
-        base_kustomization_raw = git_provider.read_file(workloads_repo, base_branch, base_kust_path)  # type: ignore[union-attr]
-        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
-
-        validate_add_service(inp, base_kustomization_raw, services_yaml_raw)
-
-        new_files, new_resources = generate_gitops_add_service_files(inp)
-        modified_files: dict[str, str] = {}
-
-        # Update the project's base kustomization with new resources
-        updated_base_kust = base_kustomization_raw
-        for resource in new_resources:
-            updated_base_kust = update_kustomization_resources(updated_base_kust, resource)
-        modified_files[base_kust_path] = updated_base_kust
-
-        # Update overlay kustomizations with new patch references
-        is_db = inp.template in ("postgres", "mysql")
-        if not is_db:
-            patch_filename = f"patch-{inp.service_name}-deployment.yaml"
-            for env_name in ("dev", "prod"):
-                overlay_kust_path = f"apps/{inp.project_id}/envs/{env_name}/kustomization.yaml"
-                overlay_kust_raw = git_provider.read_file(workloads_repo, base_branch, overlay_kust_path)  # type: ignore[union-attr]
-                modified_files[overlay_kust_path] = update_overlay_kustomization_patches(
-                    overlay_kust_raw, patch_filename,
-                )
-
-        modified_files[_WORKLOADS_CATALOG_PATH] = build_catalog_add_service_entry(
-            services_yaml_raw, inp,
-        )
-        return new_files, modified_files
-
-    if is_bundle:
-        inp = _build_scaffold_bundle_input(payload)
-        validate_service_name(inp.name)
-        kustomization_path = _WORKLOADS_KUSTOMIZATION_PATH
-        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)  # type: ignore[union-attr]
-        appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)  # type: ignore[union-attr]
-        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
-
-        new_files = generate_gitops_bundle_files(inp)
-        # Reuse single-service AppProject builder — same shape, just needs a dummy ScaffoldServiceInput
-        single_inp = ScaffoldServiceInput(
-            name=inp.name, description=inp.description, image_repo="",
-            repo_url=inp.repo_url, owner_email=inp.owner_email, owner=inp.owner,
-            template="python-fastapi", namespace=inp.namespace,
-            dev_host=inp.dev_host, prod_host=inp.prod_host, public_host=inp.public_host,
-            workloads_repo_url=inp.workloads_repo_url,
-        )
-        modified_files = {
-            kustomization_path: update_kustomization_resources(kustomization_raw, f"{inp.name}-app.yaml"),
-            _WORKLOADS_APPPROJECT_PATH: build_appproject_addition(appproject_raw, single_inp),
-            _WORKLOADS_CATALOG_PATH: build_catalog_bundle_entries(services_yaml_raw, inp),
-        }
-    else:
-        inp_single = _build_scaffold_input(payload)
-        validate_service_name(inp_single.name)
-        kustomization_path = _kustomization_path_for(inp_single)
-        kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)  # type: ignore[union-attr]
-        appproject_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_APPPROJECT_PATH)  # type: ignore[union-attr]
-        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
-
-        new_files = generate_gitops_new_files(inp_single)
-        modified_files = {
-            kustomization_path: update_kustomization_resources(kustomization_raw, f"{inp_single.name}-app.yaml"),
-            _WORKLOADS_APPPROJECT_PATH: build_appproject_addition(appproject_raw, inp_single),
-            _WORKLOADS_CATALOG_PATH: build_catalog_entry_addition(services_yaml_raw, inp_single),
-        }
-
-    return new_files, modified_files
-
-
-def scaffold_preview(
-    payload: ScaffoldServiceRequest,
-) -> ScaffoldPreviewResponse:
-    return _get_scaffold_admin_service().scaffold_preview(payload=payload)
-
-
-def scaffold_submit(
-    payload: ScaffoldServiceRequest,
-) -> ScaffoldSubmitResponse:
-    return _get_scaffold_admin_service().scaffold_submit(payload=payload)
-
-
-def scaffold_list_projects() -> list[ScaffoldProjectInfo]:
-    return _get_scaffold_admin_service().scaffold_list_projects()
-
-
-# ---------------------------------------------------------------------------
-# T5.3.4 — Service adoption and migration
-# ---------------------------------------------------------------------------
-
-
-def adopt_service(
-    service_id: str,
-    payload: AdoptServiceRequest,
-    _admin: str = Depends(require_admin),
-) -> AdoptServiceResponse:
-    return _get_scaffold_admin_service().adopt_service(service_id=service_id, payload=payload)
-
-
-def validate_migration(
-    payload: MigrationValidateRequest,
-    _admin: str = Depends(require_admin),
-) -> MigrationValidateResponse:
-    return _get_scaffold_admin_service().validate_migration(payload=payload)
-
-
-def consolidate_migration(
-    payload: MigrationConsolidateRequest,
-    _admin: str = Depends(require_admin),
-) -> MigrationConsolidateResponse:
-    return _get_scaffold_admin_service().consolidate_migration(payload=payload)
-
-
-# ---------------------------------------------------------------------------
-# T6.4.7 — Public hostname management
-# ---------------------------------------------------------------------------
-
-
-
-
-def _read_current_public_host_from_services_yaml(services_yaml: str, service_id: str) -> str | None:
-    """Parse services.yaml and return the current prod public_host for the given service_id, or None."""
-    import yaml as _yaml
-    try:
-        data = _yaml.safe_load(services_yaml)
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    for entry in (data.get("services") or []):
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("service_id") != service_id:
-            continue
-        for env_entry in (entry.get("envs") or []):
-            if not isinstance(env_entry, dict):
-                continue
-            if env_entry.get("name") == "prod":
-                val = env_entry.get("public_host")
-                return str(val).strip() if val else None
-    return None
-
-
-def _read_current_host_from_patch_ingress(patch_ingress: str) -> str | None:
-    """Return the current host value from a patch-ingress.yaml, or None."""
-    import re as _re
-    match = _re.search(r"^\s*-\s*host:\s*(.+)$", patch_ingress, _re.MULTILINE)
-    return match.group(1).strip() if match else None
-
-
-def _update_services_yaml_public_host(services_yaml: str, service_id: str, new_host: str) -> str:
-    """Return services.yaml content with the prod public_host for service_id set to new_host.
-
-    Adds the field if absent; replaces it if present.  The file's existing whitespace
-    and ordering are preserved for all other entries.
-    """
-    from app.scaffold_service import _yaml_string as _ys
-
-    # --- locate the service block ----------------------------------------
-    # Pattern: find `  - service_id: <id>` then, within that block, find the
-    # prod env entry and update/insert public_host.
-
-    # We work line-by-line to avoid reformatting the entire file.
-    lines = services_yaml.splitlines(keepends=True)
-    in_service = False
-    in_prod_env = False
-    service_indent = ""
-    prod_env_start = -1  # index of "      - name: prod" line
-    public_host_line_idx = -1  # index of existing "        public_host: ..." line
-
-    for i, line in enumerate(lines):
-        stripped = line.lstrip()
-        indent = line[: len(line) - len(stripped)]
-
-        if stripped.startswith(f"service_id: {service_id}"):
-            in_service = True
-            service_indent = indent
-            in_prod_env = False
-            prod_env_start = -1
-            public_host_line_idx = -1
-            continue
-
-        if in_service:
-            # Detect a new top-level service entry (same or lesser indent) — stop
-            if stripped.startswith("- service_id:") and indent == service_indent:
-                break
-
-            if stripped.startswith("- name: prod"):
-                in_prod_env = True
-                prod_env_start = i
-                continue
-
-            if in_prod_env:
-                if stripped.startswith("- name:") and not stripped.startswith("- name: prod"):
-                    # moved to next env entry
-                    in_prod_env = False
-                    continue
-                if stripped.startswith("public_host:"):
-                    public_host_line_idx = i
-                    # don't break — keep scanning so we have the full picture
-
-    new_host_line = f"        public_host: {_ys(new_host)}\n"
-
-    if public_host_line_idx >= 0:
-        lines[public_host_line_idx] = new_host_line
-    elif prod_env_start >= 0:
-        # Insert after the last field of the prod env block.
-        # Find the end of the prod env block (next "- name:" or new service entry).
-        insert_after = prod_env_start
-        for j in range(prod_env_start + 1, len(lines)):
-            stripped_j = lines[j].lstrip()
-            if stripped_j.startswith("- name:") or stripped_j.startswith("- service_id:"):
-                break
-            if stripped_j and not stripped_j.startswith("#"):
-                insert_after = j
-        lines.insert(insert_after + 1, new_host_line)
-    else:
-        # Fallback: append to end (should not happen for valid catalog)
-        lines.append(new_host_line)
-
-    return "".join(lines)
-
-
-def _update_patch_ingress_host(patch_ingress: str, new_host: str) -> str:
-    """Replace the host value in patch-ingress.yaml."""
-    import re as _re
-    return _re.sub(
-        r"^(\s*-\s*host:\s*)(.+)$",
-        lambda m: f"{m.group(1)}{new_host}",
-        patch_ingress,
-        flags=_re.MULTILINE,
-    )
-
-
-def update_service_public_hostname(
-    service_id: str,
-    payload: UpdatePublicHostnameRequest,
-    response: Response,
-    _admin: str = Depends(require_admin),
-) -> UpdatePublicHostnameResponse | None:
-    del _admin
-    return _get_scaffold_admin_service().update_service_public_hostname(
-        service_id=service_id,
-        payload=payload,
-        response=response,
-    )
-
-
 def _build_scaffold_admin_service() -> ScaffoldAdminService:
+    from app.api.endpoints.scaffold import (
+        WORKLOADS_CATALOG_PATH,
+        generate_scaffold_files_and_updates,
+        read_current_host_from_patch_ingress,
+        read_current_public_host_from_services_yaml,
+        update_patch_ingress_host,
+        update_services_yaml_public_host,
+    )
+
     return _compose_scaffold_admin_service(
         workloads_repo_slug=_workloads_repo_slug,
         workloads_base_branch=_workloads_base_branch,
@@ -4456,16 +4008,13 @@ def _build_scaffold_admin_service() -> ScaffoldAdminService:
         build_config_edit_pr_body=_build_config_edit_pr_body,
         build_secret_edit_branch_name=_build_secret_edit_branch_name,
         build_secret_edit_pr_body=_build_secret_edit_pr_body,
-        generate_scaffold_files_and_updates=_generate_scaffold_files_and_updates,
-        read_current_public_host_from_services_yaml=_read_current_public_host_from_services_yaml,
-        read_current_host_from_patch_ingress=_read_current_host_from_patch_ingress,
-        update_services_yaml_public_host=_update_services_yaml_public_host,
-        update_patch_ingress_host=_update_patch_ingress_host,
-        workloads_catalog_path=_WORKLOADS_CATALOG_PATH,
+        generate_scaffold_files_and_updates=generate_scaffold_files_and_updates,
+        read_current_public_host_from_services_yaml=read_current_public_host_from_services_yaml,
+        read_current_host_from_patch_ingress=read_current_host_from_patch_ingress,
+        update_services_yaml_public_host=update_services_yaml_public_host,
+        update_patch_ingress_host=update_patch_ingress_host,
+        workloads_catalog_path=WORKLOADS_CATALOG_PATH,
     )
-
-def _get_scaffold_admin_service() -> ScaffoldAdminService:
-    return get_backend_service_builders(app).build_scaffold_admin_service()
 
 
 configure_backend_services()

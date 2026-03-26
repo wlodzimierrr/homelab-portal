@@ -14,19 +14,19 @@ def test_scaffold_preview_returns_generated_file_changes(client, monkeypatch) ->
         "app.main.build_default_git_provider", lambda: _FakeGitProvider()
     )
     monkeypatch.setattr(
-        "app.main.generate_gitops_new_files",
+        "app.api.endpoints.scaffold.generate_gitops_new_files",
         lambda inp: {f"apps/{inp.name}/{inp.name}-app.yaml": "kind: Application\n"},
     )
     monkeypatch.setattr(
-        "app.main.update_kustomization_resources",
+        "app.api.endpoints.scaffold.update_kustomization_resources",
         lambda _raw, new_resource: f"resources:\n- {new_resource}\n",
     )
     monkeypatch.setattr(
-        "app.main.build_catalog_entry_addition",
+        "app.api.endpoints.scaffold.build_catalog_entry_addition",
         lambda _raw, inp: f"services:\n- service_id: {inp.name}\n",
     )
     monkeypatch.setattr(
-        "app.main.build_appproject_addition",
+        "app.api.endpoints.scaffold.build_appproject_addition",
         lambda _raw, inp: f"metadata:\n  name: {inp.name}\n",
     )
 
@@ -103,19 +103,19 @@ def test_scaffold_submit_opens_pr_and_returns_commit_summary(
         "app.main.build_default_git_provider", lambda: _FakeGitProvider()
     )
     monkeypatch.setattr(
-        "app.main.generate_gitops_new_files",
+        "app.api.endpoints.scaffold.generate_gitops_new_files",
         lambda inp: {f"apps/{inp.name}/{inp.name}-app.yaml": "kind: Application\n"},
     )
     monkeypatch.setattr(
-        "app.main.update_kustomization_resources",
+        "app.api.endpoints.scaffold.update_kustomization_resources",
         lambda _raw, new_resource: f"resources:\n- {new_resource}\n",
     )
     monkeypatch.setattr(
-        "app.main.build_catalog_entry_addition",
+        "app.api.endpoints.scaffold.build_catalog_entry_addition",
         lambda _raw, inp: f"services:\n- service_id: {inp.name}\n",
     )
     monkeypatch.setattr(
-        "app.main.build_appproject_addition",
+        "app.api.endpoints.scaffold.build_appproject_addition",
         lambda _raw, inp: f"metadata:\n  name: {inp.name}\n",
     )
 

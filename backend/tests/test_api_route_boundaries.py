@@ -7,6 +7,7 @@ from fastapi import Response
 from fastapi.routing import APIRoute
 
 import app.main as app_main
+from app.api.endpoints import scaffold as scaffold_endpoints
 from app.api.schemas.catalog import Project, ProjectsResponse
 from app.api.schemas.deployments import (
     DeploymentRecordResponse,
@@ -89,14 +90,14 @@ def test_split_route_modules_register_expected_main_handlers() -> None:
         (
             "/scaffold/preview",
             "POST",
-            app_main.scaffold_preview,
+            scaffold_endpoints.scaffold_preview,
             app_main.ScaffoldPreviewResponse,
             ["scaffold"],
         ),
         (
             "/services/{service_id}/public-hostname",
             "PUT",
-            app_main.update_service_public_hostname,
+            scaffold_endpoints.update_service_public_hostname,
             app_main.UpdatePublicHostnameResponse,
             ["scaffold"],
         ),
@@ -224,7 +225,7 @@ def test_scaffold_and_admin_handlers_use_current_service_builder() -> None:
     with _override_backend_service_builders(
         build_scaffold_admin_service=lambda: _FakeScaffoldAdminService()
     ):
-        preview = app_main.scaffold_preview(
+        preview = scaffold_endpoints.scaffold_preview(
             ScaffoldServiceRequest(
                 name="demo",
                 description="Demo service",
@@ -238,7 +239,7 @@ def test_scaffold_and_admin_handlers_use_current_service_builder() -> None:
             env="dev",
             current_user=("alice", {"admin"}),
         )
-        hostname = app_main.update_service_public_hostname(
+        hostname = scaffold_endpoints.update_service_public_hostname(
             "demo",
             UpdatePublicHostnameRequest(publicHost="demo.example.test"),
             Response(),
