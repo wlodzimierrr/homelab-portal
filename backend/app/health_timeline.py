@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import os
 
 
+# Timeline helpers classify point-in-time health and then compact those points
+# into UI-friendly segments for deployment and service views.
 TimelineStatus = str
 
 
@@ -73,6 +75,8 @@ def load_timeline_thresholds() -> TimelineThresholds:
     )
 
 
+# Availability and readiness are treated as required baseline signals. Missing
+# error-rate data alone does not force unknown because some workloads lack that metric.
 def classify_timeline_status(
     *,
     availability: float | None,
@@ -129,6 +133,8 @@ def classify_timeline_status(
     return "healthy", None
 
 
+# Compaction reduces noisy sample-by-sample output into contiguous segments and
+# inserts explicit unknown bridges when sampling gaps are too large to trust.
 def compact_timeline_points(
     points: list[TimelinePoint],
     *,

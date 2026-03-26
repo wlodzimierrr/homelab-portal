@@ -3,12 +3,16 @@ from datetime import datetime, timezone
 import pytest
 
 from app import deployment_reconciler
+from app.api.schemas.catalog import ServiceDetailResponse
 from app.deployment_locks import DeploymentLockConflictError
 from app.main import (
     CreateDeploymentRecordRequest,
     _upsert_deployment_record_row,
+    app,
+    configure_backend_services,
     get_service,
 )
+from app.services.composition import get_backend_service_builders
 
 
 def test_upsert_deployment_record_row_syncs_pending_lock(monkeypatch) -> None:
@@ -171,6 +175,7 @@ def test_upsert_deployment_record_row_surfaces_lock_conflict(monkeypatch) -> Non
 
 def test_get_service_includes_active_deployment_lock(monkeypatch) -> None:
     monkeypatch.setattr("app.main._maybe_reconcile_recent_deployments", lambda **_kwargs: None)
+    monkeypatch.setattr("app.main._load_project_catalog_rows", lambda **_kwargs: [])
     monkeypatch.setattr(
         "app.main._load_service_rows",
         lambda **_kwargs: [
@@ -210,6 +215,52 @@ def test_get_service_includes_active_deployment_lock(monkeypatch) -> None:
 
     assert response.deployment_lock is not None
     assert response.deployment_lock.request_key == "gitops-pr:100:homelab-api:dev:deploy"
+
+
+def test_configure_backend_services_allows_catalog_service_override() -> None:
+    original_builders = get_backend_service_builders(app)
+
+    class _FakeCatalogService:
+        def get_service(self, *, service_id: str, env: str | None) -> ServiceDetailResponse:
+            return ServiceDetailResponse(
+                id=service_id,
+                name="fake-service",
+                namespace="fake-ns",
+                env=env or "dev",
+                appLabel="fake-app",
+                argoAppName=None,
+                version=None,
+                health=None,
+                sync=None,
+                source="test",
+                sourceRef="builder-override",
+                lastSyncedAt=None,
+                observabilityMode=None,
+                publicHost=None,
+                deploymentLock=None,
+            )
+
+    try:
+        configure_backend_services(
+            app,
+            build_catalog_service=lambda: _FakeCatalogService(),  # type: ignore[arg-type]
+            build_deployment_service=original_builders.build_deployment_service,
+            build_observability_service=original_builders.build_observability_service,
+            build_scaffold_admin_service=original_builders.build_scaffold_admin_service,
+        )
+
+        response = get_service("fake-service", env="dev", _=("alice", {"admin"}))
+
+        assert response.source_ref == "builder-override"
+        assert response.namespace == "fake-ns"
+    finally:
+        configure_backend_services(
+            app,
+            build_catalog_service=original_builders.build_catalog_service,
+            build_deployment_service=original_builders.build_deployment_service,
+            build_observability_service=original_builders.build_observability_service,
+            build_scaffold_admin_service=original_builders.build_scaffold_admin_service,
+        )
 
 
 def test_reconciler_only_updates_lock_for_latest_service_event(monkeypatch) -> None:

@@ -7,6 +7,8 @@ import psycopg
 from psycopg.types.json import Json
 
 
+# Deployment locks are the short-lived coordination layer that prevents two portal
+# mutations from racing against the same service/environment.
 ACTIVE_DEPLOYMENT_LOCK_STATUSES = ("pending", "deploying")
 
 
@@ -31,6 +33,8 @@ class DeploymentLockRow(TypedDict, total=False):
     updatedAt: str
 
 
+# Conflicts return the active lock payload so the API can explain who/what owns
+# the in-flight mutation instead of replying with a bare 409.
 class DeploymentLockConflictError(Exception):
     def __init__(self, active_lock: DeploymentLockRow):
         super().__init__("Deployment lock is already active for this service/environment")
@@ -175,6 +179,8 @@ def _resolved_request_key(
     return f"deployment:{deployment_id}"
 
 
+# Lock acquisition cleans up expired rows first, then treats matching request keys
+# as idempotent retries while rejecting genuinely competing mutations.
 def acquire_deployment_lock(
     conn: psycopg.Connection,
     *,
@@ -342,6 +348,8 @@ def release_deployment_lock(
         return (cur.rowcount or 0) > 0
 
 
+# Reconciliation keeps locks aligned with deployment-record state so finished or
+# failed rows do not leave stale lock entries behind.
 def sync_deployment_lock_for_deployment_row(
     conn: psycopg.Connection,
     deployment_row: dict[str, object],

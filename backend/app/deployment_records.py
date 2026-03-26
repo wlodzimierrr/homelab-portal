@@ -8,6 +8,8 @@ import psycopg
 from psycopg.types.json import Json
 
 
+# Deployment records are the durable audit trail behind portal mutations and later
+# observability views. They persist request metadata, rollout state, and evidence windows.
 ACTION_TYPES = ("deploy", "promote", "rollback", "config-change")
 DEPLOYMENT_STATUSES = ("pending", "deploying", "live", "failed")
 DEPLOYMENT_RESULTS = ("success", "failure", "cancelled", "skipped")
@@ -72,6 +74,8 @@ def _serialize_datetime(value: object) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
+# Database rows are normalized into one API-facing shape here so callers do not
+# need to care about column ordering or timestamp serialization details.
 def _row_from_tuple(row: tuple[object, ...]) -> DeploymentRecordRow:
     metadata = row[22] if isinstance(row[22], dict) else {}
     return {
@@ -235,6 +239,8 @@ def get_latest_deployment_record_for_service(
     return _row_from_tuple(row)
 
 
+# Upserts key off request_key when present so repeated reconciliation passes can
+# refine the same logical deployment instead of creating duplicate history rows.
 def upsert_deployment_record(
     conn: psycopg.Connection,
     *,
@@ -472,6 +478,8 @@ def upsert_deployment_record(
     return _row_from_tuple(row)
 
 
+# Observability snapshots preserve comparison data near deployment time so the UI
+# can still show impact later after Prometheus retention windows have expired.
 def store_observability_snapshot(
     conn: psycopg.Connection,
     deployment_id: str,

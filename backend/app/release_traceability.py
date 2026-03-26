@@ -6,6 +6,8 @@ import os
 from typing import TypedDict
 from app.service_identity import normalize_service_id
 
+# Release traceability joins three imperfect sources: project registry rows, CI
+# metadata, and Argo metadata. The result favors determinism over completeness.
 logger = logging.getLogger("homelab.backend.release_traceability")
 
 
@@ -99,6 +101,8 @@ def load_argo_metadata_rows() -> list[ArgoMetadataRow]:
     return [row for row in _read_env_json_rows("RELEASE_ARGO_METADATA_JSON")]
 
 
+# Drift is intentionally conservative: explicit out-of-sync always wins, then
+# revision/image mismatches apply only when both sides of the comparison exist.
 def compute_is_drifted(
     *,
     sync_status: str,
@@ -122,6 +126,8 @@ def compute_is_drifted(
     return False
 
 
+# Matching first tries exact service/env keys, then falls back to normalized ids
+# so older or inconsistent naming can still produce useful release rows.
 def build_release_traceability_rows(
     *,
     project_rows: list[ProjectRow],

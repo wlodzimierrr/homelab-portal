@@ -6,6 +6,8 @@ import os
 import re
 
 
+# Observability config centralizes env-driven limits and query templates so the
+# API can stay flexible without hardcoding Prometheus/Loki assumptions everywhere.
 TEMPLATE_TOKEN_REGEX = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 PROMQL_REGEX_META = re.compile(r'([\\.^$|?*+()[\]{}])')
 
@@ -59,6 +61,8 @@ def _read_csv(name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
     return values or fallback
 
 
+# Duration parsing is intentionally narrow; only the tokens emitted by portal UI
+# controls and env config are accepted.
 def parse_duration_token(value: str) -> timedelta:
     if not value:
         raise ValueError("Duration token is required")
@@ -71,6 +75,8 @@ def parse_duration_token(value: str) -> timedelta:
     raise ValueError(f"Unsupported duration token: {value}")
 
 
+# Query rendering fails fast when a required variable is missing so operators get
+# a clear config error instead of silently broad or empty monitoring queries.
 def render_query_template(template: str, values: dict[str, str], context: str) -> str:
     missing: set[str] = set()
 
@@ -93,6 +99,8 @@ def escape_promql_regex_literal(value: str) -> str:
     return PROMQL_REGEX_META.sub(r"\\\1", value)
 
 
+# The loader clamps env-driven limits to keep untrusted config from creating huge
+# query windows or runaway response sizes.
 def load_observability_config() -> ObservabilityConfig:
     return ObservabilityConfig(
         metrics_allowed_ranges=_read_csv("OBS_METRICS_ALLOWED_RANGES", ("1h", "24h", "7d")),

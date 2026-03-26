@@ -7,6 +7,8 @@ import os
 from typing import Any
 
 
+# Alert feed helpers normalize Alertmanager payloads into a smaller portal-facing
+# model with stable severity, identity, and deduplicated ids.
 @dataclass(frozen=True)
 class ActiveAlert:
     id: str
@@ -42,6 +44,8 @@ def warning_severity_values() -> set[str]:
     )
 
 
+# Only severities the portal understands are retained; unknown severities are
+# dropped so the UI does not imply confidence in arbitrary upstream labels.
 def map_alert_severity(raw: str | None) -> str | None:
     if not raw:
         return None
@@ -62,6 +66,8 @@ def _first_label(labels: dict[str, str], keys: tuple[str, ...]) -> str | None:
     return None
 
 
+# Service identity is heuristic because alert labels vary across exporters and
+# rules. The portal checks several common label conventions in priority order.
 def infer_service_id(labels: dict[str, str]) -> str | None:
     return _first_label(
         labels,
@@ -119,6 +125,8 @@ def _to_str_dict(raw: Any) -> dict[str, str]:
     return output
 
 
+# Suppressed alerts are intentionally excluded so the portal reflects operator-
+# visible noise, not every rule evaluation known to Alertmanager.
 def normalize_active_alerts(payload: Any) -> list[ActiveAlert]:
     if not isinstance(payload, list):
         return []

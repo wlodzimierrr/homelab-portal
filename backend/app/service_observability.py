@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Literal, TypedDict
 
 
+# These helpers explain whether missing metrics are expected for a service's
+# declared observability mode or indicate a likely scrape/routing problem.
 ObservabilityMode = Literal["app-native", "ingress-derived", "no-http"]
 ObservabilityAuthority = Literal["app", "ingress", "none"]
 ObservabilityStatus = Literal[
@@ -81,6 +83,8 @@ def _label_metrics(fields: list[str]) -> str:
     return ", ".join(labels[:-1]) + f" and {labels[-1]}"
 
 
+# Diagnostics are written for UI consumption: they produce a stable status/reason
+# pair plus an operator-facing message that can be shown directly in the portal.
 def build_service_metrics_observability_diagnostics(
     *,
     mode: str | None,

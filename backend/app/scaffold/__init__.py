@@ -1,0 +1,1 @@
+"""Scaffold generation package."""

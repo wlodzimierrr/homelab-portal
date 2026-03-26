@@ -4,9 +4,7 @@ import logging
 import math
 import os
 import re
-from threading import Event, Thread
-import time
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from uuid import uuid4
 from urllib import error as urlerror
 from urllib import parse as urlparse
@@ -15,7 +13,7 @@ from urllib import request as urlrequest
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.alerts_feed import (
     get_alertmanager_base_url,
@@ -102,7 +100,6 @@ from app.service_observability import (
 )
 from app.service_identity_validation import build_service_identity_diagnostics
 from app.service_registry_sync import _kube_get_json, sync_service_registry_from_cluster
-from app.observability_cache import TTLCache
 from app.observability_config import (
     escape_promql_regex_literal,
     load_observability_config,
@@ -134,7 +131,30 @@ from app.secret_editing import (
     resolve_secret_edit_target,
     update_secret_manifest_document,
 )
+from app.services.deployment_service import DeploymentService
+from app.services.builders import (
+    build_catalog_service as _compose_catalog_service,
+    build_deployment_service as _compose_deployment_service,
+    build_observability_service as _compose_observability_service,
+    build_scaffold_admin_service as _compose_scaffold_admin_service,
+)
+from app.services.catalog_service import CatalogService
+from app.services.composition import (
+    BackendServiceBuilders,
+    configure_backend_service_builders as _configure_backend_service_builders,
+    get_backend_service_builders,
+)
+from app.services.observability_service import ObservabilityService
+from app.services.scaffold_admin_service import ScaffoldAdminService
+from app.services.startup_jobs import register_deployment_reconciler_jobs
 from app.api.schemas.auth import LoginRequest, LoginResponse
+from app.api.bootstrap import (
+    clear_observability_caches,
+    create_api_app,
+    create_http_metrics_state,
+    create_observability_caches,
+    install_http_metrics_middleware,
+)
 from app.api.schemas.catalog import (
     CatalogJoinDiagnosticsResponse,
     CatalogJoinResponse,
@@ -219,6 +239,30 @@ from app.api.schemas.scaffold import (
     ScaffoldServiceRequest,
     ScaffoldSubmitResponse,
 )
+from app.runtime_config import (
+    BRANCH_SAFE_FRAGMENT_RE,
+    DEFAULT_PORTAL_IMAGES_LOOKBACK,
+    SHA_IMAGE_TAG_RE,
+    deployment_lock_stale_timeout_seconds as _deployment_lock_stale_timeout_seconds,
+    deployment_reconciler_enabled as _deployment_reconciler_enabled,
+    deployment_reconciler_gitops_repo_slug as _deployment_reconciler_gitops_repo_slug,
+    deployment_reconciler_interval_seconds as _deployment_reconciler_interval_seconds,
+    deployment_reconciler_pr_comments_enabled as _deployment_reconciler_pr_comments_enabled,
+    deployment_reconciler_read_ttl_seconds as _deployment_reconciler_read_ttl_seconds,
+    deployment_reconciler_readthrough_enabled as _deployment_reconciler_readthrough_enabled,
+    dev_deploy_target as _dev_deploy_target,
+    ghcr_token as _ghcr_token,
+    github_api_base_url as _github_api_base_url,
+    github_api_token_for_path as _github_api_token_for_path,
+    portal_images_workflow_file as _portal_images_workflow_file,
+    portal_images_workflow_ref as _portal_images_workflow_ref,
+    portal_repo_slug as _portal_repo_slug,
+    promote_to_prod_target as _promote_to_prod_target,
+    rollback_target as _rollback_target,
+    workloads_base_branch as _workloads_base_branch,
+    workloads_gitops_repo_url as _workloads_gitops_repo_url,
+    workloads_repo_slug as _workloads_repo_slug,
+)
 
 # FastAPI entrypoint for the portal backend.
 #
@@ -227,160 +271,24 @@ from app.api.schemas.scaffold import (
 # engineer needs to reason about first: request lifecycle, auth assumptions, and
 # the endpoints that other portal layers depend on most heavily.
 
-app = FastAPI(title="Homelab Backend API", version="0.1.0")
+app = create_api_app()
 logger = logging.getLogger("homelab.backend.monitoring")
 
 bearer_auth = HTTPBearer(auto_error=False)
+_observability_caches = create_observability_caches()
 # These caches reduce repeated observability queries for pages that poll often.
-metrics_summary_cache = TTLCache()
-timeline_cache = TTLCache()
-logs_quickview_cache = TTLCache()
-alerts_cache = TTLCache()
-deployment_history_cache = TTLCache()
-deployment_reconcile_cache = TTLCache()
-metrics_namespace_label = os.getenv("OBS_METRICS_NAMESPACE", os.getenv("POD_NAMESPACE", "default"))
-metrics_app_label = os.getenv("OBS_METRICS_APP_LABEL", "homelab-api")
-deployment_reconciler_stop = Event()
-deployment_reconciler_thread: Thread | None = None
-http_requests_total = Counter(
-    "http_requests_total",
-    "Total HTTP requests handled by the homelab API.",
-    labelnames=("namespace", "app", "method", "path", "status"),
-)
-http_request_duration_seconds = Histogram(
-    "http_request_duration_seconds",
-    "HTTP request latency for the homelab API.",
-    labelnames=("namespace", "app", "method", "path"),
-)
-
-# Portal deployment workflows are intentionally allowlisted to a small set of
-# repositories and Argo app targets. These constants back the GitHub/PR-driven
-# deploy, promote, and rollback endpoints later in the file.
-DEFAULT_GITHUB_OWNER = "wlodzimierrr"
-DEFAULT_PORTAL_REPO = "homelab-portal"
-DEFAULT_WORKLOADS_REPO = "homelab-workloads"
-DEFAULT_PORTAL_IMAGES_WORKFLOW_FILE = "portal-images.yml"
-DEFAULT_PORTAL_IMAGES_WORKFLOW_REF = "main"
-DEFAULT_PORTAL_IMAGES_LOOKBACK = 20
-SHA_IMAGE_TAG_RE = re.compile(r"^sha-([0-9a-f]{40})$")
-BRANCH_SAFE_FRAGMENT_RE = re.compile(r"[^a-z0-9.-]+")
-DEV_DEPLOY_TARGETS: dict[str, dict[str, object]] = {
-    "homelab-api": {
-        "image_repo": "ghcr.io/wlodzimierrr/homelab-api",
-        "argo_app": "homelab-api-dev",
-        "patch_files": [
-            "apps/homelab-api/envs/dev/patch-deployment.yaml",
-            "apps/homelab-api/envs/dev/patch-migration-job.yaml",
-            "apps/homelab-api/envs/dev/patch-catalog-sync-cronjob.yaml",
-        ],
-    },
-    "homelab-web": {
-        "image_repo": "ghcr.io/wlodzimierrr/homelab-web",
-        "argo_app": "homelab-web-dev",
-        "patch_files": [
-            "apps/homelab-web/envs/dev/patch-deployment.yaml",
-        ],
-    },
-}
-PROMOTE_TO_PROD_TARGETS: dict[str, dict[str, object]] = {
-    "homelab-api": {
-        "image_repo": "ghcr.io/wlodzimierrr/homelab-api",
-        "source_file": "apps/homelab-api/envs/dev/patch-deployment.yaml",
-        "argo_app": "homelab-api-prod",
-        "patch_files": [
-            "apps/homelab-api/envs/prod/patch-deployment.yaml",
-            "apps/homelab-api/envs/prod/patch-migration-job.yaml",
-            "apps/homelab-api/envs/prod/patch-catalog-sync-cronjob.yaml",
-        ],
-    },
-    "homelab-web": {
-        "image_repo": "ghcr.io/wlodzimierrr/homelab-web",
-        "source_file": "apps/homelab-web/envs/dev/patch-deployment.yaml",
-        "argo_app": "homelab-web-prod",
-        "patch_files": [
-            "apps/homelab-web/envs/prod/patch-deployment.yaml",
-        ],
-    },
-}
+metrics_summary_cache = _observability_caches.metrics_summary_cache
+timeline_cache = _observability_caches.timeline_cache
+logs_quickview_cache = _observability_caches.logs_quickview_cache
+alerts_cache = _observability_caches.alerts_cache
+deployment_history_cache = _observability_caches.deployment_history_cache
+deployment_reconcile_cache = _observability_caches.deployment_reconcile_cache
+_http_metrics_state = create_http_metrics_state()
+install_http_metrics_middleware(app, _http_metrics_state)
 
 
 def clear_observability_caches_for_tests() -> None:
-    metrics_summary_cache.clear()
-    timeline_cache.clear()
-    logs_quickview_cache.clear()
-    alerts_cache.clear()
-    deployment_history_cache.clear()
-    deployment_reconcile_cache.clear()
-
-
-@app.middleware("http")
-async def observe_http_requests(request, call_next):
-    # Avoid self-observing the Prometheus scrape endpoint to keep request metrics
-    # focused on actual API traffic and prevent recursion/noise.
-    if request.url.path == "/metrics":
-        return await call_next(request)
-
-    started = time.perf_counter()
-    status_code = 500
-    try:
-        response = await call_next(request)
-        status_code = response.status_code
-        return response
-    finally:
-        labels = {
-            "namespace": metrics_namespace_label,
-            "app": metrics_app_label,
-            "method": request.method,
-            "path": request.url.path,
-        }
-        http_request_duration_seconds.labels(**labels).observe(time.perf_counter() - started)
-        http_requests_total.labels(
-            **labels,
-            status=str(status_code),
-        ).inc()
-
-
-@app.on_event("startup")
-def start_deployment_reconciler_loop() -> None:
-    global deployment_reconciler_thread
-
-    if not _deployment_reconciler_enabled():
-        return
-    if deployment_reconciler_thread and deployment_reconciler_thread.is_alive():
-        return
-
-    deployment_reconciler_stop.clear()
-
-    # Reconciliation runs in-process as a best-effort background loop. The API
-    # stays available even if one iteration fails.
-    def _run() -> None:
-        logger.info(
-            "deployment_reconciler_started interval_seconds=%s",
-            _deployment_reconciler_interval_seconds(),
-        )
-        while not deployment_reconciler_stop.is_set():
-            try:
-                _reconcile_recent_deployment_activity()
-            except Exception as exc:  # pragma: no cover - live background loop only
-                logger.warning("deployment_reconciler_iteration_failed error=%s", exc)
-            deployment_reconciler_stop.wait(_deployment_reconciler_interval_seconds())
-
-    deployment_reconciler_thread = Thread(
-        target=_run,
-        name="deployment-reconciler",
-        daemon=True,
-    )
-    deployment_reconciler_thread.start()
-
-
-@app.on_event("shutdown")
-def stop_deployment_reconciler_loop() -> None:
-    global deployment_reconciler_thread
-
-    deployment_reconciler_stop.set()
-    if deployment_reconciler_thread and deployment_reconciler_thread.is_alive():
-        deployment_reconciler_thread.join(timeout=1.0)
-    deployment_reconciler_thread = None
+    clear_observability_caches(_observability_caches)
 
 
 # Backend request/response contracts now live in app.api.schemas.* so route
@@ -476,10 +384,6 @@ def _with_connection() -> psycopg.Connection:
     return psycopg.connect(get_psycopg_database_url())
 
 
-def _deployment_lock_stale_timeout_seconds() -> int:
-    return max(60, int(os.getenv("DEPLOYMENT_LOCK_STALE_TIMEOUT_SECONDS", "1800")))
-
-
 def _list_deployment_records_for_service(
     service_id: str,
     env: str | None = None,
@@ -567,38 +471,6 @@ def _upsert_deployment_record_row(
     deployment_reconcile_cache.clear()
     return row
 
-
-def _parse_bool_env(var_name: str, default: bool) -> bool:
-    raw = os.getenv(var_name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _deployment_reconciler_enabled() -> bool:
-    default_enabled = bool(os.getenv("KUBERNETES_SERVICE_HOST"))
-    return _parse_bool_env("DEPLOYMENT_RECONCILER_ENABLED", default_enabled)
-
-
-def _deployment_reconciler_readthrough_enabled() -> bool:
-    return _parse_bool_env(
-        "DEPLOYMENT_RECONCILER_READTHROUGH_ENABLED",
-        _deployment_reconciler_enabled(),
-    )
-
-
-def _deployment_reconciler_interval_seconds() -> int:
-    return max(15, int(os.getenv("DEPLOYMENT_RECONCILER_INTERVAL_SECONDS", "60")))
-
-
-def _deployment_reconciler_read_ttl_seconds() -> int:
-    return max(0, int(os.getenv("DEPLOYMENT_RECONCILER_READ_TTL_SECONDS", "30")))
-
-
-def _deployment_reconciler_pr_comments_enabled() -> bool:
-    return _parse_bool_env("DEPLOYMENT_RECONCILER_PR_COMMENTS_ENABLED", False)
-
-
 def _reconcile_recent_deployment_activity(
     *,
     service_id: str | None = None,
@@ -606,9 +478,7 @@ def _reconcile_recent_deployment_activity(
 ) -> DeploymentReconcileResponse:
     pr_commenter = None
     if _deployment_reconciler_pr_comments_enabled():
-        owner = os.getenv("DEPLOYMENT_RECONCILER_GITHUB_OWNER", "wlodzimierrr").strip() or "wlodzimierrr"
-        gitops_repo = os.getenv("DEPLOYMENT_RECONCILER_GITOPS_REPO", "homelab-workloads").strip() or "homelab-workloads"
-        pr_commenter = make_pr_comment_poster(f"{owner}/{gitops_repo}")
+        pr_commenter = make_pr_comment_poster(_deployment_reconciler_gitops_repo_slug())
 
     with _with_connection() as conn:
         cleanup_stale_deployment_locks(conn)
@@ -625,6 +495,17 @@ def _reconcile_recent_deployment_activity(
         )
     deployment_history_cache.clear()
     return DeploymentReconcileResponse(**result)
+
+
+# Startup/shutdown hooks stay explicit, but the thread lifecycle now lives in a
+# small service module so route composition does not own background job state.
+register_deployment_reconciler_jobs(
+    app,
+    enabled_fn=_deployment_reconciler_enabled,
+    interval_seconds_fn=_deployment_reconciler_interval_seconds,
+    reconcile_fn=_reconcile_recent_deployment_activity,
+    logger=logger,
+)
 
 
 def _maybe_reconcile_recent_deployments(
@@ -953,69 +834,6 @@ def _extract_version_from_image_ref(image_ref: str | None) -> str | None:
     return trimmed
 
 
-# GitHub and GHCR helpers centralize environment-driven repository/token lookup so
-# deploy/promote/rollback flows all resolve the same repos, branches, and packages.
-
-def _portal_repo_slug() -> str:
-    configured = os.getenv("PORTAL_DEPLOY_PORTAL_REPO", "").strip()
-    if configured:
-        return configured
-    actions_repo = os.getenv("PORTAL_GITHUB_ACTIONS_REPO", "").strip()
-    if actions_repo:
-        return actions_repo
-    return f"{DEFAULT_GITHUB_OWNER}/{DEFAULT_PORTAL_REPO}"
-
-
-def _workloads_repo_slug() -> str:
-    configured = os.getenv("PORTAL_DEPLOY_GITOPS_REPO", "").strip()
-    if configured:
-        return configured
-    reconciler_repo = os.getenv("DEPLOYMENT_RECONCILER_GITOPS_REPO", "").strip()
-    if reconciler_repo:
-        owner = os.getenv("DEPLOYMENT_RECONCILER_GITHUB_OWNER", DEFAULT_GITHUB_OWNER).strip() or DEFAULT_GITHUB_OWNER
-        return f"{owner}/{reconciler_repo}"
-    return f"{DEFAULT_GITHUB_OWNER}/{DEFAULT_WORKLOADS_REPO}"
-
-
-def _workloads_base_branch() -> str:
-    configured = os.getenv("PORTAL_DEPLOY_GITOPS_BASE_BRANCH", "").strip()
-    return configured or DEFAULT_PORTAL_IMAGES_WORKFLOW_REF
-
-
-def _portal_images_workflow_file() -> str:
-    configured = os.getenv("PORTAL_DEPLOY_WORKFLOW_FILE", "").strip()
-    return configured or DEFAULT_PORTAL_IMAGES_WORKFLOW_FILE
-
-
-def _portal_images_workflow_ref() -> str:
-    configured = os.getenv("PORTAL_DEPLOY_WORKFLOW_REF", "").strip()
-    return configured or DEFAULT_PORTAL_IMAGES_WORKFLOW_REF
-
-
-def _github_metadata_token() -> str | None:
-    for name in (
-        "PORTAL_GITHUB_ACTIONS_TOKEN",
-        "GITHUB_API_TOKEN",
-        "GITHUB_READ_TOKEN",
-        "GITHUB_TOKEN",
-    ):
-        token = os.getenv(name, "").strip()
-        if token:
-            return token
-    return None
-
-
-def _github_api_token_for_path(path: str) -> str | None:
-    normalized = path.lstrip("/")
-    if "/packages/container/" in normalized:
-        return _ghcr_token()
-    return _github_metadata_token()
-
-
-def _github_api_base_url() -> str:
-    return os.getenv("GITHUB_API_BASE_URL", "https://api.github.com").rstrip("/")
-
-
 def _github_api_json(path: str, *, timeout_seconds: float = 10.0) -> object:
     request = urlrequest.Request(
         f"{_github_api_base_url()}/{path.lstrip('/')}",
@@ -1043,54 +861,6 @@ def _github_api_json(path: str, *, timeout_seconds: float = 10.0) -> object:
     if not raw:
         return {}
     return json.loads(raw)
-
-
-# These helpers enforce which services are portal-managed for deploy/promote/rollback
-# operations instead of letting any arbitrary service_id mutate GitOps overlays.
-
-def _dev_deploy_target(service_id: str) -> dict[str, object]:
-    target = DEV_DEPLOY_TARGETS.get(service_id)
-    if target is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Service {service_id!r} does not support deploy-to-dev.",
-        )
-    return target
-
-
-def _promote_to_prod_target(service_id: str) -> dict[str, object]:
-    target = PROMOTE_TO_PROD_TARGETS.get(service_id)
-    if target is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Service {service_id!r} does not support promote-to-prod.",
-        )
-    return target
-
-
-def _rollback_target(service_id: str, target_environment: str) -> dict[str, object]:
-    if target_environment == "dev":
-        target = _dev_deploy_target(service_id)
-        return {
-            "image_repo": str(target["image_repo"]),
-            "patch_files": [str(path) for path in target["patch_files"]],
-            "argo_app": str(target["argo_app"]),
-            "target_environment": "dev",
-        }
-
-    if target_environment == "prod":
-        target = _promote_to_prod_target(service_id)
-        return {
-            "image_repo": str(target["image_repo"]),
-            "patch_files": [str(path) for path in target["patch_files"]],
-            "argo_app": str(target["argo_app"]),
-            "target_environment": "prod",
-        }
-
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"Unsupported rollback target environment {target_environment!r}.",
-    )
 
 
 def _build_service_image_ref(service_id: str, tag: str) -> str:
@@ -1126,20 +896,6 @@ def _build_commit_url(commit_sha: str | None) -> str | None:
     if not isinstance(commit_sha, str) or not commit_sha.strip():
         return None
     return f"https://github.com/{_portal_repo_slug()}/commit/{commit_sha.strip()}"
-
-
-def _ghcr_token() -> str | None:
-    for name in (
-        "GHCR_READ_TOKEN",
-        "GITHUB_API_TOKEN",
-        "GITHUB_READ_TOKEN",
-        "PORTAL_GITHUB_ACTIONS_TOKEN",
-        "GITHUB_TOKEN",
-    ):
-        token = os.getenv(name, "").strip()
-        if token:
-            return token
-    return None
 
 
 def _parse_ghcr_image_repo(image_repo: str) -> tuple[str, str]:
@@ -2701,6 +2457,53 @@ def _build_deployment_lock_response(lock_row: DeploymentLockRow | None) -> Deplo
     )
 
 
+def _build_deployment_service() -> DeploymentService:
+    return _compose_deployment_service(
+        get_deployment_record_by_id=_get_deployment_record_by_id,
+        maybe_reconcile_recent_deployments=_maybe_reconcile_recent_deployments,
+        list_deployment_records_for_service=_list_deployment_records_for_service,
+        load_service_rows=_load_service_rows,
+        select_preferred_service_row=_select_preferred_service_row,
+        build_deployment_record_response=_build_deployment_record_response,
+        upsert_deployment_record_row=_upsert_deployment_record_row,
+        build_deployment_lock_response=_build_deployment_lock_response,
+        get_active_deployment_lock=_get_active_deployment_lock,
+        with_connection=_with_connection,
+        deployment_history_cache=deployment_history_cache,
+        deployment_reconcile_cache=deployment_reconcile_cache,
+        logger=logger,
+        dev_deploy_target=_dev_deploy_target,
+        workloads_repo_slug=_workloads_repo_slug,
+        workloads_base_branch=_workloads_base_branch,
+        resolve_latest_portal_image_candidate=_resolve_latest_portal_image_candidate,
+        load_dev_overlay_update_plan=_load_dev_overlay_update_plan,
+        extract_version_from_image_ref=_extract_version_from_image_ref,
+        build_compare_url_for_portal_tags=_build_compare_url_for_portal_tags,
+        build_dev_deploy_branch_name=_build_dev_deploy_branch_name,
+        build_dev_deploy_pr_body=_build_dev_deploy_pr_body,
+        promote_to_prod_target=_promote_to_prod_target,
+        load_promote_to_prod_update_plan=_load_promote_to_prod_update_plan,
+        ensure_ghcr_tag_exists=_ensure_ghcr_tag_exists,
+        extract_sha_from_tag=_extract_sha_from_tag,
+        build_prod_promote_branch_name=_build_prod_promote_branch_name,
+        build_promote_to_prod_pr_body=_build_promote_to_prod_pr_body,
+        rollback_target=_rollback_target,
+        extract_image_ref_from_overlay=_extract_image_ref_from_overlay,
+        list_service_rollback_candidates=_list_service_rollback_candidates,
+        load_service_rollback_update_plan=_load_service_rollback_update_plan,
+        build_service_rollback_branch_name=_build_service_rollback_branch_name,
+        build_service_rollback_pr_body=_build_service_rollback_pr_body,
+        select_latest_deployment_info_record=_select_latest_deployment_info_record,
+        extract_image_digest=_extract_image_digest,
+        deployment_record_timestamp=_deployment_record_timestamp,
+        build_commit_url=_build_commit_url,
+        build_package_url_from_image_ref=_build_package_url_from_image_ref,
+        deploy_to_dev_error_type=PortalDeployToDevError,
+        promote_to_prod_error_type=PortalPromoteToProdError,
+        service_rollback_error_type=PortalServiceRollbackError,
+    )
+
+
 def _query_prometheus_scalar(
     query: str,
     metric_name: str,
@@ -3707,16 +3510,105 @@ def _build_deployment_logs_response(
     )
 
 
+def _build_observability_service() -> ObservabilityService:
+    return _compose_observability_service(
+        resolve_deployment_observability_context=_resolve_deployment_observability_context,
+        build_no_window_metrics_response=_build_no_window_metrics_response,
+        build_no_window_timeline_response=_build_no_window_timeline_response,
+        build_no_window_logs_response=_build_no_window_logs_response,
+        build_deployment_metrics_response=_build_deployment_metrics_response,
+        build_deployment_timeline_response=_build_deployment_timeline_response,
+        build_deployment_logs_response=_build_deployment_logs_response,
+        extract_provider_failure=_extract_provider_failure,
+        build_provider_error_metrics_response=_build_provider_error_metrics_response,
+        build_provider_error_timeline_response=_build_provider_error_timeline_response,
+        build_provider_error_logs_response=_build_provider_error_logs_response,
+        validate_selected_range=_validate_selected_range,
+        resolve_service_monitoring_context=_resolve_service_monitoring_context,
+        resolve_service_monitoring_metadata=_resolve_service_monitoring_metadata,
+        build_service_metrics_queries=_build_service_metrics_queries,
+        build_metrics_observability_diagnostics=_build_metrics_observability_diagnostics,
+        build_metric_trend_series=_build_metric_trend_series,
+        validate_step_for_range=_validate_step_for_range,
+        build_health_timeline_queries=_build_health_timeline_queries,
+        query_prometheus_scalar=_query_prometheus_scalar,
+        query_prometheus_range=_query_prometheus_range,
+        query_loki_range=_query_loki_range,
+        query_alertmanager_active_alerts=_query_alertmanager_active_alerts,
+        select_timeline_step_seconds=_select_timeline_step_seconds,
+        effective_limit=_effective_limit,
+        enrich_release_rows_with_live_runtime=_enrich_release_rows_with_live_runtime,
+        load_project_rows=_load_project_rows,
+        metrics_summary_cache=metrics_summary_cache,
+        timeline_cache=timeline_cache,
+        logs_quickview_cache=logs_quickview_cache,
+        logger=logger,
+    )
+
+
+def _build_catalog_service() -> CatalogService:
+    return _compose_catalog_service(
+        load_project_rows=_load_project_rows,
+        load_project_catalog_rows=_load_project_catalog_rows,
+        load_service_catalog_rows=_load_service_catalog_rows,
+        load_service_rows=_load_service_rows,
+        maybe_reconcile_recent_deployments=_maybe_reconcile_recent_deployments,
+        select_preferred_service_row=_select_preferred_service_row,
+        sort_release_rows_by_deployed_at=_sort_release_rows_by_deployed_at,
+        load_release_rows_for_service=_load_release_rows_for_service,
+        release_row_has_meaningful_metadata=_release_row_has_meaningful_metadata,
+        load_live_service_runtime_rows=_load_live_service_runtime_rows,
+        coalesce_service_status=_coalesce_service_status,
+        extract_version_from_image_ref=_extract_version_from_image_ref,
+        get_active_deployment_lock=_get_active_deployment_lock,
+        build_deployment_lock_response=_build_deployment_lock_response,
+        with_connection=_with_connection,
+        registry_stale_after_minutes=_registry_stale_after_minutes,
+        registry_warning_after_minutes=_registry_warning_after_minutes,
+    )
+
+
+def configure_backend_services(
+    target_app: FastAPI = app,
+    *,
+    build_catalog_service: Callable[[], CatalogService] | None = None,
+    build_deployment_service: Callable[[], DeploymentService] | None = None,
+    build_observability_service: Callable[[], ObservabilityService] | None = None,
+    build_scaffold_admin_service: Callable[[], ScaffoldAdminService] | None = None,
+) -> BackendServiceBuilders:
+    """Register swappable service builders without changing the app entrypoint."""
+
+    return _configure_backend_service_builders(
+        target_app,
+        BackendServiceBuilders(
+            build_catalog_service=build_catalog_service or _build_catalog_service,
+            build_deployment_service=build_deployment_service or _build_deployment_service,
+            build_observability_service=(
+                build_observability_service or _build_observability_service
+            ),
+            build_scaffold_admin_service=(
+                build_scaffold_admin_service or _build_scaffold_admin_service
+            ),
+        ),
+    )
+
+
+def _get_catalog_service() -> CatalogService:
+    return get_backend_service_builders(app).build_catalog_service()
+
+
+def _get_deployment_service() -> DeploymentService:
+    return get_backend_service_builders(app).build_deployment_service()
+
+
+def _get_observability_service() -> ObservabilityService:
+    return get_backend_service_builders(app).build_observability_service()
+
+
 # Primary API endpoints begin here. The order loosely follows how the frontend
 # consumes them: system/auth, metadata, deployment mutations, observability, then
 # scaffold/admin maintenance features.
 
-@app.get(
-    "/health",
-    response_model=HealthResponse,
-    response_model_exclude_none=True,
-    tags=["system"],
-)
 def health(
     include_providers: bool = Query(default=False, alias="includeProviders"),
 ) -> HealthResponse:
@@ -3737,12 +3629,10 @@ def health(
     )
 
 
-@app.get("/metrics", include_in_schema=False)
 def metrics() -> Response:
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-@app.post("/auth/login", response_model=LoginResponse, tags=["auth"])
 def login(payload: LoginRequest) -> LoginResponse:
     # This is a development-only login contract that matches the frontend auth
     # flow. Production auth is expected to be enforced by the ingress/auth proxy.
@@ -3759,128 +3649,22 @@ def login(payload: LoginRequest) -> LoginResponse:
     )
 
 
-@app.get(
-    "/projects",
-    response_model=ProjectsResponse,
-    response_model_exclude_none=True,
-    tags=["metadata"],
-)
 def list_projects(
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ProjectsResponse:
-    # Projects are GitOps-backed metadata rows, not live cluster services. The
-    # frontend may merge them with service-registry data as a compatibility layer.
-    rows = _load_project_rows(env=env)
-    return ProjectsResponse(
-        projects=[
-            Project(
-                id=row["service_id"],
-                name=row["service_name"],
-                environment=row["env"],
-                owner=row["owner"] if isinstance(row.get("owner"), str) else None,
-                repoUrl=row["repo_url"] if isinstance(row.get("repo_url"), str) else None,
-                runbookUrl=row["runbook_url"] if isinstance(row.get("runbook_url"), str) else None,
-                observabilityMode=(
-                    row["observability_mode"] if isinstance(row.get("observability_mode"), str) else None
-                ),
-            )
-            for row in rows
-        ]
-    )
+    return _get_catalog_service().list_projects(env=env)
 
 
-@app.get(
-    "/projects/diagnostics",
-    response_model=ProjectCatalogDiagnosticsResponse,
-    tags=["metadata"],
-)
 # Freshness/diagnostic endpoints intentionally compute both source age and join
 # mismatch state so operators can tell whether data is old, empty, or structurally off.
 def get_project_catalog_diagnostics(
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ProjectCatalogDiagnosticsResponse:
-    with _with_connection() as conn:
-        with conn.cursor() as cur:
-            if env:
-                cur.execute(
-                    """
-                    SELECT COUNT(*), MAX(last_synced_at)
-                    FROM project_registry
-                    WHERE source = %s
-                      AND env = %s
-                    """,
-                    ("gitops_apps", env),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT COUNT(*), MAX(last_synced_at)
-                    FROM project_registry
-                    WHERE source = %s
-                    """,
-                    ("gitops_apps",),
-                )
-            count_row = cur.fetchone()
-
-    row_count = int(count_row[0] or 0)
-    last_synced_at = count_row[1]
-    stale_after_minutes = _registry_stale_after_minutes()
-    warning_after_minutes = _registry_warning_after_minutes(stale_after_minutes)
-    now = datetime.now(tz=timezone.utc)
-
-    is_empty = row_count == 0
-    if is_empty:
-        is_warning = False
-        is_stale = False
-        state = "empty"
-    else:
-        age = None if last_synced_at is None else now - last_synced_at
-        if last_synced_at is None:
-            is_warning = True
-            is_stale = True
-        else:
-            is_warning = age > timedelta(minutes=warning_after_minutes)
-            is_stale = age > timedelta(minutes=stale_after_minutes)
-        if is_stale:
-            state = "stale"
-        elif is_warning:
-            state = "warning"
-        else:
-            state = "fresh"
-
-    catalog_join = build_catalog_join(
-        project_rows=_load_project_catalog_rows(env=env),
-        service_rows=_load_service_catalog_rows(env=env),
-        env_filter=env,
-        project_id_filter=None,
-        service_id_filter=None,
-    )
-
-    return ProjectCatalogDiagnosticsResponse(
-        generatedAt=now.isoformat(),
-        env=env,
-        freshness=ServiceRegistryFreshnessResponse(
-            rowCount=row_count,
-            lastSyncedAt=last_synced_at.isoformat() if last_synced_at else None,
-            warningAfterMinutes=warning_after_minutes,
-            staleAfterMinutes=stale_after_minutes,
-            isEmpty=is_empty,
-            isWarning=is_warning,
-            isStale=is_stale,
-            state=state,
-        ),
-        catalogJoin=CatalogJoinDiagnosticsResponse(**catalog_join["diagnostics"]),
-    )
+    return _get_catalog_service().get_project_catalog_diagnostics(env=env)
 
 
-@app.post(
-    "/projects",
-    response_model=Project,
-    status_code=status.HTTP_201_CREATED,
-    tags=["metadata"],
-)
 def create_project(
     payload: CreateProjectRequest,
     admin_user: str = Depends(require_admin),
@@ -3895,102 +3679,22 @@ def create_project(
     )
 
 
-@app.get("/services", response_model=ServicesResponse, tags=["metadata"])
 def list_services(
     env: str | None = Query(default=None),
     namespace: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServicesResponse:
-    # Services expose the live registry view. Ownership/runbook/public URL fields
-    # are intentionally not assembled here; the frontend enriches with project data.
-    rows = _load_service_rows(env=env, namespace=namespace)
-    project_index = _project_catalog_index(_load_project_catalog_rows(env=env))
-    return ServicesResponse(
-        services=[
-            ServiceRow(
-                serviceId=str(row["service_id"]),
-                serviceName=str(row["service_name"]),
-                env=str(row["env"]),
-                namespace=str(row["namespace"]),
-                appLabel=str(row["app_label"]),
-                argoAppName=row["argo_app_name"] if isinstance(row["argo_app_name"], str) else None,
-                source=str(row["source"]),
-                sourceRef=row["source_ref"] if isinstance(row["source_ref"], str) else None,
-                lastSyncedAt=row["last_synced_at"] if isinstance(row["last_synced_at"], str) else None,
-                observabilityMode=(
-                    project_index.get((str(row["service_id"]), str(row["env"])), {}).get(
-                        "observability_mode"
-                    )
-                ),
-            )
-            for row in rows
-        ]
-    )
+    return _get_catalog_service().list_services(env=env, namespace=namespace)
 
 
-@app.get("/services/{service_id}", response_model=ServiceDetailResponse, tags=["metadata"])
 def get_service(
     service_id: str,
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceDetailResponse:
-    preferred_env = env or os.getenv("PORTAL_ENV", "dev")
-    # Read-through reconciliation lets detail views pick up recent GitOps changes
-    # without waiting for the background loop to run.
-    _maybe_reconcile_recent_deployments(service_id=service_id, env=preferred_env)
-    rows = _load_service_rows(service_id=service_id, env=env)
-    if not rows:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Service not found",
-        )
-
-    selected = _select_preferred_service_row(service_id, rows, preferred_env) or rows[0]
-    release_rows = _sort_release_rows_by_deployed_at(_load_release_rows_for_service(service_id, env))
-    release = next((row for row in release_rows if _release_row_has_meaningful_metadata(row)), {})
-    live_rows = _sort_release_rows_by_deployed_at(_load_live_service_runtime_rows(selected))
-    live_release = next((row for row in live_rows if _release_row_has_meaningful_metadata(row)), {})
-    argo = release.get("argo") if isinstance(release.get("argo"), dict) else {}
-    live_argo = live_release.get("argo") if isinstance(live_release.get("argo"), dict) else {}
-    image_ref = (
-        release.get("imageRef")
-        if isinstance(release.get("imageRef"), str) and release.get("imageRef")
-        else live_release.get("imageRef")
-        if isinstance(live_release.get("imageRef"), str)
-        else None
-    )
-    active_lock = _get_active_deployment_lock(str(selected["service_id"]), str(selected["env"]))
-    project_rows = _load_project_catalog_rows(
-        env=str(selected["env"]),
-        project_id=str(selected["service_id"]),
-    )
-    observability_mode = project_rows[0].get("observability_mode") if project_rows else None
-
-    catalog_public_host = project_rows[0].get("public_host") if project_rows else None
-    return ServiceDetailResponse(
-        id=str(selected["service_id"]),
-        name=str(selected["service_name"]),
-        namespace=str(selected["namespace"]),
-        env=str(selected["env"]),
-        appLabel=str(selected["app_label"]),
-        argoAppName=selected["argo_app_name"] if isinstance(selected["argo_app_name"], str) else None,
-        version=_extract_version_from_image_ref(image_ref if isinstance(image_ref, str) else None),
-        health=_coalesce_service_status(argo.get("healthStatus"), live_argo.get("healthStatus")),
-        sync=_coalesce_service_status(argo.get("syncStatus"), live_argo.get("syncStatus")),
-        source=str(selected["source"]),
-        sourceRef=selected["source_ref"] if isinstance(selected["source_ref"], str) else None,
-        lastSyncedAt=selected["last_synced_at"] if isinstance(selected["last_synced_at"], str) else None,
-        observabilityMode=observability_mode if isinstance(observability_mode, str) else None,
-        publicHost=catalog_public_host if isinstance(catalog_public_host, str) else None,
-        deploymentLock=_build_deployment_lock_response(active_lock),
-    )
+    return _get_catalog_service().get_service(service_id=service_id, env=env)
 
 
-@app.post(
-    "/deployments/reconcile",
-    response_model=DeploymentReconcileResponse,
-    tags=["metadata"],
-)
 def reconcile_deployments(
     service_id: str | None = Query(default=None, alias="serviceId"),
     env: str | None = Query(default=None),
@@ -4000,68 +3704,20 @@ def reconcile_deployments(
     return _reconcile_recent_deployment_activity(service_id=service_id, env=env)
 
 
-@app.get(
-    "/deployments/{deployment_id}",
-    response_model=DeploymentRecordResponse,
-    tags=["metadata"],
-)
 def get_deployment(
     deployment_id: str,
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> DeploymentRecordResponse:
-    record = _get_deployment_record_by_id(deployment_id)
-    if record is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Deployment record not found",
-        )
-
-    service_id = str(record.get("serviceId") or "")
-    env = record.get("env") if isinstance(record.get("env"), str) else None
-    if service_id:
-        _maybe_reconcile_recent_deployments(service_id=service_id, env=env)
-        refreshed = _get_deployment_record_by_id(deployment_id)
-        if refreshed is not None:
-            record = refreshed
-
-    service_rows = _load_service_rows(service_id=service_id or None, env=env)
-    selected = _select_preferred_service_row(service_id, service_rows, env) if service_id else None
-    return _build_deployment_record_response(record, selected)
+    return _get_deployment_service().get_deployment(deployment_id)
 
 
-@app.post(
-    "/deployments",
-    response_model=DeploymentRecordResponse,
-    status_code=status.HTTP_201_CREATED,
-    tags=["metadata"],
-)
 def create_deployment_record(
     payload: CreateDeploymentRecordRequest,
     admin_user: str = Depends(require_admin),
 ) -> DeploymentRecordResponse:
-    try:
-        record = _upsert_deployment_record_row(payload, requested_by=admin_user)
-    except DeploymentLockConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": (
-                    f"Active deployment lock already exists for {payload.service_id}/{payload.env}. "
-                    "Wait for the in-flight mutation to finish or clear its stale lock."
-                ),
-                "activeLock": _build_deployment_lock_response(exc.active_lock).model_dump(by_alias=True),
-            },
-        ) from exc
-    service_rows = _load_service_rows(service_id=payload.service_id, env=payload.env)
-    selected = _select_preferred_service_row(payload.service_id, service_rows, payload.env)
-    return _build_deployment_record_response(record, selected)
+    return _get_deployment_service().create_deployment_record(payload, admin_user=admin_user)
 
 
-@app.post(
-    "/deployments/{deployment_id}/cancel",
-    response_model=DeploymentRecordResponse,
-    tags=["metadata"],
-)
 def cancel_deployment(
     deployment_id: str,
     admin_user: str = Depends(require_admin),
@@ -4072,77 +3728,9 @@ def cancel_deployment(
     and releases the deployment lock.  Returns 404 if the deployment is not found,
     409 if it is already in a terminal state.
     """
-    record = _get_deployment_record_by_id(deployment_id)
-    if record is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Deployment record not found",
-        )
-
-    current_status = record.get("status")
-    if current_status in {"live", "failed"}:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Deployment is already in terminal state '{current_status}' and cannot be cancelled.",
-        )
-
-    service_id = str(record.get("serviceId") or "")
-    env = str(record.get("env") or "")
-    request_key = record.get("requestKey")
-
-    with _with_connection() as conn:
-        now = datetime.now(tz=timezone.utc)
-        updated = upsert_deployment_record(
-            conn,
-            service_id=service_id,
-            env=env,
-            action=str(record.get("action") or "deploy"),
-            status="failed",
-            result="cancelled",
-            result_reason=f"Cancelled by operator ({admin_user})",
-            request_key=request_key if isinstance(request_key, str) else None,
-            requested_by=record.get("requestedBy") if isinstance(record.get("requestedBy"), str) else None,
-            requested_at=record.get("requestedAt"),
-            pr_url=record.get("prUrl") if isinstance(record.get("prUrl"), str) else None,
-            pr_number=record.get("prNumber") if isinstance(record.get("prNumber"), int) else None,
-            merge_sha=record.get("mergeSha") if isinstance(record.get("mergeSha"), str) else None,
-            target_image=record.get("targetImage") if isinstance(record.get("targetImage"), str) else None,
-            previous_image=record.get("previousImage") if isinstance(record.get("previousImage"), str) else None,
-            argo_app=record.get("argoApp") if isinstance(record.get("argoApp"), str) else None,
-            sync_status=record.get("syncStatus") if isinstance(record.get("syncStatus"), str) else None,
-            health_status=record.get("healthStatus") if isinstance(record.get("healthStatus"), str) else None,
-            started_at=record.get("startedAt"),
-            finished_at=now,
-            deploy_window_start=record.get("deployWindowStart"),
-            deploy_window_end=now,
-            deploy_reason=record.get("deployReason") if isinstance(record.get("deployReason"), str) else None,
-            compare_url=record.get("compareUrl") if isinstance(record.get("compareUrl"), str) else None,
-            git_ref=record.get("gitRef") if isinstance(record.get("gitRef"), str) else None,
-            metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
-        )
-        if service_id and env:
-            release_deployment_lock(
-                conn,
-                service_id=service_id,
-                env=env,
-                request_key=request_key if isinstance(request_key, str) else None,
-                deployment_id=deployment_id,
-            )
-
-    deployment_history_cache.clear()
-    deployment_reconcile_cache.clear()
-
-    service_rows = _load_service_rows(service_id=service_id or None, env=env or None)
-    selected = _select_preferred_service_row(service_id, service_rows, env) if service_id else None
-    return _build_deployment_record_response(updated, selected)
+    return _get_deployment_service().cancel_deployment(deployment_id, admin_user=admin_user)
 
 
-@app.post(
-    "/services/{service_id}/deploy-to-dev",
-    response_model=PortalDeployToDevResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    tags=["metadata"],
-)
 # Deploy-to-dev is a GitOps mutation endpoint: resolve the newest portal image,
 # patch the target overlays in a branch, open a PR, then create a pending deployment
 # record/lock so the UI can track the request before Argo applies it.
@@ -4153,205 +3741,14 @@ def request_portal_deploy_to_dev(
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> PortalDeployToDevResponse:
     requested_by, _groups = identity
-    target = _dev_deploy_target(service_id)
-    initiated_at = datetime.now(tz=timezone.utc)
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-
-    latest_candidate = _resolve_latest_portal_image_candidate(service_id)
-    new_tag = str(latest_candidate["tag"])
-    new_image_ref = str(latest_candidate["imageRef"])
-
-    try:
-        git_provider = build_default_git_provider()
-        _image_repo, previous_image_ref, updated_files = _load_dev_overlay_update_plan(
-            git_provider,
-            service_id=service_id,
-            repo_slug=workloads_repo,
-            branch=base_branch,
-            new_image_ref=new_image_ref,
-        )
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except PortalDeployToDevError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    previous_tag = _extract_version_from_image_ref(previous_image_ref)
-    compare_url = _build_compare_url_for_portal_tags(previous_tag, new_tag)
-    if previous_image_ref == new_image_ref:
-        response.status_code = status.HTTP_200_OK
-        return PortalDeployToDevResponse(
-            status="noop",
-            action="deploy",
-            serviceId=service_id,
-            targetEnvironment="dev",
-            requestedBy=requested_by,
-            repository=workloads_repo,
-            baseBranch=base_branch,
-            branchName=None,
-            deploymentId=None,
-            gitPrUrl=None,
-            gitPrNumber=None,
-            previousTag=previous_tag,
-            newTag=new_tag,
-            previousImageRef=previous_image_ref,
-            newImageRef=new_image_ref,
-            compareUrl=compare_url,
-            sourceCommitSha=latest_candidate.get("sourceCommitSha"),
-            sourceWorkflowRunUrl=latest_candidate.get("workflowRunUrl"),
-            message="Dev overlay already points at the latest deployable image tag.",
-            initiatedAt=initiated_at.isoformat(),
-        )
-
-    active_lock = _get_active_deployment_lock(service_id, "dev")
-    if active_lock is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": (
-                    f"Active deployment lock already exists for {service_id}/dev. "
-                    "Wait for the in-flight mutation to finish or clear its stale lock."
-                ),
-                "activeLock": _build_deployment_lock_response(active_lock).model_dump(by_alias=True),
-            },
-        )
-
-    branch_name = _build_dev_deploy_branch_name(service_id, new_tag, initiated_at)
-    pr_title = f"Deploy {service_id}: {new_tag} to dev"
-    pr_body = _build_dev_deploy_pr_body(
-        service_id=service_id,
+    return _get_deployment_service().request_portal_deploy_to_dev(
+        service_id,
+        payload,
+        response=response,
         requested_by=requested_by,
-        deploy_reason=payload.deploy_reason,
-        previous_tag=previous_tag,
-        new_tag=new_tag,
-        new_image_ref=new_image_ref,
-        compare_url=compare_url,
-        source_commit_sha=latest_candidate.get("sourceCommitSha") if isinstance(latest_candidate.get("sourceCommitSha"), str) else None,
-        workflow_run_url=latest_candidate.get("workflowRunUrl") if isinstance(latest_candidate.get("workflowRunUrl"), str) else None,
-    )
-
-    try:
-        git_provider.create_branch(workloads_repo, base_branch, branch_name)
-        git_provider.commit_to_branch(
-            workloads_repo,
-            branch_name,
-            updated_files,
-            pr_title,
-        )
-        pr = git_provider.open_pr(
-            workloads_repo,
-            branch_name,
-            base_branch,
-            pr_title,
-            pr_body,
-        )
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    request_key = f"gitops-pr:{pr['number']}:{service_id}:dev:deploy"
-    record_payload = CreateDeploymentRecordRequest(
-        serviceId=service_id,
-        env="dev",
-        action="deploy",
-        status="pending",
-        requestedAt=initiated_at,
-        requestedBy=requested_by,
-        gitPrUrl=pr["url"],
-        gitPrNumber=pr["number"],
-        imageRef=new_image_ref,
-        previousImageRef=previous_image_ref,
-        argoApp=str(target["argo_app"]),
-        gitRef=branch_name,
-        deployReason=payload.deploy_reason,
-        compareUrl=compare_url,
-        requestKey=request_key,
-        metadata={
-            "source": "portal-deploy-to-dev",
-            "sourceCommitSha": latest_candidate.get("sourceCommitSha"),
-            "previousTag": previous_tag,
-            "newTag": new_tag,
-            "workflowRunId": latest_candidate.get("workflowRunId"),
-            "workflowRunUrl": latest_candidate.get("workflowRunUrl"),
-            "patchFiles": sorted(updated_files),
-        },
-    )
-
-    try:
-        record = _upsert_deployment_record_row(record_payload, requested_by=requested_by)
-    except DeploymentLockConflictError as exc:
-        try:
-            git_provider.close_pr(workloads_repo, pr["number"])
-        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
-            logger.warning(
-                "deploy_to_dev_failed_to_close_pr service_id=%s pr_number=%s error=%s",
-                service_id,
-                pr["number"],
-                close_exc,
-            )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": (
-                    f"Active deployment lock already exists for {service_id}/dev. "
-                    "Wait for the in-flight mutation to finish or clear its stale lock."
-                ),
-                "activeLock": _build_deployment_lock_response(exc.active_lock).model_dump(by_alias=True),
-            },
-        ) from exc
-    except Exception:
-        try:
-            git_provider.close_pr(workloads_repo, pr["number"])
-        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
-            logger.warning(
-                "deploy_to_dev_failed_to_close_pr service_id=%s pr_number=%s error=%s",
-                service_id,
-                pr["number"],
-                close_exc,
-            )
-        raise
-
-    return PortalDeployToDevResponse(
-        status="accepted",
-        action="deploy",
-        serviceId=service_id,
-        targetEnvironment="dev",
-        requestedBy=requested_by,
-        repository=workloads_repo,
-        baseBranch=base_branch,
-        branchName=branch_name,
-        deploymentId=record.get("deploymentId") if isinstance(record.get("deploymentId"), str) else None,
-        gitPrUrl=pr["url"],
-        gitPrNumber=pr["number"],
-        previousTag=previous_tag,
-        newTag=new_tag,
-        previousImageRef=previous_image_ref,
-        newImageRef=new_image_ref,
-        compareUrl=compare_url,
-        sourceCommitSha=latest_candidate.get("sourceCommitSha"),
-        sourceWorkflowRunUrl=latest_candidate.get("workflowRunUrl"),
-        message=None,
-        initiatedAt=initiated_at.isoformat(),
     )
 
 
-@app.post(
-    "/services/{service_id}/promote-to-prod",
-    response_model=PortalPromoteToProdResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    tags=["metadata"],
-)
 # Promote-to-prod follows the same GitOps pattern as deploy-to-dev, but its source
 # of truth is the current dev overlay and it always targets the prod overlays.
 def request_portal_promote_to_prod(
@@ -4361,514 +3758,59 @@ def request_portal_promote_to_prod(
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> PortalPromoteToProdResponse:
     requested_by, _groups = identity
-    target = _promote_to_prod_target(service_id)
-    initiated_at = datetime.now(tz=timezone.utc)
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-
-    try:
-        git_provider = build_default_git_provider()
-        image_repo, previous_image_ref, new_image_ref, new_tag, updated_files = _load_promote_to_prod_update_plan(
-            git_provider,
-            service_id=service_id,
-            repo_slug=workloads_repo,
-            branch=base_branch,
-        )
-        _ensure_ghcr_tag_exists(image_repo, new_tag)
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except PortalPromoteToProdError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    previous_tag = _extract_version_from_image_ref(previous_image_ref)
-    compare_url = _build_compare_url_for_portal_tags(previous_tag, new_tag)
-    source_commit_sha = _extract_sha_from_tag(new_tag)
-
-    if previous_image_ref == new_image_ref:
-        response.status_code = status.HTTP_200_OK
-        return PortalPromoteToProdResponse(
-            status="noop",
-            action="promote",
-            serviceId=service_id,
-            targetEnvironment="prod",
-            requestedBy=requested_by,
-            repository=workloads_repo,
-            baseBranch=base_branch,
-            branchName=None,
-            deploymentId=None,
-            gitPrUrl=None,
-            gitPrNumber=None,
-            previousTag=previous_tag,
-            newTag=new_tag,
-            previousImageRef=previous_image_ref,
-            newImageRef=new_image_ref,
-            compareUrl=compare_url,
-            sourceCommitSha=source_commit_sha,
-            message="Prod overlay already matches the current dev image tag.",
-            initiatedAt=initiated_at.isoformat(),
-        )
-
-    active_lock = _get_active_deployment_lock(service_id, "prod")
-    if active_lock is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": (
-                    f"Active deployment lock already exists for {service_id}/prod. "
-                    "Wait for the in-flight mutation to finish or clear its stale lock."
-                ),
-                "activeLock": _build_deployment_lock_response(active_lock).model_dump(by_alias=True),
-            },
-        )
-
-    branch_name = _build_prod_promote_branch_name(service_id, new_tag, initiated_at)
-    pr_title = f"Promote {service_id}: {new_tag} to prod"
-    pr_body = _build_promote_to_prod_pr_body(
-        service_id=service_id,
+    return _get_deployment_service().request_portal_promote_to_prod(
+        service_id,
+        payload,
+        response=response,
         requested_by=requested_by,
-        deploy_reason=payload.deploy_reason,
-        previous_tag=previous_tag,
-        new_tag=new_tag,
-        new_image_ref=new_image_ref,
-        compare_url=compare_url,
-    )
-
-    try:
-        git_provider.create_branch(workloads_repo, base_branch, branch_name)
-        git_provider.commit_to_branch(
-            workloads_repo,
-            branch_name,
-            updated_files,
-            pr_title,
-        )
-        pr = git_provider.open_pr(
-            workloads_repo,
-            branch_name,
-            base_branch,
-            pr_title,
-            pr_body,
-        )
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    request_key = f"gitops-pr:{pr['number']}:{service_id}:prod:promote"
-    record_payload = CreateDeploymentRecordRequest(
-        serviceId=service_id,
-        env="prod",
-        action="promote",
-        status="pending",
-        requestedAt=initiated_at,
-        requestedBy=requested_by,
-        gitPrUrl=pr["url"],
-        gitPrNumber=pr["number"],
-        imageRef=new_image_ref,
-        previousImageRef=previous_image_ref,
-        argoApp=str(target["argo_app"]),
-        gitRef=branch_name,
-        deployReason=payload.deploy_reason,
-        compareUrl=compare_url,
-        requestKey=request_key,
-        metadata={
-            "source": "portal-promote-to-prod",
-            "previousTag": previous_tag,
-            "newTag": new_tag,
-            "patchFiles": sorted(updated_files),
-            "sourceEnvironment": "dev",
-            "targetEnvironment": "prod",
-        },
-    )
-
-    try:
-        record = _upsert_deployment_record_row(record_payload, requested_by=requested_by)
-    except DeploymentLockConflictError as exc:
-        try:
-            git_provider.close_pr(workloads_repo, pr["number"])
-        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
-            logger.warning(
-                "promote_to_prod_failed_to_close_pr service_id=%s pr_number=%s error=%s",
-                service_id,
-                pr["number"],
-                close_exc,
-            )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": (
-                    f"Active deployment lock already exists for {service_id}/prod. "
-                    "Wait for the in-flight mutation to finish or clear its stale lock."
-                ),
-                "activeLock": _build_deployment_lock_response(exc.active_lock).model_dump(by_alias=True),
-            },
-        ) from exc
-    except Exception:
-        try:
-            git_provider.close_pr(workloads_repo, pr["number"])
-        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
-            logger.warning(
-                "promote_to_prod_failed_to_close_pr service_id=%s pr_number=%s error=%s",
-                service_id,
-                pr["number"],
-                close_exc,
-            )
-        raise
-
-    return PortalPromoteToProdResponse(
-        status="accepted",
-        action="promote",
-        serviceId=service_id,
-        targetEnvironment="prod",
-        requestedBy=requested_by,
-        repository=workloads_repo,
-        baseBranch=base_branch,
-        branchName=branch_name,
-        deploymentId=record.get("deploymentId") if isinstance(record.get("deploymentId"), str) else None,
-        gitPrUrl=pr["url"],
-        gitPrNumber=pr["number"],
-        previousTag=previous_tag,
-        newTag=new_tag,
-        previousImageRef=previous_image_ref,
-        newImageRef=new_image_ref,
-        compareUrl=compare_url,
-        sourceCommitSha=source_commit_sha,
-        message=None,
-        initiatedAt=initiated_at.isoformat(),
     )
 
 
-@app.get(
-    "/services/{service_id}/config",
-    response_model=ServiceConfigResponse,
-    tags=["metadata"],
-)
 def get_service_config(
     service_id: str,
     env: Literal["dev", "prod"],
     current_user: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceConfigResponse:
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-    try:
-        target = get_config_edit_target(service_id, env)
-        git_provider = build_default_git_provider()
-        config_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
-        data = parse_config_map_data(config_contents)
-    except ConfigEditingError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    entries = [
-        ServiceConfigEntry(
-            key=key,
-            value=data.get(key, ""),
-            allowedValues=list(ALLOWED_CONFIG_VALUES.get(key, ())),
-        )
-        for key in target.allowed_keys
-    ]
-    return ServiceConfigResponse(serviceId=service_id, env=env, entries=entries)
+    del current_user
+    return _get_scaffold_admin_service().get_service_config(service_id=service_id, env=env)
 
 
-@app.post(
-    "/services/{service_id}/config/set",
-    response_model=PortalSetConfigResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    tags=["metadata"],
-)
 def request_portal_set_config(
     service_id: str,
     payload: PortalSetConfigRequest,
     admin_user: str = Depends(require_admin),
 ) -> PortalSetConfigResponse:
-    initiated_at = datetime.now(tz=timezone.utc)
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-
-    try:
-        enforce_config_edit_rate_limit(
-            identity_key=f"config-edit:{admin_user}",
-            now=initiated_at,
-        )
-        target = resolve_config_edit_target(service_id, payload.env, payload.config_key)
-        normalized_value = normalize_config_value(payload.config_key, payload.config_value)
-        git_provider = build_default_git_provider()
-        config_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
-        updated_contents, previous_value = update_config_map_manifest_document(
-            config_contents,
-            target=target,
-            config_key=payload.config_key,
-            config_value=normalized_value,
-        )
-        patch_contents = git_provider.read_file(
-            workloads_repo, base_branch, target.deployment_patch_file_path
-        )
-        checksum = compute_config_checksum_from_manifest(updated_contents)
-        updated_patch_contents = update_deployment_patch_checksum(patch_contents, checksum)
-    except ConfigEditingError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    if previous_value == normalized_value:
-        return PortalSetConfigResponse(
-            status="noop",
-            serviceId=service_id,
-            env=payload.env,
-            configKey=payload.config_key,
-            previousValue=previous_value,
-            configValue=normalized_value,
-            requestedBy=admin_user,
-            repository=workloads_repo,
-            baseBranch=base_branch,
-            branchName=None,
-            gitPrUrl=None,
-            gitPrNumber=None,
-            configFilePath=target.file_path,
-            message="ConfigMap already contains the requested value.",
-            initiatedAt=initiated_at.isoformat(),
-        )
-
-    branch_name = _build_config_edit_branch_name(service_id, payload.env, payload.config_key, initiated_at)
-    pr_title = f"Config: {service_id} {payload.env} {payload.config_key} updated"
-    pr_body = _build_config_edit_pr_body(
+    return _get_scaffold_admin_service().request_portal_set_config(
         service_id=service_id,
-        env=payload.env,
-        config_key=payload.config_key,
-        config_value=normalized_value,
-        previous_value=previous_value,
-        requested_by=admin_user,
-        config_file_path=target.file_path,
-    )
-
-    try:
-        git_provider.create_branch(workloads_repo, base_branch, branch_name)
-        git_provider.commit_to_branch(
-            workloads_repo,
-            branch_name,
-            {
-                target.file_path: updated_contents,
-                target.deployment_patch_file_path: updated_patch_contents,
-            },
-            pr_title,
-        )
-        pr = git_provider.open_pr(
-            workloads_repo,
-            branch_name,
-            base_branch,
-            pr_title,
-            pr_body,
-        )
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    return PortalSetConfigResponse(
-        status="accepted",
-        serviceId=service_id,
-        env=payload.env,
-        configKey=payload.config_key,
-        previousValue=previous_value,
-        configValue=normalized_value,
-        requestedBy=admin_user,
-        repository=workloads_repo,
-        baseBranch=base_branch,
-        branchName=branch_name,
-        gitPrUrl=pr["url"],
-        gitPrNumber=pr["number"],
-        configFilePath=target.file_path,
-        message="Config update pull request created.",
-        initiatedAt=initiated_at.isoformat(),
+        payload=payload,
+        admin_user=admin_user,
     )
 
 
-@app.post(
-    "/services/{service_id}/config/set-secret",
-    response_model=PortalSetSecretResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    tags=["metadata"],
-)
 def request_portal_set_secret(
     service_id: str,
     payload: PortalSetSecretRequest,
     admin_user: str = Depends(require_admin),
 ) -> PortalSetSecretResponse:
-    initiated_at = datetime.now(tz=timezone.utc)
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-
-    try:
-        enforce_secret_edit_rate_limit(
-            identity_key=f"secret-edit:{admin_user}",
-            now=initiated_at,
-        )
-        target = resolve_secret_edit_target(service_id, payload.env, payload.secret_key)
-        git_provider = build_default_git_provider()
-        encrypted_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
-        sops_config_contents = git_provider.read_file(workloads_repo, base_branch, ".sops.yaml")
-        decrypted_manifest = decrypt_secret_manifest(encrypted_contents)
-        updated_manifest = update_secret_manifest_document(
-            decrypted_manifest,
-            target=target,
-            secret_key=payload.secret_key,
-            secret_value=payload.secret_value,
-        )
-        encrypted_manifest = encrypt_secret_manifest(
-            updated_manifest,
-            target_file_path=target.file_path,
-            sops_config_contents=sops_config_contents,
-        )
-    except SecretEditingError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    branch_name = _build_secret_edit_branch_name(service_id, payload.env, payload.secret_key, initiated_at)
-    pr_title = f"Secret: {service_id} {payload.env} {payload.secret_key} updated"
-    pr_body = _build_secret_edit_pr_body(
+    return _get_scaffold_admin_service().request_portal_set_secret(
         service_id=service_id,
-        env=payload.env,
-        secret_key=payload.secret_key,
-        requested_by=admin_user,
-        secret_file_path=target.file_path,
-    )
-
-    try:
-        git_provider.create_branch(workloads_repo, base_branch, branch_name)
-        git_provider.commit_to_branch(
-            workloads_repo,
-            branch_name,
-            {target.file_path: encrypted_manifest},
-            pr_title,
-        )
-        pr = git_provider.open_pr(
-            workloads_repo,
-            branch_name,
-            base_branch,
-            pr_title,
-            pr_body,
-        )
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    return PortalSetSecretResponse(
-        status="accepted",
-        serviceId=service_id,
-        env=payload.env,
-        secretKey=payload.secret_key,
-        requestedBy=admin_user,
-        repository=workloads_repo,
-        baseBranch=base_branch,
-        branchName=branch_name,
-        gitPrUrl=pr["url"],
-        gitPrNumber=pr["number"],
-        secretFilePath=target.file_path,
-        message="Encrypted secret update pull request created.",
-        initiatedAt=initiated_at.isoformat(),
+        payload=payload,
+        admin_user=admin_user,
     )
 
 
-@app.get(
-    "/services/{service_id}/rollback-candidates",
-    response_model=PortalServiceRollbackCandidatesResponse,
-    tags=["metadata"],
-)
 def list_service_rollback_candidates(
     service_id: str,
     target_environment: Literal["dev", "prod"] = Query(default="dev", alias="targetEnvironment"),
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> PortalServiceRollbackCandidatesResponse:
-    _requested_by, _groups = identity
-    initiated_at = datetime.now(tz=timezone.utc)
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-
-    try:
-        git_provider = build_default_git_provider()
-        target = _rollback_target(service_id, target_environment)
-        image_repo = str(target["image_repo"])
-        patch_files = [str(path) for path in target["patch_files"]]
-        previous_image_ref: str | None = None
-        for file_path in patch_files:
-            current_content = git_provider.read_file(workloads_repo, base_branch, file_path)
-            file_image_ref = _extract_image_ref_from_overlay(
-                current_content,
-                image_repo=image_repo,
-                file_path=file_path,
-            )
-            if previous_image_ref is None:
-                previous_image_ref = file_image_ref
-            elif previous_image_ref != file_image_ref:
-                raise PortalServiceRollbackError(
-                    f"GitOps {target_environment} overlay for {service_id} is inconsistent across image patch files.",
-                    status_code=status.HTTP_409_CONFLICT,
-                )
-        current_tag = _extract_version_from_image_ref(previous_image_ref)
-        candidates = _list_service_rollback_candidates(image_repo=image_repo, current_tag=current_tag)
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except (PortalDeployToDevError, PortalPromoteToProdError, PortalServiceRollbackError) as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    return PortalServiceRollbackCandidatesResponse(
-        serviceId=service_id,
-        targetEnvironment=target_environment,
-        currentTag=current_tag,
-        currentImageRef=previous_image_ref,
-        candidates=candidates,
-        generatedAt=initiated_at.isoformat(),
+    del identity
+    return _get_deployment_service().list_service_rollback_candidates(
+        service_id,
+        target_environment=target_environment,
     )
 
 
-@app.post(
-    "/services/{service_id}/rollback",
-    response_model=PortalServiceRollbackResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    tags=["metadata"],
-)
 # Service rollback is also PR-driven. Candidates are discovered from recent image
 # history, then the selected tag is written back into the appropriate overlay files.
 def request_service_rollback(
@@ -4878,333 +3820,38 @@ def request_service_rollback(
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> PortalServiceRollbackResponse:
     requested_by, _groups = identity
-    initiated_at = datetime.now(tz=timezone.utc)
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-
-    try:
-        git_provider = build_default_git_provider()
-        target = _rollback_target(service_id, payload.target_environment)
-        image_repo, previous_image_ref, new_image_ref, updated_files = _load_service_rollback_update_plan(
-            git_provider,
-            service_id=service_id,
-            repo_slug=workloads_repo,
-            branch=base_branch,
-            target_environment=payload.target_environment,
-            rollback_tag=payload.rollback_tag,
-        )
-        _ensure_ghcr_tag_exists(image_repo, payload.rollback_tag, purpose="Rollback image tag")
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except (PortalPromoteToProdError, PortalServiceRollbackError) as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    previous_tag = _extract_version_from_image_ref(previous_image_ref)
-    compare_url = _build_compare_url_for_portal_tags(previous_tag, payload.rollback_tag)
-    source_commit_sha = _extract_sha_from_tag(payload.rollback_tag)
-
-    if previous_image_ref == new_image_ref:
-        response.status_code = status.HTTP_200_OK
-        return PortalServiceRollbackResponse(
-            status="noop",
-            action="rollback",
-            serviceId=service_id,
-            targetEnvironment=payload.target_environment,
-            requestedBy=requested_by,
-            repository=workloads_repo,
-            baseBranch=base_branch,
-            branchName=None,
-            deploymentId=None,
-            gitPrUrl=None,
-            gitPrNumber=None,
-            previousTag=previous_tag,
-            newTag=payload.rollback_tag,
-            previousImageRef=previous_image_ref,
-            newImageRef=new_image_ref,
-            compareUrl=compare_url,
-            sourceCommitSha=source_commit_sha,
-            message=f"{payload.target_environment.title()} overlay already matches the requested rollback tag.",
-            initiatedAt=initiated_at.isoformat(),
-        )
-
-    active_lock = _get_active_deployment_lock(service_id, payload.target_environment)
-    if active_lock is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": (
-                    f"Active deployment lock already exists for {service_id}/{payload.target_environment}. "
-                    "Wait for the in-flight mutation to finish or clear its stale lock."
-                ),
-                "activeLock": _build_deployment_lock_response(active_lock).model_dump(by_alias=True),
-            },
-        )
-
-    branch_name = _build_service_rollback_branch_name(
+    return _get_deployment_service().request_service_rollback(
         service_id,
-        payload.target_environment,
-        payload.rollback_tag,
-        initiated_at,
-    )
-    pr_title = f"Rollback {service_id}: {payload.rollback_tag} in {payload.target_environment}"
-    pr_body = _build_service_rollback_pr_body(
-        service_id=service_id,
-        target_environment=payload.target_environment,
+        payload,
+        response=response,
         requested_by=requested_by,
-        deploy_reason=payload.deploy_reason,
-        previous_tag=previous_tag,
-        rollback_tag=payload.rollback_tag,
-        rollback_image_ref=new_image_ref,
-        compare_url=compare_url,
-    )
-
-    try:
-        git_provider.create_branch(workloads_repo, base_branch, branch_name)
-        git_provider.commit_to_branch(
-            workloads_repo,
-            branch_name,
-            updated_files,
-            pr_title,
-        )
-        pr = git_provider.open_pr(
-            workloads_repo,
-            branch_name,
-            base_branch,
-            pr_title,
-            pr_body,
-        )
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    request_key = f"gitops-pr:{pr['number']}:{service_id}:{payload.target_environment}:rollback"
-    record_payload = CreateDeploymentRecordRequest(
-        serviceId=service_id,
-        env=payload.target_environment,
-        action="rollback",
-        status="pending",
-        requestedAt=initiated_at,
-        requestedBy=requested_by,
-        gitPrUrl=pr["url"],
-        gitPrNumber=pr["number"],
-        imageRef=new_image_ref,
-        previousImageRef=previous_image_ref,
-        argoApp=str(target["argo_app"]),
-        gitRef=branch_name,
-        deployReason=payload.deploy_reason,
-        compareUrl=compare_url,
-        requestKey=request_key,
-        metadata={
-            "source": "portal-service-rollback",
-            "previousTag": previous_tag,
-            "newTag": payload.rollback_tag,
-            "patchFiles": sorted(updated_files),
-            "targetEnvironment": payload.target_environment,
-        },
-    )
-
-    try:
-        record = _upsert_deployment_record_row(record_payload, requested_by=requested_by)
-    except DeploymentLockConflictError as exc:
-        try:
-            git_provider.close_pr(workloads_repo, pr["number"])
-        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
-            logger.warning(
-                "service_rollback_failed_to_close_pr service_id=%s pr_number=%s error=%s",
-                service_id,
-                pr["number"],
-                close_exc,
-            )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "message": (
-                    f"Active deployment lock already exists for {service_id}/{payload.target_environment}. "
-                    "Wait for the in-flight mutation to finish or clear its stale lock."
-                ),
-                "activeLock": _build_deployment_lock_response(exc.active_lock).model_dump(by_alias=True),
-            },
-        ) from exc
-    except Exception:
-        try:
-            git_provider.close_pr(workloads_repo, pr["number"])
-        except Exception as close_exc:  # pragma: no cover - cleanup fallback only
-            logger.warning(
-                "service_rollback_failed_to_close_pr service_id=%s pr_number=%s error=%s",
-                service_id,
-                pr["number"],
-                close_exc,
-            )
-        raise
-
-    return PortalServiceRollbackResponse(
-        status="accepted",
-        action="rollback",
-        serviceId=service_id,
-        targetEnvironment=payload.target_environment,
-        requestedBy=requested_by,
-        repository=workloads_repo,
-        baseBranch=base_branch,
-        branchName=branch_name,
-        deploymentId=record.get("deploymentId") if isinstance(record.get("deploymentId"), str) else None,
-        gitPrUrl=pr["url"],
-        gitPrNumber=pr["number"],
-        previousTag=previous_tag,
-        newTag=payload.rollback_tag,
-        previousImageRef=previous_image_ref,
-        newImageRef=new_image_ref,
-        compareUrl=compare_url,
-        sourceCommitSha=source_commit_sha,
-        message=None,
-        initiatedAt=initiated_at.isoformat(),
     )
 
 
-@app.post(
-    "/rollbacks",
-    response_model=PortalRollbackResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    tags=["metadata"],
-)
 def request_portal_rollback(
     payload: PortalRollbackRequest,
     admin_user: str = Depends(require_admin),
 ) -> PortalRollbackResponse:
-    try:
-        result = dispatch_portal_rollback_workflow(
-            rollback_api_tag=payload.rollback_api_tag,
-            rollback_web_tag=payload.rollback_web_tag,
-            operator_reason=payload.reason,
-            target_environment=payload.target_environment,
-        )
-    except GitHubWorkflowDispatchError as exc:
-        status_code = (
-            status.HTTP_503_SERVICE_UNAVAILABLE
-            if exc.status_code is None or exc.status_code >= 500
-            else status.HTTP_502_BAD_GATEWAY
-        )
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-
-    return PortalRollbackResponse(
-        status="accepted",
-        action="rollback",
-        targetEnvironment=payload.target_environment,
-        rollbackApiTag=payload.rollback_api_tag,
-        rollbackWebTag=payload.rollback_web_tag,
-        reason=payload.reason,
-        requestedBy=admin_user,
-        repository=result.repository,
-        workflowFile=result.workflow_file,
-        workflowRef=result.workflow_ref,
-        workflowUrl=result.workflow_url,
-        initiatedAt=datetime.now(tz=timezone.utc).isoformat(),
-    )
+    return _get_deployment_service().request_portal_rollback(payload, admin_user=admin_user)
 
 
-@app.get(
-    "/services/{service_id}/deployments",
-    response_model=ServiceDeploymentsResponse,
-    tags=["metadata"],
-)
 def get_service_deployments(
     service_id: str,
     env: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceDeploymentsResponse:
-    selected_env = env or os.getenv("PORTAL_ENV", "dev")
-    _maybe_reconcile_recent_deployments(service_id=service_id, env=selected_env)
-    service_rows = _load_service_rows(service_id=service_id, env=env)
-    selected = _select_preferred_service_row(
-        service_id,
-        service_rows,
-        selected_env,
-    )
-    rows = _list_deployment_records_for_service(service_id, env=env, limit=limit)
-    deployments = [_build_deployment_record_response(row, selected) for row in rows]
-
-    return ServiceDeploymentsResponse(deployments=deployments)
+    return _get_deployment_service().get_service_deployments(service_id, env=env, limit=limit)
 
 
-@app.get(
-    "/services/{service_id}/deployment-info",
-    response_model=ServiceDeploymentInfoResponse,
-    tags=["metadata"],
-)
 def get_service_deployment_info(
     service_id: str,
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceDeploymentInfoResponse:
-    selected_env = env or os.getenv("PORTAL_ENV", "dev")
-    _maybe_reconcile_recent_deployments(service_id=service_id, env=selected_env)
-    records = _list_deployment_records_for_service(service_id, env=env, limit=50)
-    record = _select_latest_deployment_info_record(records)
-    if record is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Deployment info not found",
-        )
-
-    resolved_env = record.get("env") if isinstance(record.get("env"), str) else selected_env
-    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else None
-    deployed_image = record.get("targetImage") if isinstance(record.get("targetImage"), str) else None
-    previous_image = record.get("previousImage") if isinstance(record.get("previousImage"), str) else None
-    commit_sha = record.get("mergeSha") if isinstance(record.get("mergeSha"), str) else None
-    if commit_sha is None and isinstance(metadata, dict):
-        source_commit_sha = metadata.get("sourceCommitSha")
-        if isinstance(source_commit_sha, str) and source_commit_sha.strip():
-            commit_sha = source_commit_sha.strip()
-    result_reason = None
-    if isinstance(metadata, dict):
-        failure_reason = metadata.get("failureReason")
-        if isinstance(failure_reason, str) and failure_reason.strip():
-            result_reason = failure_reason.strip()
-    if result_reason is None:
-        deploy_reason = record.get("deployReason")
-        if isinstance(deploy_reason, str) and deploy_reason.strip():
-            result_reason = deploy_reason.strip() if str(record.get("status") or "").strip().lower() == "failed" else None
-
-    return ServiceDeploymentInfoResponse(
-        deploymentId=record.get("deploymentId") if isinstance(record.get("deploymentId"), str) else None,
-        serviceId=service_id,
-        env=resolved_env,
-        action=record.get("action") if isinstance(record.get("action"), str) else None,
-        deployedImage=deployed_image,
-        previousImage=previous_image,
-        imageDigest=_extract_image_digest(record),
-        gitCommit=commit_sha,
-        deployedTimestamp=_deployment_record_timestamp(record),
-        gitPrUrl=record.get("prUrl") if isinstance(record.get("prUrl"), str) else None,
-        gitPrNumber=record.get("prNumber") if isinstance(record.get("prNumber"), int) else None,
-        compareUrl=record.get("compareUrl") if isinstance(record.get("compareUrl"), str) else None,
-        deployReason=record.get("deployReason") if isinstance(record.get("deployReason"), str) else None,
-        result=record.get("status") if isinstance(record.get("status"), str) else None,
-        resultReason=result_reason,
-        commitUrl=_build_commit_url(commit_sha),
-        imageUrl=_build_package_url_from_image_ref(deployed_image),
-        argoApp=record.get("argoApp") if isinstance(record.get("argoApp"), str) else None,
-        syncStatus=record.get("syncStatus") if isinstance(record.get("syncStatus"), str) else None,
-        healthStatus=record.get("healthStatus") if isinstance(record.get("healthStatus"), str) else None,
-    )
+    return _get_deployment_service().get_service_deployment_info(service_id, env=env)
 
 
-@app.get(
-    "/services/{service_id}/observability/window",
-    response_model=DeploymentObservabilityResponse,
-    tags=["monitoring"],
-)
 # Deployment observability endpoints compose metrics, timeline, and logs around a
 # specific deployment window so regressions can be reviewed in one API call.
 def get_service_deployment_observability(
@@ -5217,300 +3864,51 @@ def get_service_deployment_observability(
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> DeploymentObservabilityResponse:
     user, _groups = identity
-    context, service_row, resolved_start, resolved_end = _resolve_deployment_observability_context(
+    return _get_observability_service().get_service_deployment_observability(
         service_id=service_id,
         deployment_id=deployment_id,
-        window_start_value=window_start,
-        window_end_value=window_end,
-    )
-    if context.evidence_status != "resolved" or resolved_start is None or resolved_end is None:
-        message = context.evidence_message or "No deployment window was available for this deployment record."
-        return DeploymentObservabilityResponse(
-            serviceId=service_id,
-            context=context,
-            metrics=_build_no_window_metrics_response(
-                message=message,
-                window_start=resolved_start,
-                window_end=resolved_end,
-            ),
-            healthTimeline=_build_no_window_timeline_response(
-                service_id=service_id,
-                message=message,
-                window_start=resolved_start,
-                window_end=resolved_end,
-            ),
-            logsQuickView=_build_no_window_logs_response(
-                service_id=service_id,
-                preset=logs_preset,
-                limit=logs_limit,
-                message=message,
-                window_start=resolved_start,
-                window_end=resolved_end,
-            ),
-        )
-
-    # Each provider-backed section fails independently. A Prometheus/Loki outage
-    # should surface as section-level no-data with provider diagnostics, not as a
-    # hard failure for the overall deployment observability view.
-    try:
-        metrics = _build_deployment_metrics_response(
-            service_id=service_id,
-            service_row=service_row,
-            window_start=resolved_start,
-            window_end=resolved_end,
-        )
-    except HTTPException as exc:
-        if exc.status_code != status.HTTP_502_BAD_GATEWAY:
-            raise
-        message, provider_status = _extract_provider_failure(exc)
-        metrics = _build_provider_error_metrics_response(
-            message=message,
-            provider_status=provider_status,
-            window_start=resolved_start,
-            window_end=resolved_end,
-        )
-
-    try:
-        timeline = _build_deployment_timeline_response(
-            service_id=service_id,
-            service_row=service_row,
-            window_start=resolved_start,
-            window_end=resolved_end,
-        )
-    except HTTPException as exc:
-        if exc.status_code != status.HTTP_502_BAD_GATEWAY:
-            raise
-        message, provider_status = _extract_provider_failure(exc)
-        timeline = _build_provider_error_timeline_response(
-            service_id=service_id,
-            message=message,
-            provider_status=provider_status,
-            window_start=resolved_start,
-            window_end=resolved_end,
-        )
-
-    try:
-        logs = _build_deployment_logs_response(
-            service_id=service_id,
-            service_row=service_row,
-            preset=logs_preset,
-            limit=logs_limit,
-            window_start=resolved_start,
-            window_end=resolved_end,
-            identity_key=user,
-        )
-    except HTTPException as exc:
-        if exc.status_code != status.HTTP_502_BAD_GATEWAY:
-            raise
-        message, provider_status = _extract_provider_failure(exc)
-        logs = _build_provider_error_logs_response(
-            service_id=service_id,
-            preset=logs_preset,
-            limit=logs_limit,
-            message=message,
-            provider_status=provider_status,
-            window_start=resolved_start,
-            window_end=resolved_end,
-        )
-    except ValueError as exc:
-        detail = str(exc)
-        status_code = (
-            status.HTTP_429_TOO_MANY_REQUESTS
-            if "rate limit" in detail.lower()
-            else status.HTTP_422_UNPROCESSABLE_ENTITY
-        )
-        raise HTTPException(status_code=status_code, detail=detail) from exc
-
-    return DeploymentObservabilityResponse(
-        serviceId=service_id,
-        context=context,
-        metrics=metrics,
-        healthTimeline=timeline,
-        logsQuickView=logs,
+        window_start=window_start,
+        window_end=window_end,
+        logs_preset=logs_preset,
+        logs_limit=logs_limit,
+        user=user,
     )
 
 
-@app.get("/catalog/reconciliation", response_model=CatalogJoinResponse, tags=["metadata"])
 def get_catalog_reconciliation(
     env: str | None = Query(default=None),
     project_id: str | None = Query(default=None, alias="projectId"),
     service_id: str | None = Query(default=None, alias="serviceId"),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> CatalogJoinResponse:
-    now = datetime.now(tz=timezone.utc)
-    result = build_catalog_join(
-        project_rows=_load_project_catalog_rows(env=env, project_id=project_id),
-        service_rows=_load_service_catalog_rows(env=env, service_id=service_id),
-        env_filter=env,
-        project_id_filter=project_id,
-        service_id_filter=service_id,
-    )
-    return CatalogJoinResponse(
-        generatedAt=now.isoformat(),
+    return _get_catalog_service().get_catalog_reconciliation(
         env=env,
-        rows=[CatalogJoinRowResponse(**row) for row in result["rows"]],
-        diagnostics=CatalogJoinDiagnosticsResponse(**result["diagnostics"]),
+        project_id=project_id,
+        service_id=service_id,
     )
 
 
-@app.post(
-    "/service-registry/sync",
-    response_model=ServiceRegistrySyncResponse,
-    tags=["metadata"],
-)
 def sync_service_registry(
     source: str = Query(default="cluster_services"),
     env: str | None = Query(default=None),
     _: str = Depends(require_admin),
 ) -> ServiceRegistrySyncResponse:
-    # Admin-triggered sync updates one of two backing catalogs: live cluster
-    # services or GitOps app metadata. The diagnostics endpoints compare both.
-    with _with_connection() as conn:
-        if source == "cluster_services":
-            summary = sync_service_registry_from_cluster(conn, env_name=env)
-        elif source == "gitops_apps":
-            summary = sync_project_registry_from_gitops(conn, env_name=env)
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="source must be one of: cluster_services,gitops_apps",
-            )
-    return ServiceRegistrySyncResponse(**summary)
+    return _get_catalog_service().sync_service_registry(source=source, env=env)
 
 
-@app.get(
-    "/service-registry/diagnostics",
-    response_model=ServiceRegistryDiagnosticsResponse,
-    tags=["metadata"],
-)
 def get_service_registry_diagnostics(
     env: str | None = Query(default=None),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceRegistryDiagnosticsResponse:
-    # Diagnostics intentionally combine freshness, join mismatches, and canonical
-    # identity drift so the UI can explain why catalog data looks incomplete.
-    with _with_connection() as conn:
-        with conn.cursor() as cur:
-            if env:
-                cur.execute(
-                    """
-                    SELECT COUNT(*), MAX(last_synced_at)
-                    FROM service_registry
-                    WHERE env = %s
-                    """,
-                    (env,),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT COUNT(*), MAX(last_synced_at)
-                    FROM service_registry
-                    """
-                )
-            count_row = cur.fetchone()
-
-    row_count = int(count_row[0] or 0)
-    last_synced_at = count_row[1]
-    stale_after_minutes = _registry_stale_after_minutes()
-    warning_after_minutes = _registry_warning_after_minutes(stale_after_minutes)
-    now = datetime.now(tz=timezone.utc)
-
-    is_empty = row_count == 0
-    if is_empty:
-        is_warning = False
-        is_stale = False
-        state = "empty"
-    else:
-        age = None if last_synced_at is None else now - last_synced_at
-        if last_synced_at is None:
-            is_warning = True
-            is_stale = True
-        else:
-            is_warning = age > timedelta(minutes=warning_after_minutes)
-            is_stale = age > timedelta(minutes=stale_after_minutes)
-        if is_stale:
-            state = "stale"
-        elif is_warning:
-            state = "warning"
-        else:
-            state = "fresh"
-
-    project_rows = _load_project_rows()
-    project_catalog_rows = _load_project_catalog_rows(env=env)
-    service_catalog_rows = _load_service_catalog_rows(env=env)
-    ci_rows = load_ci_metadata_rows()
-    argo_rows = load_argo_metadata_rows()
-    mismatches = build_release_join_diagnostics(
-        project_rows=project_rows,
-        ci_rows=ci_rows,
-        argo_rows=argo_rows,
-        env_filter=env,
-        service_id_filter=None,
-    )
-    catalog_join = build_catalog_join(
-        project_rows=project_catalog_rows,
-        service_rows=service_catalog_rows,
-        env_filter=env,
-        project_id_filter=None,
-        service_id_filter=None,
-    )
-    identity_drift = build_service_identity_diagnostics(
-        project_rows=project_catalog_rows,
-        service_rows=service_catalog_rows,
-        ci_rows=ci_rows,
-        argo_rows=argo_rows,
-        env_filter=env,
-        service_id_filter=None,
-    )
-
-    return ServiceRegistryDiagnosticsResponse(
-        generatedAt=now.isoformat(),
-        env=env,
-        freshness=ServiceRegistryFreshnessResponse(
-            rowCount=row_count,
-            lastSyncedAt=last_synced_at.isoformat() if last_synced_at else None,
-            warningAfterMinutes=warning_after_minutes,
-            staleAfterMinutes=stale_after_minutes,
-            isEmpty=is_empty,
-            isWarning=is_warning,
-            isStale=is_stale,
-            state=state,
-        ),
-        joinMismatch=ServiceRegistryJoinMismatchResponse(**mismatches),
-        catalogJoin=CatalogJoinDiagnosticsResponse(**catalog_join["diagnostics"]),
-        identityDrift=ServiceIdentityDiagnosticsResponse(**identity_drift),
-    )
+    return _get_catalog_service().get_service_registry_diagnostics(env=env)
 
 
-@app.get(
-    "/monitoring/providers/diagnostics",
-    response_model=MonitoringProvidersDiagnosticsResponse,
-    tags=["monitoring"],
-)
 def get_monitoring_provider_diagnostics(
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> MonitoringProvidersDiagnosticsResponse:
-    generated_at = datetime.now(tz=timezone.utc).isoformat()
-    providers = [
-        probe_monitoring_provider("prometheus", correlation_id=str(uuid4())),
-        probe_monitoring_provider("loki", correlation_id=str(uuid4())),
-        probe_monitoring_provider("alertmanager", correlation_id=str(uuid4())),
-    ]
-    overall_status = (
-        "healthy" if all(item["status"] == "healthy" for item in providers) else "degraded"
-    )
-    return MonitoringProvidersDiagnosticsResponse(
-        generatedAt=generated_at,
-        overallStatus=overall_status,
-        providers=[MonitoringProviderStatusResponse(**item) for item in providers],
-    )
+    return _get_observability_service().get_monitoring_provider_diagnostics()
 
 
-@app.get(
-    "/services/{service_id}/metrics/summary",
-    response_model=ServiceMetricsSummaryResponse,
-    tags=["monitoring"],
-)
 # The service-level observability endpoints below share the same identity resolution
 # and provider-error translation patterns, but return progressively richer views.
 def get_service_metrics_summary(
@@ -5522,96 +3920,12 @@ def get_service_metrics_summary(
     ),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceMetricsSummaryResponse:
-    # Metrics depend on service identity resolution plus observability config.
-    # This endpoint is one of the main integration points between registry data
-    # and Prometheus query templates.
-    config = load_observability_config()
-    safe_range = _validate_selected_range(
+    return _get_observability_service().get_service_metrics_summary(
+        service_id=service_id,
         selected_range=selected_range,
-        allowed_ranges=config.metrics_allowed_ranges,
-        field_name="range",
-    )
-    namespace, app_label, observability_mode = _resolve_service_monitoring_context(service_id)
-
-    def _load_summary() -> ServiceMetricsSummaryResponse:
-        now = datetime.now(tz=timezone.utc)
-        correlation_id = str(uuid4())
-        durations = {
-            "1h": timedelta(hours=1),
-            "24h": timedelta(hours=24),
-            "7d": timedelta(days=7),
-        }
-        window_start = now - durations[safe_range]
-        queries = _build_service_metrics_queries(
-            namespace=namespace,
-            app_label=app_label,
-            selected_range=safe_range,
-            config=config,
-        )
-        values: dict[str, float | None] = {}
-        no_data: dict[str, bool] = {}
-
-        for field_name, query_candidates in queries.items():
-            value = None
-            for query in query_candidates:
-                value = _query_prometheus_scalar(
-                    query,
-                    field_name,
-                    correlation_id=correlation_id,
-                )
-                if value is not None:
-                    break
-            values[field_name] = value
-            no_data[field_name] = value is None
-
-        observability_diagnostics = _build_metrics_observability_diagnostics(
-            service_id=service_id,
-            namespace=namespace,
-            app_label=app_label,
-            observability_mode=observability_mode,
-            missing_metrics=[
-                field_name
-                for field_name in ("p95LatencyMs", "errorRatePct")
-                if no_data.get(field_name, False)
-            ],
-            correlation_id=correlation_id,
-        )
-
-        return ServiceMetricsSummaryResponse(
-            serviceId=service_id,
-            uptimePct=values["uptimePct"],
-            p95LatencyMs=values["p95LatencyMs"],
-            errorRatePct=values["errorRatePct"],
-            restartCount=values["restartCount"],
-            windowStart=window_start.isoformat(),
-            windowEnd=now.isoformat(),
-            generatedAt=now.isoformat(),
-            noData=no_data,
-            providerStatus=MonitoringProviderStatusResponse(
-                **build_provider_status(
-                    provider="prometheus",
-                    base_url=get_prometheus_base_url(),
-                    status_value="healthy",
-                    reachable=True,
-                    checked_at=now.isoformat(),
-                    correlation_id=correlation_id,
-                )
-            ),
-            observabilityDiagnostics=observability_diagnostics,
-        )
-
-    return metrics_summary_cache.get_or_set(
-        key=("metrics-summary", service_id, safe_range),
-        ttl_seconds=config.metrics_cache_ttl_seconds,
-        loader=_load_summary,
     )
 
 
-@app.get(
-    "/services/{service_id}/metrics/trends",
-    response_model=ServiceMetricsTrendsResponse,
-    tags=["monitoring"],
-)
 def get_service_metrics_trends(
     service_id: str,
     selected_range: str = Query(
@@ -5621,96 +3935,12 @@ def get_service_metrics_trends(
     ),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceMetricsTrendsResponse:
-    config = load_observability_config()
-    safe_range = _validate_selected_range(
+    return _get_observability_service().get_service_metrics_trends(
+        service_id=service_id,
         selected_range=selected_range,
-        allowed_ranges=config.metrics_allowed_ranges,
-        field_name="range",
-    )
-    namespace, app_label, observability_mode = _resolve_service_monitoring_context(service_id)
-
-    def _load_trends() -> ServiceMetricsTrendsResponse:
-        now = datetime.now(tz=timezone.utc)
-        durations = {
-            "1h": timedelta(hours=1),
-            "24h": timedelta(hours=24),
-            "7d": timedelta(days=7),
-        }
-        window_start = now - durations[safe_range]
-        step_seconds = _select_timeline_step_seconds(now - window_start, config)
-        correlation_id = str(uuid4())
-        queries = _build_service_metrics_queries(
-            namespace=namespace,
-            app_label=app_label,
-            selected_range=safe_range,
-            config=config,
-        )
-
-        p95_latency = _build_metric_trend_series(
-            field_name="p95LatencyMs",
-            query_candidates=queries["p95LatencyMs"],
-            start=window_start,
-            end=now,
-            step_seconds=step_seconds,
-            correlation_id=correlation_id,
-        )
-        error_rate = _build_metric_trend_series(
-            field_name="errorRatePct",
-            query_candidates=queries["errorRatePct"],
-            start=window_start,
-            end=now,
-            step_seconds=step_seconds,
-            correlation_id=correlation_id,
-        )
-        observability_diagnostics = _build_metrics_observability_diagnostics(
-            service_id=service_id,
-            namespace=namespace,
-            app_label=app_label,
-            observability_mode=observability_mode,
-            missing_metrics=[
-                field_name
-                for field_name, series in (
-                    ("p95LatencyMs", p95_latency),
-                    ("errorRatePct", error_rate),
-                )
-                if series.query_status == "no_data"
-            ],
-            correlation_id=correlation_id,
-        )
-
-        return ServiceMetricsTrendsResponse(
-            serviceId=service_id,
-            range=safe_range,
-            windowStart=window_start.isoformat(),
-            windowEnd=now.isoformat(),
-            generatedAt=now.isoformat(),
-            providerStatus=MonitoringProviderStatusResponse(
-                **build_provider_status(
-                    provider="prometheus",
-                    base_url=get_prometheus_base_url(),
-                    status_value="healthy",
-                    reachable=True,
-                    checked_at=now.isoformat(),
-                    correlation_id=correlation_id,
-                )
-            ),
-            p95LatencyMs=p95_latency,
-            errorRatePct=error_rate,
-            observabilityDiagnostics=observability_diagnostics,
-        )
-
-    return metrics_summary_cache.get_or_set(
-        key=("metrics-trends", service_id, safe_range),
-        ttl_seconds=config.metrics_cache_ttl_seconds,
-        loader=_load_trends,
     )
 
 
-@app.get(
-    "/services/{service_id}/metrics-summary",
-    response_model=ServiceMetricsSummaryResponse,
-    tags=["monitoring"],
-)
 def get_service_metrics_summary_legacy(
     service_id: str,
     selected_range: str = Query(
@@ -5720,18 +3950,13 @@ def get_service_metrics_summary_legacy(
     ),
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ServiceMetricsSummaryResponse:
-    return get_service_metrics_summary(
+    del identity
+    return _get_observability_service().get_service_metrics_summary(
         service_id=service_id,
         selected_range=selected_range,
-        _=identity,
     )
 
 
-@app.get(
-    "/services/{service_id}/health/timeline",
-    response_model=list[ServiceHealthTimelineSegmentResponse],
-    tags=["monitoring"],
-)
 def get_service_health_timeline(
     service_id: str,
     selected_range: str = Query(
@@ -5742,300 +3967,67 @@ def get_service_health_timeline(
     step: str = Query(default="5m", pattern="^([1-9][0-9]*)(m|h)$"),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> list[ServiceHealthTimelineSegmentResponse]:
-    config = load_observability_config()
-    safe_range = _validate_selected_range(
+    return _get_observability_service().get_service_health_timeline(
+        service_id=service_id,
         selected_range=selected_range,
-        allowed_ranges=config.timeline_allowed_ranges,
-        field_name="range",
-    )
-    step_seconds = _validate_step_for_range(range_value=safe_range, step_value=step)
-
-    def _load_timeline() -> list[ServiceHealthTimelineSegmentResponse]:
-        end = now_utc()
-        window = parse_range(safe_range)
-        start = end - window
-        correlation_id = str(uuid4())
-
-        namespace, app_label, observability_mode = _resolve_service_monitoring_context(service_id)
-        queries = _build_health_timeline_queries(
-            namespace=namespace,
-            app_label=app_label,
-            config=config,
-        )
-
-        availability_points = _query_prometheus_range(
-            queries["availability"][0],
-            "availability",
-            start=start,
-            end=end,
-            step_seconds=step_seconds,
-            correlation_id=correlation_id,
-        )
-        error_points: dict[int, float] = {}
-        for index, query in enumerate(queries["errorRatePct"]):
-            error_points = _query_prometheus_range(
-                query,
-                f"errorRatePct_{index}",
-                start=start,
-                end=end,
-                step_seconds=step_seconds,
-                correlation_id=correlation_id,
-            )
-            if error_points:
-                break
-        readiness_points = _query_prometheus_range(
-            queries["readiness"][0],
-            "readiness",
-            start=start,
-            end=end,
-            step_seconds=step_seconds,
-            correlation_id=correlation_id,
-        )
-
-        all_timestamps = sorted(
-            set(availability_points.keys())
-            .union(error_points.keys())
-            .union(readiness_points.keys())
-        )
-
-        thresholds = load_timeline_thresholds()
-        points: list[TimelinePoint] = []
-        for ts in all_timestamps:
-            error_rate_value = error_points.get(ts)
-            if normalize_observability_mode(observability_mode) == "no-http" and error_rate_value is None:
-                error_rate_value = 0.0
-            status_label, reason = classify_timeline_status(
-                availability=availability_points.get(ts),
-                error_rate_pct=error_rate_value,
-                readiness=readiness_points.get(ts),
-                thresholds=thresholds,
-            )
-            points.append(
-                TimelinePoint(
-                    timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
-                    status=status_label,
-                    reason=reason,
-                )
-            )
-
-        segments = compact_timeline_points(
-            points,
-            window_start=start,
-            window_end=end,
-            step=timedelta(seconds=step_seconds),
-        )
-        return [
-            ServiceHealthTimelineSegmentResponse(
-                start=segment.start.isoformat(),
-                end=segment.end.isoformat(),
-                status=segment.status,
-                reason=segment.reason,
-            )
-            for segment in segments
-        ]
-
-    return timeline_cache.get_or_set(
-        key=("health-timeline", service_id, safe_range, step_seconds),
-        ttl_seconds=config.timeline_cache_ttl_seconds,
-        loader=_load_timeline,
+        step=step,
     )
 
 
-@app.get(
-    "/alerts/active",
-    response_model=ActiveAlertsResponse,
-    tags=["monitoring"],
-)
 def get_active_alerts(
     env: str | None = Query(default=None),
     service_id: str | None = Query(default=None, alias="serviceId"),
     limit: int = Query(default=100, ge=1, le=500),
     _: tuple[str, set[str]] = Depends(get_current_user),
-) -> list[ActiveAlertResponse]:
-    config = load_observability_config()
-    safe_limit = _effective_limit(limit, config.alerts_max_rows)
-
-    correlation_id = str(uuid4())
-    now = datetime.now(tz=timezone.utc).isoformat()
-
-    try:
-        raw_alerts, provider_status = _query_alertmanager_active_alerts(
-            correlation_id=correlation_id,
-        )
-        normalized = normalize_active_alerts(raw_alerts)
-    except HTTPException as exc:
-        # Graceful degradation for dashboard/banner UX: keep API usable with explicit metadata.
-        if exc.status_code == status.HTTP_502_BAD_GATEWAY and isinstance(exc.detail, dict):
-            logger.warning("alerts_active_degraded detail=%s", exc.detail)
-            detail = exc.detail
-            provider_detail = detail.get("providerStatus")
-            provider_status = (
-                provider_detail
-                if isinstance(provider_detail, dict)
-                else build_provider_status(
-                    provider="alertmanager",
-                    base_url=get_alertmanager_base_url(),
-                    status_value="error",
-                    reachable=False,
-                    checked_at=now,
-                    correlation_id=correlation_id,
-                    error="provider failure",
-                )
-            )
-            return ActiveAlertsResponse(
-                alerts=[],
-                providerStatus=MonitoringProviderStatusResponse(**provider_status),
-            )
-        raise
-
-    filtered = [
-        alert
-        for alert in normalized
-        if (not env or alert.env == env)
-        and (not service_id or alert.service_id == service_id)
-    ][:safe_limit]
-
-    return ActiveAlertsResponse(
-        alerts=[
-            ActiveAlertResponse(
-                id=alert.id,
-                severity=alert.severity,
-                title=alert.title,
-                description=alert.description,
-                startsAt=alert.starts_at,
-                labels=alert.labels,
-                serviceId=alert.service_id,
-                env=alert.env,
-            )
-            for alert in filtered
-        ],
-        providerStatus=MonitoringProviderStatusResponse(**provider_status),
+) -> ActiveAlertsResponse:
+    return _get_observability_service().get_active_alerts(
+        env=env,
+        service_id=service_id,
+        limit=limit,
     )
 
 
-@app.get(
-    "/monitoring/incidents",
-    response_model=MonitoringIncidentsCompatEnvelope,
-    tags=["monitoring"],
-)
 def get_monitoring_incidents_compat(
     env: str | None = Query(default=None),
     service_id: str | None = Query(default=None, alias="serviceId"),
     limit: int = Query(default=100, ge=1, le=500),
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> MonitoringIncidentsCompatEnvelope:
-    active_alerts = get_active_alerts(
+    del identity
+    return _get_observability_service().get_monitoring_incidents_compat(
         env=env,
         service_id=service_id,
         limit=limit,
-        _=identity,
-    )
-    return MonitoringIncidentsCompatEnvelope(
-        incidents=[
-            MonitoringIncidentCompatResponse(
-                id=item.id,
-                severity=item.severity,
-                title=item.title,
-                status="active",
-                startedAt=item.starts_at,
-                source="alertmanager",
-                serviceId=item.service_id,
-            )
-            for item in active_alerts.alerts
-        ],
-        providerStatus=active_alerts.provider_status,
     )
 
 
-@app.get(
-    "/releases",
-    response_model=list[ReleaseTraceabilityResponse],
-    tags=["monitoring"],
-)
 def get_release_traceability(
     env: str | None = Query(default=None),
     service_id: str | None = Query(default=None, alias="serviceId"),
     limit: int = Query(default=50, ge=1, le=200),
     _: tuple[str, set[str]] = Depends(get_current_user),
 ) -> list[ReleaseTraceabilityResponse]:
-    rows = build_release_traceability_rows(
-        project_rows=_load_project_rows(),
-        ci_rows=load_ci_metadata_rows(),
-        argo_rows=load_argo_metadata_rows(),
-        env_filter=env,
-        service_id_filter=service_id,
+    return _get_observability_service().get_release_traceability(
+        env=env,
+        service_id=service_id,
         limit=limit,
     )
-    rows = _enrich_release_rows_with_live_runtime(rows, env=env)
-    return [
-        ReleaseTraceabilityResponse(
-            serviceId=row["serviceId"],
-            env=row["env"],
-            commitSha=row["commitSha"],
-            imageRef=row["imageRef"],
-            deployedAt=row["deployedAt"],
-            argo=ReleaseArgoStateResponse(
-                appName=str(row["argo"]["appName"]),
-                syncStatus=str(row["argo"]["syncStatus"]),
-                healthStatus=str(row["argo"]["healthStatus"]),
-                revision=row["argo"]["revision"]
-                if isinstance(row["argo"]["revision"], str)
-                else None,
-            ),
-            drift=ReleaseDriftStateResponse(
-                isDrifted=bool(row["drift"]["isDrifted"]),
-                expectedRevision=row["drift"]["expectedRevision"]
-                if isinstance(row["drift"]["expectedRevision"], str)
-                else None,
-                liveRevision=row["drift"]["liveRevision"]
-                if isinstance(row["drift"]["liveRevision"], str)
-                else None,
-            ),
-        )
-        for row in rows
-    ]
 
 
-@app.get(
-    "/release-dashboard",
-    response_model=ReleaseDashboardCompatResponse,
-    tags=["monitoring"],
-)
 def get_release_dashboard_compat(
     env: str | None = Query(default=None),
     service_id: str | None = Query(default=None, alias="serviceId"),
     limit: int = Query(default=50, ge=1, le=200),
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> ReleaseDashboardCompatResponse:
-    rows = get_release_traceability(
+    del identity
+    return _get_observability_service().get_release_dashboard_compat(
         env=env,
         service_id=service_id,
         limit=limit,
-        _=identity,
-    )
-    return ReleaseDashboardCompatResponse(
-        releases=[
-            ReleaseDashboardCompatRow(
-                serviceId=row.service_id,
-                serviceName=row.service_id,
-                environment=row.env,
-                commitSha=row.commit_sha,
-                image=row.image_ref,
-                sync=row.argo.sync_status,
-                health=row.argo.health_status,
-                drift=row.drift.is_drifted,
-                deployedAt=row.deployed_at,
-            )
-            for row in rows
-        ]
     )
 
 
-@app.get(
-    "/services/{service_id}/logs/quickview",
-    response_model=LogsQuickViewResponse,
-    tags=["monitoring"],
-)
 def get_service_logs_quickview(
     service_id: str,
     preset: str = Query(default="all"),
@@ -6046,103 +4038,16 @@ def get_service_logs_quickview(
     app_label: str | None = Query(default=None, alias="appLabel"),
     identity: tuple[str, set[str]] = Depends(get_current_user),
 ) -> LogsQuickViewResponse:
-    config = load_observability_config()
-    safe_range = _validate_selected_range(
-        selected_range=selected_range,
-        allowed_ranges=config.logs_allowed_ranges,
-        field_name="range",
-    )
-    safe_limit = _effective_limit(limit, config.logs_max_lines)
     user, _groups = identity
-    now = datetime.now(tz=timezone.utc)
-
-    try:
-        enforce_logs_rate_limit(identity_key=user, now=now)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=str(exc),
-        ) from exc
-
-    try:
-        safe_preset = validate_preset(preset)
-        window = build_time_window(
-            now=now,
-            range_value=safe_range,
-            cursor=cursor,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-
-    resolved_namespace, resolved_app_label = _resolve_service_monitoring_metadata(service_id)
-    safe_namespace = namespace.strip() if namespace and namespace.strip() else resolved_namespace
-    safe_namespace = safe_namespace or get_logs_default_namespace()
-    safe_app_label = app_label.strip() if app_label and app_label.strip() else resolved_app_label
-    safe_app_label = safe_app_label or service_id
-    query = build_preset_query(
-        app_label=safe_app_label,
-        namespace=safe_namespace,
-        preset=safe_preset,
-    )
-    correlation_id = str(uuid4())
-
-    fetch_limit = min(safe_limit + 1, max(2, config.logs_max_lines + 1))
-    cache_key = (
-        "logs-quickview",
-        service_id,
-        safe_namespace,
-        safe_app_label,
-        safe_preset,
-        safe_range,
-        cursor or "",
-        safe_limit,
-    )
-    lines = logs_quickview_cache.get_or_set(
-        key=cache_key,
-        ttl_seconds=config.logs_cache_ttl_seconds,
-        loader=lambda: _query_loki_range(
-            query=query,
-            start=window.start,
-            end=window.end,
-            limit=fetch_limit,
-            correlation_id=correlation_id,
-        ),
-    )
-
-    more_available = len(lines) > safe_limit
-    visible = lines[:safe_limit]
-    next_cursor = encode_cursor_ns(visible[-1][0]) if more_available and visible else None
-
-    return LogsQuickViewResponse(
-        serviceId=service_id,
-        preset=safe_preset,
-        range=safe_range,
-        generatedAt=now.isoformat(),
-        limit=safe_limit,
-        returned=len(visible),
-        moreAvailable=more_available,
-        nextCursor=next_cursor,
-        lines=[
-            QuickViewLogLineResponse(
-                timestamp=datetime.fromtimestamp(item[0] / 1_000_000_000, tz=timezone.utc).isoformat(),
-                message=item[1],
-                labels=item[2],
-            )
-            for item in visible
-        ],
-        providerStatus=MonitoringProviderStatusResponse(
-            **build_provider_status(
-                provider="loki",
-                base_url=get_loki_base_url(),
-                status_value="healthy",
-                reachable=True,
-                checked_at=now.isoformat(),
-                correlation_id=correlation_id,
-            )
-        ),
+    return _get_observability_service().get_service_logs_quickview(
+        service_id=service_id,
+        preset=preset,
+        selected_range=selected_range,
+        limit=limit,
+        cursor=cursor,
+        namespace=namespace,
+        app_label=app_label,
+        user=user,
     )
 
 
@@ -6161,13 +4066,6 @@ _WORKLOADS_CATALOG_PATH = "services.yaml"
 
 def _kustomization_path_for(inp: "ScaffoldServiceInput") -> str:
     return _WORKLOADS_PROD_KUSTOMIZATION_PATH if inp.template in ("postgres", "mysql") else _WORKLOADS_KUSTOMIZATION_PATH
-
-
-
-
-def _workloads_gitops_repo_url(repo_slug: str) -> str:
-    return f"https://github.com/{repo_slug}.git"
-
 
 def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInput:
     repo_slug = _workloads_repo_slug()
@@ -6364,181 +4262,20 @@ def _generate_scaffold_files_and_updates(
     return new_files, modified_files
 
 
-@app.post("/scaffold/preview", response_model=ScaffoldPreviewResponse, tags=["scaffold"])
 def scaffold_preview(
     payload: ScaffoldServiceRequest,
 ) -> ScaffoldPreviewResponse:
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-
-    try:
-        git_provider = build_default_git_provider()
-        new_files, modified_files = _generate_scaffold_files_and_updates(
-            payload, workloads_repo, base_branch, git_provider,
-        )
-    except ScaffoldError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    preview_files: list[ScaffoldPreviewFile] = [
-        ScaffoldPreviewFile(path=path, content=content, changeType="create")
-        for path, content in sorted(new_files.items())
-    ]
-    preview_files += [
-        ScaffoldPreviewFile(path=path, content=content, changeType="modify")
-        for path, content in sorted(modified_files.items())
-    ]
-    return ScaffoldPreviewResponse(files=preview_files)
+    return _get_scaffold_admin_service().scaffold_preview(payload=payload)
 
 
-@app.post(
-    "/scaffold/submit",
-    response_model=ScaffoldSubmitResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-    tags=["scaffold"],
-)
 def scaffold_submit(
     payload: ScaffoldServiceRequest,
 ) -> ScaffoldSubmitResponse:
-    initiated_at = datetime.now(tz=timezone.utc)
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-    name = payload.name.strip().lower()
-
-    try:
-        git_provider = build_default_git_provider()
-        new_files, modified_files = _generate_scaffold_files_and_updates(
-            payload, workloads_repo, base_branch, git_provider,
-        )
-    except ScaffoldError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    all_files: dict[str, str] = {**new_files, **modified_files}
-
-    timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
-    namespace = payload.namespace.strip() or name
-    is_add_to_project = payload.mode == "add-to-project"
-    is_bundle = not is_add_to_project and payload.topology != "single-service"
-    if is_add_to_project:
-        service_id = f"{payload.project_id.strip().lower()}-{payload.service_name.strip().lower()}"
-        kind_label = f"service to {payload.project_id.strip().lower()}"
-        template_label = payload.template
-    elif is_bundle:
-        kind_label = f"{payload.topology} project"
-        template_label = (
-            f"{payload.frontend_template} + {payload.backend_template}"
-            + (f" + {payload.db_template}" if payload.db_template and payload.topology == "frontend-backend-db" else "")
-        )
-    else:
-        kind_label = "service"
-        template_label = payload.template
-    branch_name = f"scaffold/{name}-{timestamp}"
-    pr_title = f"feat(scaffold): add {service_id if is_add_to_project else name} {kind_label}"
-    project_name = payload.project_id.strip().lower() if is_add_to_project else name
-    pr_body = (
-        f"## Scaffold: {service_id if is_add_to_project else name}\n\n"
-        f"**Description:** {payload.description}\n"
-        f"**Mode:** {payload.mode}\n"
-        f"**Template:** {template_label}\n"
-        f"**Namespace:** {namespace}\n"
-        f"**Repository:** {payload.repo_url}\n\n"
-        f"Generated by the homelab portal scaffold wizard.\n\n"
-        f"### Checklist\n"
-        f"- [ ] Review generated manifests\n"
-        f"- [ ] Create image pull secret in `{namespace}` if using GHCR private images\n"
-        f"- [ ] Update `runbook_url` in `services.yaml` once a runbook exists\n"
-        f"- [ ] Verify kustomize renders without errors: "
-        f"`./scripts/render-kustomize.sh apps/{project_name}/envs/dev`\n"
-    )
-
-    try:
-        git_provider.create_branch(workloads_repo, base_branch, branch_name)
-        git_provider.commit_to_branch(
-            workloads_repo,
-            branch_name,
-            all_files,
-            f"feat(scaffold): add {service_id if is_add_to_project else name} {kind_label} manifests and catalog entry",
-        )
-        pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    return ScaffoldSubmitResponse(
-        prUrl=pr["url"],
-        prNumber=pr["number"],
-        branchName=branch_name,
-        filesCommitted=sorted(all_files),
-        initiatedAt=initiated_at.isoformat(),
-    )
+    return _get_scaffold_admin_service().scaffold_submit(payload=payload)
 
 
-@app.get("/scaffold/projects", response_model=list[ScaffoldProjectInfo], tags=["scaffold"])
 def scaffold_list_projects() -> list[ScaffoldProjectInfo]:
-    """List existing projects available for the add-to-project scaffold mode."""
-    import yaml as _yaml
-
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-
-    try:
-        git_provider = build_default_git_provider()
-        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except (GitServiceAuthError, GitServiceError) as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    try:
-        data = _yaml.safe_load(services_yaml_raw)
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Failed to parse services.yaml: {exc}") from exc
-
-    if not isinstance(data, dict) or "services" not in data:
-        return []
-
-    # Group services by project_id
-    projects: dict[str, dict[str, object]] = {}
-    for svc in data["services"]:
-        if not isinstance(svc, dict):
-            continue
-        service_id = svc.get("service_id", "")
-        project_id = svc.get("project_id", service_id)
-        if project_id not in projects:
-            # Derive namespace from first env entry
-            ns = project_id
-            envs = svc.get("envs", [])
-            if envs and isinstance(envs[0], dict):
-                ns = envs[0].get("namespace", project_id)
-            projects[project_id] = {"namespace": ns, "service_ids": []}
-        projects[project_id]["service_ids"].append(service_id)  # type: ignore[union-attr]
-
-    return [
-        ScaffoldProjectInfo(
-            projectId=pid,
-            namespace=str(info["namespace"]),
-            serviceIds=info["service_ids"],  # type: ignore[arg-type]
-        )
-        for pid, info in sorted(projects.items())
-    ]
+    return _get_scaffold_admin_service().scaffold_list_projects()
 
 
 # ---------------------------------------------------------------------------
@@ -6662,92 +4399,47 @@ def _update_patch_ingress_host(patch_ingress: str, new_host: str) -> str:
     )
 
 
-@app.put(
-    "/services/{service_id}/public-hostname",
-    tags=["scaffold"],
-    status_code=status.HTTP_202_ACCEPTED,
-    response_model=UpdatePublicHostnameResponse,
-    responses={204: {"description": "No-op: hostname unchanged"}},
-)
 def update_service_public_hostname(
     service_id: str,
     payload: UpdatePublicHostnameRequest,
     response: Response,
     _admin: str = Depends(require_admin),
 ) -> UpdatePublicHostnameResponse | None:
-    """Update the production public hostname for an existing service.
-
-    Creates a GitOps PR updating services.yaml and patch-ingress.yaml.
-    Returns 204 if the hostname is unchanged.
-    """
-    new_host = payload.public_host.strip()
-    if not new_host:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="publicHost must be non-empty")
-
-    workloads_repo = _workloads_repo_slug()
-    base_branch = _workloads_base_branch()
-    patch_ingress_path = f"apps/{service_id}/envs/prod/patch-ingress.yaml"
-
-    try:
-        git_provider = build_default_git_provider()
-        services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, _WORKLOADS_CATALOG_PATH)
-        patch_ingress_raw = git_provider.read_file(workloads_repo, base_branch, patch_ingress_path)
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-
-    # No-op check
-    current_catalog_host = _read_current_public_host_from_services_yaml(services_yaml_raw, service_id)
-    current_ingress_host = _read_current_host_from_patch_ingress(patch_ingress_raw)
-    if current_catalog_host == new_host and current_ingress_host == new_host:
-        response.status_code = status.HTTP_204_NO_CONTENT
-        return None
-
-    updated_services_yaml = _update_services_yaml_public_host(services_yaml_raw, service_id, new_host)
-    updated_patch_ingress = _update_patch_ingress_host(patch_ingress_raw, new_host)
-
-    initiated_at = datetime.now(tz=timezone.utc)
-    timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
-    branch_name = f"hostname/{service_id}-{timestamp}"
-    pr_title = f"feat(hostname): update {service_id} public hostname"
-    pr_body = (
-        f"## Public hostname update: {service_id}\n\n"
-        f"**New hostname:** `{new_host}`\n\n"
-        f"### Files changed\n"
-        f"- `{_WORKLOADS_CATALOG_PATH}` — updated `envs[prod].public_host`\n"
-        f"- `{patch_ingress_path}` — updated Ingress host field\n\n"
-        f"> **Note:** DNS record creation is out of scope. Point `{new_host}` at the "
-        f"cluster ingress IP after merging.\n"
+    del _admin
+    return _get_scaffold_admin_service().update_service_public_hostname(
+        service_id=service_id,
+        payload=payload,
+        response=response,
     )
 
-    all_files = {
-        _WORKLOADS_CATALOG_PATH: updated_services_yaml,
-        patch_ingress_path: updated_patch_ingress,
-    }
 
-    try:
-        git_provider.create_branch(workloads_repo, base_branch, branch_name)
-        git_provider.commit_to_branch(
-            workloads_repo,
-            branch_name,
-            all_files,
-            f"feat(hostname): update {service_id} public hostname to {new_host}",
-        )
-        pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)
-    except GitServiceConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitServiceAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except GitServiceConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except GitServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-    return UpdatePublicHostnameResponse(
-        prUrl=pr["url"],
-        prNumber=pr["number"],
-        branchName=branch_name,
+def _build_scaffold_admin_service() -> ScaffoldAdminService:
+    return _compose_scaffold_admin_service(
+        workloads_repo_slug=_workloads_repo_slug,
+        workloads_base_branch=_workloads_base_branch,
+        build_config_edit_branch_name=_build_config_edit_branch_name,
+        build_config_edit_pr_body=_build_config_edit_pr_body,
+        build_secret_edit_branch_name=_build_secret_edit_branch_name,
+        build_secret_edit_pr_body=_build_secret_edit_pr_body,
+        generate_scaffold_files_and_updates=_generate_scaffold_files_and_updates,
+        read_current_public_host_from_services_yaml=_read_current_public_host_from_services_yaml,
+        read_current_host_from_patch_ingress=_read_current_host_from_patch_ingress,
+        update_services_yaml_public_host=_update_services_yaml_public_host,
+        update_patch_ingress_host=_update_patch_ingress_host,
+        workloads_catalog_path=_WORKLOADS_CATALOG_PATH,
     )
+
+def _get_scaffold_admin_service() -> ScaffoldAdminService:
+    return get_backend_service_builders(app).build_scaffold_admin_service()
+
+
+configure_backend_services()
+
+
+# Route registration now lives in app.api.routes.* so this module can keep
+# the existing endpoint implementations while shedding route concentration.
+import sys
+
+from app.api.app import register_api_routes
+
+register_api_routes(app, sys.modules[__name__])
