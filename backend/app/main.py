@@ -3635,77 +3635,6 @@ def get_service(
     return _get_catalog_service().get_service(service_id=service_id, env=env)
 
 
-def reconcile_deployments(
-    service_id: str | None = Query(default=None, alias="serviceId"),
-    env: str | None = Query(default=None),
-    _: str = Depends(require_admin),
-) -> DeploymentReconcileResponse:
-    deployment_reconcile_cache.clear()
-    return _reconcile_recent_deployment_activity(service_id=service_id, env=env)
-
-
-def get_deployment(
-    deployment_id: str,
-    _: tuple[str, set[str]] = Depends(get_current_user),
-) -> DeploymentRecordResponse:
-    return _get_deployment_service().get_deployment(deployment_id)
-
-
-def create_deployment_record(
-    payload: CreateDeploymentRecordRequest,
-    admin_user: str = Depends(require_admin),
-) -> DeploymentRecordResponse:
-    return _get_deployment_service().create_deployment_record(payload, admin_user=admin_user)
-
-
-def cancel_deployment(
-    deployment_id: str,
-    admin_user: str = Depends(require_admin),
-) -> DeploymentRecordResponse:
-    """Soft-cancel a deployment that has not yet reached a terminal state.
-
-    Sets status='failed', result='cancelled', result_reason='Cancelled by operator'
-    and releases the deployment lock.  Returns 404 if the deployment is not found,
-    409 if it is already in a terminal state.
-    """
-    return _get_deployment_service().cancel_deployment(deployment_id, admin_user=admin_user)
-
-
-# Deploy-to-dev is a GitOps mutation endpoint: resolve the newest portal image,
-# patch the target overlays in a branch, open a PR, then create a pending deployment
-# record/lock so the UI can track the request before Argo applies it.
-def request_portal_deploy_to_dev(
-    service_id: str,
-    payload: PortalDeployToDevRequest,
-    response: Response,
-    identity: tuple[str, set[str]] = Depends(get_current_user),
-) -> PortalDeployToDevResponse:
-    requested_by, _groups = identity
-    return _get_deployment_service().request_portal_deploy_to_dev(
-        service_id,
-        payload,
-        response=response,
-        requested_by=requested_by,
-    )
-
-
-# Promote-to-prod follows the same GitOps pattern as deploy-to-dev, but its source
-# of truth is the current dev overlay and it always targets the prod overlays.
-def request_portal_promote_to_prod(
-    service_id: str,
-    payload: PortalPromoteToProdRequest,
-    response: Response,
-    identity: tuple[str, set[str]] = Depends(get_current_user),
-) -> PortalPromoteToProdResponse:
-    requested_by, _groups = identity
-    return _get_deployment_service().request_portal_promote_to_prod(
-        service_id,
-        payload,
-        response=response,
-        requested_by=requested_by,
-    )
-
-
 def get_service_config(
     service_id: str,
     env: Literal["dev", "prod"],
@@ -3737,59 +3666,6 @@ def request_portal_set_secret(
         payload=payload,
         admin_user=admin_user,
     )
-
-
-def list_service_rollback_candidates(
-    service_id: str,
-    target_environment: Literal["dev", "prod"] = Query(default="dev", alias="targetEnvironment"),
-    identity: tuple[str, set[str]] = Depends(get_current_user),
-) -> PortalServiceRollbackCandidatesResponse:
-    del identity
-    return _get_deployment_service().list_service_rollback_candidates(
-        service_id,
-        target_environment=target_environment,
-    )
-
-
-# Service rollback is also PR-driven. Candidates are discovered from recent image
-# history, then the selected tag is written back into the appropriate overlay files.
-def request_service_rollback(
-    service_id: str,
-    payload: PortalServiceRollbackRequest,
-    response: Response,
-    identity: tuple[str, set[str]] = Depends(get_current_user),
-) -> PortalServiceRollbackResponse:
-    requested_by, _groups = identity
-    return _get_deployment_service().request_service_rollback(
-        service_id,
-        payload,
-        response=response,
-        requested_by=requested_by,
-    )
-
-
-def request_portal_rollback(
-    payload: PortalRollbackRequest,
-    admin_user: str = Depends(require_admin),
-) -> PortalRollbackResponse:
-    return _get_deployment_service().request_portal_rollback(payload, admin_user=admin_user)
-
-
-def get_service_deployments(
-    service_id: str,
-    env: str | None = Query(default=None),
-    limit: int = Query(default=20, ge=1, le=100),
-    _: tuple[str, set[str]] = Depends(get_current_user),
-) -> ServiceDeploymentsResponse:
-    return _get_deployment_service().get_service_deployments(service_id, env=env, limit=limit)
-
-
-def get_service_deployment_info(
-    service_id: str,
-    env: str | None = Query(default=None),
-    _: tuple[str, set[str]] = Depends(get_current_user),
-) -> ServiceDeploymentInfoResponse:
-    return _get_deployment_service().get_service_deployment_info(service_id, env=env)
 
 
 # Deployment observability endpoints compose metrics, timeline, and logs around a

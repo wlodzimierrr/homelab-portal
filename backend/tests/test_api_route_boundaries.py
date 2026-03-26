@@ -7,6 +7,7 @@ from fastapi import Response
 from fastapi.routing import APIRoute
 
 import app.main as app_main
+from app.api.endpoints import deployments as deployment_endpoints
 from app.api.endpoints import scaffold as scaffold_endpoints
 from app.api.schemas.catalog import Project, ProjectsResponse
 from app.api.schemas.deployments import (
@@ -76,7 +77,7 @@ def test_split_route_modules_register_expected_main_handlers() -> None:
         (
             "/deployments/{deployment_id}",
             "GET",
-            app_main.get_deployment,
+            deployment_endpoints.get_deployment,
             app_main.DeploymentRecordResponse,
             ["metadata"],
         ),
@@ -147,7 +148,7 @@ def test_deployment_handler_uses_current_service_builder() -> None:
     with _override_backend_service_builders(
         build_deployment_service=lambda: _FakeDeploymentService()
     ):
-        response = app_main.get_deployment("dep-builder", _=("alice", {"admin"}))
+        response = deployment_endpoints.get_deployment("dep-builder", _=("alice", {"admin"}))
 
     assert response.service_id == "svc-builder"
 
