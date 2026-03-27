@@ -11,13 +11,12 @@ from fastapi import HTTPException, Response, status
 
 from app.deployment_locks import DeploymentLockConflictError, release_deployment_lock
 from app.deployment_records import upsert_deployment_record
-from app.github_workflows import GitHubWorkflowDispatchError, dispatch_portal_rollback_workflow
+from app.github_workflows import GitHubWorkflowDispatchError
 from app.lib import (
     GitServiceAuthError,
     GitServiceConfigurationError,
     GitServiceConflictError,
     GitServiceError,
-    build_default_git_provider,
 )
 from app.api.schemas.deployments import (
     CreateDeploymentRecordRequest,
@@ -77,6 +76,8 @@ class DeploymentServiceDeps:
     deployment_record_timestamp: Any
     build_commit_url: Any
     build_package_url_from_image_ref: Any
+    build_default_git_provider: Any
+    dispatch_portal_rollback_workflow: Any
     deploy_to_dev_error_type: type[Exception]
     promote_to_prod_error_type: type[Exception]
     service_rollback_error_type: type[Exception]
@@ -250,7 +251,7 @@ class DeploymentService:
         new_image_ref = str(latest_candidate["imageRef"])
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             _image_repo, previous_image_ref, updated_files = self.deps.load_dev_overlay_update_plan(
                 git_provider,
                 service_id=service_id,
@@ -421,7 +422,7 @@ class DeploymentService:
         base_branch = self.deps.workloads_base_branch()
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             image_repo, previous_image_ref, new_image_ref, new_tag, updated_files = self.deps.load_promote_to_prod_update_plan(
                 git_provider,
                 service_id=service_id,
@@ -586,7 +587,7 @@ class DeploymentService:
         base_branch = self.deps.workloads_base_branch()
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             target = self.deps.rollback_target(service_id, target_environment)
             image_repo = str(target["image_repo"])
             patch_files = [str(path) for path in target["patch_files"]]
@@ -645,7 +646,7 @@ class DeploymentService:
         base_branch = self.deps.workloads_base_branch()
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             target = self.deps.rollback_target(service_id, payload.target_environment)
             image_repo, previous_image_ref, new_image_ref, updated_files = self.deps.load_service_rollback_update_plan(
                 git_provider,
@@ -821,7 +822,7 @@ class DeploymentService:
         admin_user: str,
     ) -> PortalRollbackResponse:
         try:
-            result = dispatch_portal_rollback_workflow(
+            result = self.deps.dispatch_portal_rollback_workflow(
                 rollback_api_tag=payload.rollback_api_tag,
                 rollback_web_tag=payload.rollback_web_tag,
                 operator_reason=payload.reason,

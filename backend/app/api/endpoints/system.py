@@ -11,12 +11,13 @@ from fastapi import Query, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.api.schemas.observability import HealthResponse, MonitoringProviderStatusResponse
-from app.monitoring_providers import probe_monitoring_provider
 
 
 def health(
     include_providers: bool = Query(default=False, alias="includeProviders"),
 ) -> HealthResponse:
+    from app.main import probe_monitoring_provider
+
     # Keep the default health check lightweight for liveness/readiness probes, and
     # only fan out to Prometheus/Loki/Alertmanager when diagnostics are requested.
     if not include_providers:

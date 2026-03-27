@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException, status
 
-from app.alerts_feed import get_alertmanager_base_url, normalize_active_alerts
+from app.alerts_feed import get_alertmanager_base_url
 from app.health_timeline import (
     TimelinePoint,
     classify_timeline_status,
@@ -30,12 +30,9 @@ from app.monitoring_providers import (
     build_provider_status,
     get_loki_base_url,
     get_prometheus_base_url,
-    probe_monitoring_provider,
 )
 from app.release_traceability import (
     build_release_traceability_rows,
-    load_argo_metadata_rows,
-    load_ci_metadata_rows,
 )
 from app.service_observability import normalize_observability_mode
 from app.observability_config import load_observability_config
@@ -95,6 +92,10 @@ class ObservabilityServiceDeps:
     timeline_cache: Any
     logs_quickview_cache: Any
     logger: Any
+    probe_monitoring_provider: Any
+    normalize_active_alerts: Any
+    load_ci_metadata_rows: Any
+    load_argo_metadata_rows: Any
 
 
 class ObservabilityService:
@@ -226,9 +227,9 @@ class ObservabilityService:
     def get_monitoring_provider_diagnostics(self) -> MonitoringProvidersDiagnosticsResponse:
         generated_at = datetime.now(tz=timezone.utc).isoformat()
         providers = [
-            probe_monitoring_provider("prometheus", correlation_id=str(uuid4())),
-            probe_monitoring_provider("loki", correlation_id=str(uuid4())),
-            probe_monitoring_provider("alertmanager", correlation_id=str(uuid4())),
+            self.deps.probe_monitoring_provider("prometheus", correlation_id=str(uuid4())),
+            self.deps.probe_monitoring_provider("loki", correlation_id=str(uuid4())),
+            self.deps.probe_monitoring_provider("alertmanager", correlation_id=str(uuid4())),
         ]
         overall_status = "healthy" if all(item["status"] == "healthy" for item in providers) else "degraded"
         return MonitoringProvidersDiagnosticsResponse(
@@ -536,7 +537,7 @@ class ObservabilityService:
             raw_alerts, provider_status = self.deps.query_alertmanager_active_alerts(
                 correlation_id=correlation_id,
             )
-            normalized = normalize_active_alerts(raw_alerts)
+            normalized = self.deps.normalize_active_alerts(raw_alerts)
         except HTTPException as exc:
             if exc.status_code == status.HTTP_502_BAD_GATEWAY and isinstance(exc.detail, dict):
                 self.deps.logger.warning("alerts_active_degraded detail=%s", exc.detail)
@@ -622,8 +623,8 @@ class ObservabilityService:
     ) -> list[ReleaseTraceabilityResponse]:
         rows = build_release_traceability_rows(
             project_rows=self.deps.load_project_rows(),
-            ci_rows=load_ci_metadata_rows(),
-            argo_rows=load_argo_metadata_rows(),
+            ci_rows=self.deps.load_ci_metadata_rows(),
+            argo_rows=self.deps.load_argo_metadata_rows(),
             env_filter=env,
             service_id_filter=service_id,
             limit=limit,

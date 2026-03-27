@@ -16,7 +16,9 @@ from fastapi import FastAPI, HTTPException, status
 
 from app.alerts_feed import (
     get_alertmanager_base_url,
+    normalize_active_alerts,
 )
+from app.catalog_reconciliation import build_catalog_join
 from app.db import get_psycopg_database_url
 from app.deployment_records import (
     get_deployment_record,
@@ -52,12 +54,15 @@ from app.monitoring_providers import (
     get_monitoring_timeout_seconds,
     get_prometheus_base_url,
     load_json_from_provider,
+    probe_monitoring_provider,
     raise_provider_bad_payload_error,
 )
 from app.lib import (
     GitProvider,
+    build_default_git_provider,
 )
 from app.release_traceability import (
+    build_release_join_diagnostics,
     build_release_traceability_rows,
     compute_is_drifted,
     load_argo_metadata_rows,
@@ -67,7 +72,10 @@ from app.service_observability import (
     build_service_metrics_observability_diagnostics,
     normalize_observability_mode,
 )
-from app.service_registry_sync import _kube_get_json
+from app.service_identity_validation import build_service_identity_diagnostics
+from app.service_registry_sync import _kube_get_json, sync_service_registry_from_cluster
+from app.gitops_project_sync import sync_project_registry_from_gitops
+from app.github_workflows import dispatch_portal_rollback_workflow
 from app.observability_config import (
     escape_promql_regex_literal,
     load_observability_config,
@@ -2350,6 +2358,8 @@ def _build_deployment_service() -> DeploymentService:
         deployment_record_timestamp=_deployment_record_timestamp,
         build_commit_url=_build_commit_url,
         build_package_url_from_image_ref=_build_package_url_from_image_ref,
+        build_default_git_provider=build_default_git_provider,
+        dispatch_portal_rollback_workflow=dispatch_portal_rollback_workflow,
         deploy_to_dev_error_type=PortalDeployToDevError,
         promote_to_prod_error_type=PortalPromoteToProdError,
         service_rollback_error_type=PortalServiceRollbackError,
@@ -3395,6 +3405,10 @@ def _build_observability_service() -> ObservabilityService:
         timeline_cache=timeline_cache,
         logs_quickview_cache=logs_quickview_cache,
         logger=logger,
+        probe_monitoring_provider=probe_monitoring_provider,
+        normalize_active_alerts=normalize_active_alerts,
+        load_ci_metadata_rows=load_ci_metadata_rows,
+        load_argo_metadata_rows=load_argo_metadata_rows,
     )
 
 
@@ -3417,6 +3431,13 @@ def _build_catalog_service() -> CatalogService:
         with_connection=_with_connection,
         registry_stale_after_minutes=_registry_stale_after_minutes,
         registry_warning_after_minutes=_registry_warning_after_minutes,
+        build_catalog_join=build_catalog_join,
+        sync_project_registry_from_gitops=sync_project_registry_from_gitops,
+        sync_service_registry_from_cluster=sync_service_registry_from_cluster,
+        load_ci_metadata_rows=load_ci_metadata_rows,
+        load_argo_metadata_rows=load_argo_metadata_rows,
+        build_release_join_diagnostics=build_release_join_diagnostics,
+        build_service_identity_diagnostics=build_service_identity_diagnostics,
     )
 
 
@@ -3473,6 +3494,7 @@ def _build_scaffold_admin_service() -> ScaffoldAdminService:
         update_services_yaml_public_host=update_services_yaml_public_host,
         update_patch_ingress_host=update_patch_ingress_host,
         workloads_catalog_path=WORKLOADS_CATALOG_PATH,
+        build_default_git_provider=build_default_git_provider,
     )
 
 

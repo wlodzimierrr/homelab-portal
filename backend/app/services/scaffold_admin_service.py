@@ -25,7 +25,6 @@ from app.lib import (
     GitServiceConfigurationError,
     GitServiceConflictError,
     GitServiceError,
-    build_default_git_provider,
 )
 from app.scaffold_service import ScaffoldError
 from app.secret_editing import (
@@ -83,6 +82,7 @@ class ScaffoldAdminServiceDeps:
     update_services_yaml_public_host: Any
     update_patch_ingress_host: Any
     workloads_catalog_path: str
+    build_default_git_provider: Any
 
 
 class ScaffoldAdminService:
@@ -111,7 +111,7 @@ class ScaffoldAdminService:
         base_branch = self.deps.workloads_base_branch()
         try:
             target = get_config_edit_target(service_id, env)
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             config_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
             data = parse_config_map_data(config_contents)
         except ConfigEditingError as exc:
@@ -148,7 +148,7 @@ class ScaffoldAdminService:
             )
             target = resolve_config_edit_target(service_id, payload.env, payload.config_key)
             normalized_value = normalize_config_value(payload.config_key, payload.config_value)
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             config_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
             updated_contents, previous_value = update_config_map_manifest_document(
                 config_contents,
@@ -257,7 +257,7 @@ class ScaffoldAdminService:
                 now=initiated_at,
             )
             target = resolve_secret_edit_target(service_id, payload.env, payload.secret_key)
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             encrypted_contents = git_provider.read_file(workloads_repo, base_branch, target.file_path)
             sops_config_contents = git_provider.read_file(workloads_repo, base_branch, ".sops.yaml")
             decrypted_manifest = decrypt_secret_manifest(encrypted_contents)
@@ -330,7 +330,7 @@ class ScaffoldAdminService:
         base_branch = self.deps.workloads_base_branch()
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             new_files, modified_files = self.deps.generate_scaffold_files_and_updates(
                 payload, workloads_repo, base_branch, git_provider
             )
@@ -357,7 +357,7 @@ class ScaffoldAdminService:
         name = payload.name.strip().lower()
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             new_files, modified_files = self.deps.generate_scaffold_files_and_updates(
                 payload, workloads_repo, base_branch, git_provider
             )
@@ -441,7 +441,7 @@ class ScaffoldAdminService:
         base_branch = self.deps.workloads_base_branch()
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             services_yaml_raw = git_provider.read_file(
                 workloads_repo, base_branch, self.deps.workloads_catalog_path
             )
@@ -502,7 +502,7 @@ class ScaffoldAdminService:
         patch_ingress_path = f"apps/{service_id}/envs/prod/patch-ingress.yaml"
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             services_yaml_raw = git_provider.read_file(
                 workloads_repo, base_branch, self.deps.workloads_catalog_path
             )
@@ -580,7 +580,7 @@ class ScaffoldAdminService:
         base_branch = self.deps.workloads_base_branch()
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             services_yaml_raw = git_provider.read_file(
                 workloads_repo, base_branch, self.deps.workloads_catalog_path
             )
@@ -664,7 +664,7 @@ class ScaffoldAdminService:
         base_branch = self.deps.workloads_base_branch()
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             services_yaml_raw = git_provider.read_file(
                 workloads_repo, base_branch, self.deps.workloads_catalog_path
             )
@@ -762,7 +762,7 @@ class ScaffoldAdminService:
             )
 
         try:
-            git_provider = build_default_git_provider()
+            git_provider = self.deps.build_default_git_provider()
             services_yaml_raw = git_provider.read_file(
                 workloads_repo, base_branch, self.deps.workloads_catalog_path
             )

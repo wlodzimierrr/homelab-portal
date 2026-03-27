@@ -9,15 +9,6 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
-from app.catalog_reconciliation import build_catalog_join
-from app.gitops_project_sync import sync_project_registry_from_gitops
-from app.release_traceability import (
-    build_release_join_diagnostics,
-    load_argo_metadata_rows,
-    load_ci_metadata_rows,
-)
-from app.service_identity_validation import build_service_identity_diagnostics
-from app.service_registry_sync import sync_service_registry_from_cluster
 from app.api.schemas.catalog import (
     CatalogJoinDiagnosticsResponse,
     CatalogJoinResponse,
@@ -55,6 +46,13 @@ class CatalogServiceDeps:
     with_connection: Any
     registry_stale_after_minutes: Any
     registry_warning_after_minutes: Any
+    build_catalog_join: Any
+    sync_project_registry_from_gitops: Any
+    sync_service_registry_from_cluster: Any
+    load_ci_metadata_rows: Any
+    load_argo_metadata_rows: Any
+    build_release_join_diagnostics: Any
+    build_service_identity_diagnostics: Any
 
 
 class CatalogService:
@@ -175,7 +173,7 @@ class CatalogService:
             env=env,
         )
         now = datetime.now(tz=timezone.utc)
-        catalog_join = build_catalog_join(
+        catalog_join = self.deps.build_catalog_join(
             project_rows=self.deps.load_project_catalog_rows(env=env),
             service_rows=self.deps.load_service_catalog_rows(env=env),
             env_filter=env,
@@ -293,7 +291,7 @@ class CatalogService:
         service_id: str | None,
     ) -> CatalogJoinResponse:
         now = datetime.now(tz=timezone.utc)
-        result = build_catalog_join(
+        result = self.deps.build_catalog_join(
             project_rows=self.deps.load_project_catalog_rows(env=env, project_id=project_id),
             service_rows=self.deps.load_service_catalog_rows(env=env, service_id=service_id),
             env_filter=env,
@@ -315,9 +313,9 @@ class CatalogService:
     ) -> ServiceRegistrySyncResponse:
         with self.deps.with_connection() as conn:
             if source == "cluster_services":
-                summary = sync_service_registry_from_cluster(conn, env_name=env)
+                summary = self.deps.sync_service_registry_from_cluster(conn, env_name=env)
             elif source == "gitops_apps":
-                summary = sync_project_registry_from_gitops(conn, env_name=env)
+                summary = self.deps.sync_project_registry_from_gitops(conn, env_name=env)
             else:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -338,23 +336,23 @@ class CatalogService:
         project_rows = self.deps.load_project_rows()
         project_catalog_rows = self.deps.load_project_catalog_rows(env=env)
         service_catalog_rows = self.deps.load_service_catalog_rows(env=env)
-        ci_rows = load_ci_metadata_rows()
-        argo_rows = load_argo_metadata_rows()
-        mismatches = build_release_join_diagnostics(
+        ci_rows = self.deps.load_ci_metadata_rows()
+        argo_rows = self.deps.load_argo_metadata_rows()
+        mismatches = self.deps.build_release_join_diagnostics(
             project_rows=project_rows,
             ci_rows=ci_rows,
             argo_rows=argo_rows,
             env_filter=env,
             service_id_filter=None,
         )
-        catalog_join = build_catalog_join(
+        catalog_join = self.deps.build_catalog_join(
             project_rows=project_catalog_rows,
             service_rows=service_catalog_rows,
             env_filter=env,
             project_id_filter=None,
             service_id_filter=None,
         )
-        identity_drift = build_service_identity_diagnostics(
+        identity_drift = self.deps.build_service_identity_diagnostics(
             project_rows=project_catalog_rows,
             service_rows=service_catalog_rows,
             ci_rows=ci_rows,
