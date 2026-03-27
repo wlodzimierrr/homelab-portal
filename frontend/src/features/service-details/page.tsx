@@ -11,14 +11,7 @@ import { StatusCard } from '@/components/status-card'
 import { ToastMessage } from '@/components/toast-message'
 import { UptimeIndicator } from '@/components/uptime-indicator'
 import { Button } from '@/components/ui/button'
-import type { Project, ServiceDetails, ServiceEndpoint } from '@/lib/api/catalog'
-import {
-  type ReleaseTraceabilityRow,
-  type ServiceDeployment,
-  type ServiceDeploymentLock,
-} from '@/lib/api/deployments'
 import type { MonitoringProviderStatus } from '@/lib/api/observability'
-import type { DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import {
   type ServiceMetricsRange,
   type ServiceMetricsSummary,
@@ -31,7 +24,7 @@ import {
 import type { TimelineWindow } from '@/lib/adapters/service-health-timeline'
 import { evaluateDeploymentHistoryItem, summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
 import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
-import { createServiceIdentity, normalizeServiceId, type ServiceIdentity } from '@/lib/service-identity'
+import type { ServiceIdentity } from '@/lib/service-identity'
 import {
   buildArgoAppUrl,
   buildGrafanaDashboardLink,
@@ -52,32 +45,6 @@ import { AdminControlsSection } from './components/admin-controls-section'
 interface ServiceDetailsPageProps {
   serviceId: string
   incidentServiceAlerts?: Record<string, ServiceIncidentBadge>
-}
-
-type HealthStatus = 'healthy' | 'degraded' | 'unknown'
-type SyncStatus = 'synced' | 'out_of_sync' | 'unknown'
-
-// These capability checks mirror what the backend currently supports. Keeping
-// them explicit in the UI avoids showing controls that would always fail.
-export function supportsServiceRollback(serviceId: string) {
-  return serviceId === 'homelab-api' || serviceId === 'homelab-web'
-}
-
-export function supportsConfigEditing(serviceId: string) {
-  return serviceId === 'homelab-api'
-}
-
-interface ServiceOverviewData {
-  id: string
-  name: string
-  version: string
-  health: HealthStatus
-  sync: SyncStatus
-  endpoints: ServiceEndpoint[]
-  endpointState: 'available' | 'no_routed_endpoint' | 'metadata_missing'
-  deployments: ServiceDeployment[]
-  deploymentLock?: ServiceDeploymentLock | null
-  observabilityMode?: 'app-native' | 'ingress-derived' | 'no-http'
 }
 
 interface QuickLinkCardProps {
@@ -102,34 +69,6 @@ type MonitoringPanelState =
   | 'no_data'
 
 type ConsoleLogLevel = 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'unknown'
-
-function normalizeHealthStatus(value?: string): HealthStatus {
-  if (!value) {
-    return 'unknown'
-  }
-  const normalized = value.trim().toLowerCase()
-  if (normalized === 'healthy') {
-    return 'healthy'
-  }
-  if (normalized === 'degraded' || normalized === 'unhealthy') {
-    return 'degraded'
-  }
-  return 'unknown'
-}
-
-function normalizeSyncStatus(value?: string): SyncStatus {
-  if (!value) {
-    return 'unknown'
-  }
-  const normalized = value.trim().toLowerCase()
-  if (normalized === 'synced') {
-    return 'synced'
-  }
-  if (normalized === 'out_of_sync' || normalized === 'out-of-sync' || normalized === 'outofsync') {
-    return 'out_of_sync'
-  }
-  return 'unknown'
-}
 
 function formatDate(value?: string) {
   if (!value) {
@@ -161,14 +100,6 @@ function formatConsoleTimestamp(value?: string) {
   }).format(parsed)
 }
 
-export function safeDecodeServiceId(rawServiceId: string) {
-  try {
-    return decodeURIComponent(rawServiceId)
-  } catch {
-    return rawServiceId
-  }
-}
-
 function getMetricSeverity(
   value: number | undefined,
   thresholds: { warning: number; critical: number; direction: 'higher_is_better' | 'lower_is_better' },
@@ -194,158 +125,6 @@ function getMetricSeverity(
     return 'warning'
   }
   return 'healthy'
-}
-
-// Fall back to the project catalog when the richer service endpoint is missing or
-// fails, so the page can still render ownership and endpoint metadata.
-export function buildFromProjects(serviceId: string, projects: Project[]): ServiceOverviewData {
-  const canonicalServiceId = normalizeServiceId(serviceId)
-  const matches = projects.filter((project) => {
-    const projectId = normalizeServiceId(project.id)
-    const projectName = normalizeServiceId(project.name)
-    return projectId === canonicalServiceId || projectName === canonicalServiceId
-  })
-  const primary = matches[0]
-
-  const endpointMap = new Map<string, ServiceEndpoint>()
-  for (const project of matches) {
-    if (project.publicUrl) {
-      endpointMap.set(project.publicUrl, {
-        type: 'public',
-        label: `${project.environment} public`,
-        url: project.publicUrl,
-      })
-    }
-    if (project.internalUrl) {
-      endpointMap.set(project.internalUrl, {
-        type: 'internal',
-        label: `${project.environment} internal`,
-        url: project.internalUrl,
-      })
-    }
-  }
-
-  return {
-    id: serviceId,
-    name: primary?.name ?? serviceId,
-    version: 'N/A',
-    health: normalizeHealthStatus(primary?.health),
-    sync: normalizeSyncStatus(primary?.sync),
-    endpoints: [...endpointMap.values()],
-    endpointState:
-      endpointMap.size > 0 ? 'available' : matches.length > 0 ? 'no_routed_endpoint' : 'metadata_missing',
-    deployments: [],
-    deploymentLock: null,
-  }
-}
-
-export function buildEndpointList(
-  endpoints: ServiceEndpoint[] | undefined,
-  publicUrl: string | undefined,
-  internalUrls: string[] | undefined,
-) {
-  const collected: ServiceEndpoint[] = []
-
-  if (endpoints?.length) {
-    for (const endpoint of endpoints) {
-      if (endpoint.url) {
-        collected.push(endpoint)
-      }
-    }
-  }
-
-  if (publicUrl) {
-    collected.push({
-      type: 'public',
-      label: 'Public URL',
-      url: publicUrl,
-    })
-  }
-
-  for (const internalUrl of internalUrls ?? []) {
-    if (internalUrl) {
-      collected.push({
-        type: 'internal',
-        label: 'Internal URL',
-        url: internalUrl,
-      })
-    }
-  }
-
-  return collected.filter(
-    (endpoint, index, source) => source.findIndex((item) => item.url === endpoint.url) === index,
-  )
-}
-
-export function buildIdentityFromServiceDetails(
-  serviceId: string,
-  details: ServiceDetails,
-  fallback: ServiceIdentity,
-): ServiceIdentity {
-  return createServiceIdentity({
-    serviceId: details.id || fallback.serviceId || serviceId,
-    serviceName: details.name || fallback.serviceName,
-    namespace: details.namespace || details.identity?.namespace || fallback.namespace,
-    env: details.env || details.identity?.env || fallback.env,
-    appLabel: details.appLabel || details.identity?.appLabel || fallback.appLabel,
-    argoAppName: details.argoAppName || details.identity?.argoAppName || fallback.argoAppName,
-  })
-}
-
-function deriveVersionFromImageRef(imageRef?: string | null) {
-  if (!imageRef) {
-    return undefined
-  }
-  const trimmed = imageRef.trim()
-  if (!trimmed) {
-    return undefined
-  }
-  const parts = trimmed.split(':')
-  return parts.length > 1 ? parts.slice(1).join(':') : trimmed
-}
-
-export function buildOverviewFromReleaseRows(
-  serviceId: string,
-  rows: ReleaseTraceabilityRow[],
-): Partial<ServiceOverviewData> {
-  const canonicalId = normalizeServiceId(serviceId)
-  const matchingRows = rows
-    .filter((row) => normalizeServiceId(typeof row.serviceId === 'string' ? row.serviceId : '') === canonicalId)
-    .sort((left, right) => {
-      const leftTime = left.deployedAt ? new Date(left.deployedAt).getTime() : 0
-      const rightTime = right.deployedAt ? new Date(right.deployedAt).getTime() : 0
-      return rightTime - leftTime
-    })
-
-  if (matchingRows.length === 0) {
-    return {}
-  }
-
-  const latest = matchingRows[0]
-
-  return {
-    version: deriveVersionFromImageRef(latest.imageRef) ?? 'N/A',
-    health: normalizeHealthStatus(
-      typeof latest.argo?.healthStatus === 'string' ? latest.argo.healthStatus : undefined,
-    ),
-    sync: normalizeSyncStatus(
-      typeof latest.argo?.syncStatus === 'string' ? latest.argo.syncStatus : undefined,
-    ),
-    deployments: matchingRows.map((row, index) => ({
-      id:
-        (typeof row.commitSha === 'string' && row.commitSha) ||
-        (typeof row.deployedAt === 'string' && row.deployedAt) ||
-        `${serviceId}:${index}`,
-      version: deriveVersionFromImageRef(row.imageRef),
-      status:
-        typeof row.argo?.healthStatus === 'string'
-          ? row.argo.healthStatus
-          : typeof row.argo?.syncStatus === 'string'
-            ? row.argo.syncStatus
-            : undefined,
-      deployedAt: typeof row.deployedAt === 'string' ? row.deployedAt : undefined,
-    })),
-  }
 }
 
 function QuickLinkCard({ label, description, href, unavailableMessage }: QuickLinkCardProps) {
@@ -620,29 +399,6 @@ function getDeploymentOutcomeTone(outcome?: string | null) {
     return 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
   }
   return 'bg-muted text-muted-foreground'
-}
-
-export function getLatestDeploymentForEnv(deployments: DeploymentHistoryItem[], env: 'dev' | 'prod') {
-  return deployments.find((deployment) => deployment.identity.env === env)
-}
-
-export function getRecentDeploymentTags(deployments: DeploymentHistoryItem[], env: 'dev' | 'prod', limit = 3) {
-  const seen = new Set<string>()
-  const items: string[] = []
-  for (const deployment of deployments) {
-    if (deployment.identity.env !== env || !deployment.version || deployment.version === 'N/A') {
-      continue
-    }
-    if (seen.has(deployment.version)) {
-      continue
-    }
-    seen.add(deployment.version)
-    items.push(deployment.version)
-    if (items.length >= limit) {
-      break
-    }
-  }
-  return items
 }
 
 const logsPresets: LogsPreset[] = [

@@ -2,19 +2,21 @@ import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import type { DeploymentHistoryItem } from '@/lib/adapters/deployments'
+import { cn } from '@/lib/utils'
 import {
-  EvidenceBadge,
   formatAction,
   formatBeforeAfter,
   formatDelta,
   formatTimestamp,
-  ImpactBadge,
-  MetricsSourceBadge,
-  OutcomeBadge,
   type ImpactFilterMode,
   type SortMode,
 } from '../shared'
-import { cn } from '@/lib/utils'
+import {
+  EvidenceBadge,
+  ImpactBadge,
+  MetricsSourceBadge,
+  OutcomeBadge,
+} from '../shared-components'
 
 interface DeploymentsTableProps {
   deployments: DeploymentHistoryItem[]

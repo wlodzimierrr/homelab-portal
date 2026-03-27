@@ -1112,7 +1112,7 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
     setValidationError('')
   }, [])
 
-  const buildPayload = (): ScaffoldServiceRequest => {
+  const buildPayload = useCallback((): ScaffoldServiceRequest => {
     const isAddToProject = form.mode === 'add-to-project'
     const isBundle = !isAddToProject && form.topology !== 'single-service'
     const base: ScaffoldServiceRequest = {
@@ -1149,17 +1149,17 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
       }
     }
     return base
-  }
+  }, [form])
 
-  const nextStep = (current: Step): Step | null => {
+  const nextStep = useCallback((current: Step): Step | null => {
     const idx = steps.indexOf(current)
     return idx >= 0 && idx < steps.length - 1 ? steps[idx + 1] : null
-  }
+  }, [steps])
 
-  const prevStep = (current: Step): Step | null => {
+  const prevStep = useCallback((current: Step): Step | null => {
     const idx = steps.indexOf(current)
     return idx > 0 ? steps[idx - 1] : null
-  }
+  }, [steps])
 
   const goNext = useCallback(async () => {
     setValidationError('')
@@ -1193,13 +1193,13 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
         setPreviewLoading(false)
       }
     }
-  }, [step, form, steps])
+  }, [buildPayload, form, nextStep, step])
 
   const goBack = useCallback(() => {
     setValidationError('')
     const prev = prevStep(step)
     if (prev) setStep(prev)
-  }, [step, steps])
+  }, [prevStep, step])
 
   const handleSubmit = useCallback(async () => {
     setSubmitting(true)
@@ -1213,7 +1213,7 @@ export function ScaffoldServiceWizard({ onClose }: Props) {
     } finally {
       setSubmitting(false)
     }
-  }, [form])
+  }, [buildPayload])
 
   return (
     <div

@@ -5,14 +5,16 @@ import type { DeploymentObservability } from '@/lib/adapters/deployment-observab
 import type { DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import {
   deploymentLogsPresetOptions,
-  DeploymentMetricWindowCard,
   formatAction,
   formatTimestamp,
   formatWindowRange,
-  ObservabilityStatusBadge,
-  OutcomeBadge,
   type DeploymentLogsPreset,
 } from '../shared'
+import {
+  DeploymentMetricWindowCard,
+  ObservabilityStatusBadge,
+  OutcomeBadge,
+} from '../shared-components'
 
 interface DeploymentObservabilityPanelProps {
   deployments: DeploymentHistoryItem[]

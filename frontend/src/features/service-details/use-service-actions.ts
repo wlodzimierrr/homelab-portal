@@ -4,7 +4,9 @@ import {
   requestServiceDeployToDev,
   requestServicePromoteToProd,
   requestServiceRollback,
+  type ServiceDeployToDevResponse,
   type ServiceDeploymentLock,
+  type ServicePromoteToProdResponse,
   type ServiceRollbackCandidatesResponse,
   type ServiceRollbackResponse,
 } from '@/lib/api/deployments'
@@ -89,11 +91,11 @@ export function useServiceActions({
   const [deployReason, setDeployReason] = useState('')
   const [deploySubmitting, setDeploySubmitting] = useState(false)
   const [deployError, setDeployError] = useState('')
-  const [deployResult, setDeployResult] = useState<any>(null)
+  const [deployResult, setDeployResult] = useState<ServiceDeployToDevResponse | null>(null)
   const [promoteReason, setPromoteReason] = useState('')
   const [promoteSubmitting, setPromoteSubmitting] = useState(false)
   const [promoteError, setPromoteError] = useState('')
-  const [promoteResult, setPromoteResult] = useState<any>(null)
+  const [promoteResult, setPromoteResult] = useState<ServicePromoteToProdResponse | null>(null)
   const [configEnv, setConfigEnv] = useState<'dev' | 'prod'>('dev')
   const [configEntries, setConfigEntries] = useState<ServiceConfigEntry[]>([])
   const [configLoading, setConfigLoading] = useState(false)

@@ -27,7 +27,6 @@ export function useIncidentFeed(token: string | null, pathname: string) {
   // pages can reuse one snapshot instead of issuing duplicate observability reads.
   useEffect(() => {
     if (!token) {
-      setIncidentSnapshot(EMPTY_INCIDENT_SNAPSHOT)
       return
     }
 
@@ -70,15 +69,15 @@ export function useIncidentFeed(token: string | null, pathname: string) {
   const showIncidentBanner = useMemo(() => {
     return (
       pathname !== '/login' &&
-      shouldShowIncidentBanner(incidentSnapshot, {
+      shouldShowIncidentBanner(token ? incidentSnapshot : EMPTY_INCIDENT_SNAPSHOT, {
         threshold: incidentThreshold,
         dismissed: isIncidentBannerDismissed,
       })
     )
-  }, [incidentSnapshot, incidentThreshold, isIncidentBannerDismissed, pathname])
+  }, [incidentSnapshot, incidentThreshold, isIncidentBannerDismissed, pathname, token])
 
   return {
-    incidentSnapshot,
+    incidentSnapshot: token ? incidentSnapshot : EMPTY_INCIDENT_SNAPSHOT,
     showIncidentBanner,
     dismissIncidentBanner,
   }
