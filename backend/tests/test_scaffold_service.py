@@ -306,6 +306,20 @@ def test_generate_gitops_new_files_image_repo_in_base_deployment() -> None:
     assert "ghcr.io/x/svc" in deployment
 
 
+def test_generate_gitops_new_files_bootstrap_image_uses_latest_tag() -> None:
+    files = generate_gitops_new_files(_make_input(image_repo="ghcr.io/x/svc"))
+    deployment = files["apps/my-svc/base/deployment.yaml"]
+    assert "image: ghcr.io/x/svc:latest" in deployment
+    assert "imagePullPolicy: Always" in deployment
+
+
+def test_generate_gitops_new_files_dev_overlay_uses_latest_tag() -> None:
+    files = generate_gitops_new_files(_make_input(image_repo="ghcr.io/x/svc"))
+    patch = files["apps/my-svc/envs/dev/patch-deployment.yaml"]
+    assert "image: ghcr.io/x/svc:latest" in patch
+    assert "imagePullPolicy: Always" in patch
+
+
 def test_generate_gitops_new_files_dev_host_in_base_ingress() -> None:
     files = generate_gitops_new_files(_make_input(dev_host="svc.dev.local"))
     ingress = files["apps/my-svc/base/ingress.yaml"]
