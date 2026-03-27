@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app import deployment_reconciler
+from app.api.endpoints import catalog as catalog_endpoints
 from app.api.schemas.catalog import ServiceDetailResponse
 from app.deployment_locks import DeploymentLockConflictError
 from app.main import (
@@ -10,7 +11,6 @@ from app.main import (
     _upsert_deployment_record_row,
     app,
     configure_backend_services,
-    get_service,
 )
 from app.services.composition import get_backend_service_builders
 
@@ -211,7 +211,7 @@ def test_get_service_includes_active_deployment_lock(monkeypatch) -> None:
         },
     )
 
-    response = get_service("homelab-api", env="dev", _=("alice", {"admin"}))
+    response = catalog_endpoints.get_service("homelab-api", env="dev", _=("alice", {"admin"}))
 
     assert response.deployment_lock is not None
     assert response.deployment_lock.request_key == "gitops-pr:100:homelab-api:dev:deploy"
@@ -249,7 +249,7 @@ def test_configure_backend_services_allows_catalog_service_override() -> None:
             build_scaffold_admin_service=original_builders.build_scaffold_admin_service,
         )
 
-        response = get_service("fake-service", env="dev", _=("alice", {"admin"}))
+        response = catalog_endpoints.get_service("fake-service", env="dev", _=("alice", {"admin"}))
 
         assert response.source_ref == "builder-override"
         assert response.namespace == "fake-ns"

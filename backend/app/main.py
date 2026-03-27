@@ -3529,10 +3529,6 @@ def configure_backend_services(
     )
 
 
-def _get_catalog_service() -> CatalogService:
-    return get_backend_service_builders(app).build_catalog_service()
-
-
 def _get_deployment_service() -> DeploymentService:
     return get_backend_service_builders(app).build_deployment_service()
 
@@ -3589,52 +3585,6 @@ def login(payload: LoginRequest) -> LoginResponse:
     )
 
 
-def list_projects(
-    env: str | None = Query(default=None),
-    _: tuple[str, set[str]] = Depends(get_current_user),
-) -> ProjectsResponse:
-    return _get_catalog_service().list_projects(env=env)
-
-
-# Freshness/diagnostic endpoints intentionally compute both source age and join
-# mismatch state so operators can tell whether data is old, empty, or structurally off.
-def get_project_catalog_diagnostics(
-    env: str | None = Query(default=None),
-    _: tuple[str, set[str]] = Depends(get_current_user),
-) -> ProjectCatalogDiagnosticsResponse:
-    return _get_catalog_service().get_project_catalog_diagnostics(env=env)
-
-
-def create_project(
-    payload: CreateProjectRequest,
-    admin_user: str = Depends(require_admin),
-) -> Project:
-    del payload, admin_user
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail=(
-            "Projects are sourced from GitOps app definitions; "
-            "manual project creation is not allowed."
-        ),
-    )
-
-
-def list_services(
-    env: str | None = Query(default=None),
-    namespace: str | None = Query(default=None),
-    _: tuple[str, set[str]] = Depends(get_current_user),
-) -> ServicesResponse:
-    return _get_catalog_service().list_services(env=env, namespace=namespace)
-
-
-def get_service(
-    service_id: str,
-    env: str | None = Query(default=None),
-    _: tuple[str, set[str]] = Depends(get_current_user),
-) -> ServiceDetailResponse:
-    return _get_catalog_service().get_service(service_id=service_id, env=env)
-
-
 def get_service_config(
     service_id: str,
     env: Literal["dev", "prod"],
@@ -3666,34 +3616,6 @@ def request_portal_set_secret(
         payload=payload,
         admin_user=admin_user,
     )
-
-
-def get_catalog_reconciliation(
-    env: str | None = Query(default=None),
-    project_id: str | None = Query(default=None, alias="projectId"),
-    service_id: str | None = Query(default=None, alias="serviceId"),
-    _: tuple[str, set[str]] = Depends(get_current_user),
-) -> CatalogJoinResponse:
-    return _get_catalog_service().get_catalog_reconciliation(
-        env=env,
-        project_id=project_id,
-        service_id=service_id,
-    )
-
-
-def sync_service_registry(
-    source: str = Query(default="cluster_services"),
-    env: str | None = Query(default=None),
-    _: str = Depends(require_admin),
-) -> ServiceRegistrySyncResponse:
-    return _get_catalog_service().sync_service_registry(source=source, env=env)
-
-
-def get_service_registry_diagnostics(
-    env: str | None = Query(default=None),
-    _: tuple[str, set[str]] = Depends(get_current_user),
-) -> ServiceRegistryDiagnosticsResponse:
-    return _get_catalog_service().get_service_registry_diagnostics(env=env)
 
 
 def _build_scaffold_admin_service() -> ScaffoldAdminService:

@@ -7,6 +7,7 @@ from fastapi import Response
 from fastapi.routing import APIRoute
 
 import app.main as app_main
+from app.api.endpoints import catalog as catalog_endpoints
 from app.api.endpoints import deployments as deployment_endpoints
 from app.api.endpoints import observability as observability_endpoints
 from app.api.endpoints import scaffold as scaffold_endpoints
@@ -74,7 +75,13 @@ def test_split_route_modules_register_expected_main_handlers() -> None:
     expected_routes = [
         ("/health", "GET", app_main.health, app_main.HealthResponse, ["system"]),
         ("/auth/login", "POST", app_main.login, app_main.LoginResponse, ["auth"]),
-        ("/projects", "GET", app_main.list_projects, app_main.ProjectsResponse, ["metadata"]),
+        (
+            "/projects",
+            "GET",
+            catalog_endpoints.list_projects,
+            app_main.ProjectsResponse,
+            ["metadata"],
+        ),
         (
             "/deployments/{deployment_id}",
             "GET",
@@ -128,7 +135,7 @@ def test_catalog_handler_uses_current_service_builder() -> None:
             )
 
     with _override_backend_service_builders(build_catalog_service=lambda: _FakeCatalogService()):
-        response = app_main.list_projects(env="prod", _=("alice", {"admin"}))
+        response = catalog_endpoints.list_projects(env="prod", _=("alice", {"admin"}))
 
     assert response.projects[0].id == "proj-from-builder"
 
