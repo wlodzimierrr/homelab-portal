@@ -854,21 +854,21 @@ def test_bundle_frontend_backend_file_count() -> None:
     #   3 netpol (default-deny, allow-dns, allow-ingress),
     #   2 netpol (frontend↔backend), 2 servicemonitor (react=sidecar → no, fastapi=app-native → yes)
     # react is sidecar so no frontend servicemonitor; fastapi is app-native
-    assert f"apps/my-proj/base/kustomization.yaml" in files
-    assert f"apps/my-proj/base/namespace.yaml" in files
-    assert f"apps/my-proj/base/frontend-deployment.yaml" in files
-    assert f"apps/my-proj/base/backend-deployment.yaml" in files
-    assert f"apps/my-proj/base/frontend-service.yaml" in files
-    assert f"apps/my-proj/base/backend-service.yaml" in files
-    assert f"apps/my-proj/base/ingress.yaml" in files
-    assert f"apps/my-proj/base/networkpolicy-default-deny.yaml" in files
-    assert f"apps/my-proj/base/networkpolicy-allow-dns-egress.yaml" in files
-    assert f"apps/my-proj/base/networkpolicy-allow-ingress.yaml" in files
-    assert f"apps/my-proj/base/networkpolicy-allow-frontend-to-backend.yaml" in files
-    assert f"apps/my-proj/base/networkpolicy-allow-backend-from-frontend.yaml" in files
+    assert "apps/my-proj/base/kustomization.yaml" in files
+    assert "apps/my-proj/base/namespace.yaml" in files
+    assert "apps/my-proj/base/frontend-deployment.yaml" in files
+    assert "apps/my-proj/base/backend-deployment.yaml" in files
+    assert "apps/my-proj/base/frontend-service.yaml" in files
+    assert "apps/my-proj/base/backend-service.yaml" in files
+    assert "apps/my-proj/base/ingress.yaml" in files
+    assert "apps/my-proj/base/networkpolicy-default-deny.yaml" in files
+    assert "apps/my-proj/base/networkpolicy-allow-dns-egress.yaml" in files
+    assert "apps/my-proj/base/networkpolicy-allow-ingress.yaml" in files
+    assert "apps/my-proj/base/networkpolicy-allow-frontend-to-backend.yaml" in files
+    assert "apps/my-proj/base/networkpolicy-allow-backend-from-frontend.yaml" in files
     # No db files for frontend-backend topology
-    assert f"apps/my-proj/base/db-statefulset.yaml" not in files
-    assert f"apps/my-proj/base/db-service.yaml" not in files
+    assert "apps/my-proj/base/db-statefulset.yaml" not in files
+    assert "apps/my-proj/base/db-service.yaml" not in files
 
 
 def test_bundle_frontend_backend_db_has_db_files() -> None:
@@ -876,11 +876,11 @@ def test_bundle_frontend_backend_db_has_db_files() -> None:
         topology="frontend-backend-db",
         db_template="postgres",
     ))
-    assert f"apps/my-proj/base/db-credentials-secret.yaml" in files
-    assert f"apps/my-proj/base/db-statefulset.yaml" in files
-    assert f"apps/my-proj/base/db-service.yaml" in files
-    assert f"apps/my-proj/base/networkpolicy-allow-backend-to-db.yaml" in files
-    assert f"apps/my-proj/base/networkpolicy-allow-db-from-backend.yaml" in files
+    assert "apps/my-proj/base/db-credentials-secret.yaml" in files
+    assert "apps/my-proj/base/db-statefulset.yaml" in files
+    assert "apps/my-proj/base/db-service.yaml" in files
+    assert "apps/my-proj/base/networkpolicy-allow-backend-to-db.yaml" in files
+    assert "apps/my-proj/base/networkpolicy-allow-db-from-backend.yaml" in files
 
 
 def test_bundle_frontend_deployment_has_backend_url() -> None:
@@ -1225,5 +1225,5 @@ def test_overlay_kustomization_sorts_patches() -> None:
         _EXISTING_OVERLAY_KUSTOMIZATION,
         "patch-alpha-deployment.yaml",
     )
-    lines = [l.strip() for l in result.splitlines() if l.strip().startswith("- path:")]
+    lines = [line.strip() for line in result.splitlines() if line.strip().startswith("- path:")]
     assert lines == sorted(lines)
