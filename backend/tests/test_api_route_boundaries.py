@@ -12,6 +12,7 @@ from app.api.endpoints import catalog as catalog_endpoints
 from app.api.endpoints import deployments as deployment_endpoints
 from app.api.endpoints import observability as observability_endpoints
 from app.api.endpoints import scaffold as scaffold_endpoints
+from app.api.endpoints import system as system_endpoints
 from app.api.schemas.catalog import Project, ProjectsResponse
 from app.api.schemas.deployments import (
     DeploymentRecordResponse,
@@ -74,7 +75,7 @@ def _override_backend_service_builders(
 
 def test_split_route_modules_register_expected_main_handlers() -> None:
     expected_routes = [
-        ("/health", "GET", app_main.health, app_main.HealthResponse, ["system"]),
+        ("/health", "GET", system_endpoints.health, app_main.HealthResponse, ["system"]),
         ("/auth/login", "POST", admin_endpoints.login, app_main.LoginResponse, ["auth"]),
         (
             "/projects",

@@ -4,38 +4,18 @@ import logging
 import math
 import os
 import re
-from typing import Any, Callable, Literal
+from typing import Callable, Literal
 from uuid import uuid4
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from fastapi import FastAPI, HTTPException, status
 
-from app.api.deps import (
-    get_current_user,
-    require_admin,
-    require_bearer_token,
-)
 
 from app.alerts_feed import (
     get_alertmanager_base_url,
-    normalize_active_alerts,
-)
-from app.catalog_reconciliation import build_catalog_join
-from app.config_editing import (
-    ALLOWED_CONFIG_VALUES,
-    ConfigEditingError,
-    compute_config_checksum_from_manifest,
-    enforce_config_edit_rate_limit,
-    get_config_edit_target,
-    normalize_config_value,
-    parse_config_map_data,
-    resolve_config_edit_target,
-    update_config_map_manifest_document,
-    update_deployment_patch_checksum,
 )
 from app.db import get_psycopg_database_url
 from app.deployment_records import (
@@ -45,11 +25,9 @@ from app.deployment_records import (
     upsert_deployment_record,
 )
 from app.deployment_locks import (
-    DeploymentLockConflictError,
     DeploymentLockRow,
     cleanup_stale_deployment_locks,
     get_deployment_lock,
-    release_deployment_lock,
     sync_deployment_lock_for_deployment_row,
 )
 from app.deployment_reconciler import make_pr_comment_poster, reconcile_recent_gitops_deployments
@@ -64,8 +42,6 @@ from app.health_timeline import (
 )
 from app.logs_quickview import (
     build_preset_query,
-    build_time_window,
-    encode_cursor_ns,
     enforce_logs_rate_limit,
     get_logs_default_namespace,
     validate_preset,
@@ -76,24 +52,12 @@ from app.monitoring_providers import (
     get_monitoring_timeout_seconds,
     get_prometheus_base_url,
     load_json_from_provider,
-    probe_monitoring_provider,
     raise_provider_bad_payload_error,
-)
-from app.gitops_project_sync import sync_project_registry_from_gitops
-from app.github_workflows import (
-    GitHubWorkflowDispatchError,
-    dispatch_portal_rollback_workflow,
 )
 from app.lib import (
     GitProvider,
-    GitServiceAuthError,
-    GitServiceConfigurationError,
-    GitServiceConflictError,
-    GitServiceError,
-    build_default_git_provider,
 )
 from app.release_traceability import (
-    build_release_join_diagnostics,
     build_release_traceability_rows,
     compute_is_drifted,
     load_argo_metadata_rows,
@@ -103,21 +67,12 @@ from app.service_observability import (
     build_service_metrics_observability_diagnostics,
     normalize_observability_mode,
 )
-from app.service_identity_validation import build_service_identity_diagnostics
-from app.service_registry_sync import _kube_get_json, sync_service_registry_from_cluster
+from app.service_registry_sync import _kube_get_json
 from app.observability_config import (
     escape_promql_regex_literal,
     load_observability_config,
     parse_duration_token,
     render_query_template,
-)
-from app.secret_editing import (
-    SecretEditingError,
-    decrypt_secret_manifest,
-    encrypt_secret_manifest,
-    enforce_secret_edit_rate_limit,
-    resolve_secret_edit_target,
-    update_secret_manifest_document,
 )
 from app.services.deployment_service import DeploymentService
 from app.services.builders import (
@@ -130,12 +85,13 @@ from app.services.catalog_service import CatalogService
 from app.services.composition import (
     BackendServiceBuilders,
     configure_backend_service_builders as _configure_backend_service_builders,
-    get_backend_service_builders,
 )
 from app.services.observability_service import ObservabilityService
 from app.services.scaffold_admin_service import ScaffoldAdminService
 from app.services.startup_jobs import register_deployment_reconciler_jobs
-from app.api.schemas.auth import LoginRequest, LoginResponse
+# These schema names are intentionally re-exported from app.main because the
+# split route modules still resolve response models through `main_module.*`.
+from app.api.schemas.auth import LoginResponse
 from app.api.bootstrap import (
     clear_observability_caches,
     create_api_app,
@@ -144,72 +100,46 @@ from app.api.bootstrap import (
     install_http_metrics_middleware,
 )
 from app.api.schemas.catalog import (
-    CatalogJoinDiagnosticsResponse,
     CatalogJoinResponse,
-    CreateProjectRequest,
     DeploymentLockResponse,
     Project,
     ProjectCatalogDiagnosticsResponse,
     ProjectsResponse,
     ServiceDetailResponse,
-    ServiceIdentityDiagnosticsResponse,
-    ServiceIdentityDriftRowResponse,
-    ServiceIdentityMonitoringSelectorResponse,
     ServiceRegistryDiagnosticsResponse,
-    ServiceRegistryFreshnessResponse,
-    ServiceRegistryJoinMismatchResponse,
-    ServiceRegistrySyncFailure,
     ServiceRegistrySyncResponse,
-    ServiceRow,
     ServicesResponse,
-    CatalogJoinRowResponse,
-    CatalogJoinServiceRefResponse,
 )
 from app.api.schemas.deployments import (
     CreateDeploymentRecordRequest,
     DeploymentReconcileResponse,
     DeploymentRecordResponse,
-    PortalDeployToDevRequest,
     PortalDeployToDevResponse,
-    PortalPromoteToProdRequest,
     PortalPromoteToProdResponse,
-    PortalRollbackRequest,
     PortalRollbackResponse,
     PortalServiceRollbackCandidatesResponse,
-    PortalServiceRollbackCandidate,
-    PortalServiceRollbackRequest,
     PortalServiceRollbackResponse,
-    PortalSetConfigRequest,
     PortalSetConfigResponse,
-    PortalSetSecretRequest,
     PortalSetSecretResponse,
     ROLLBACK_TAG_RE,
-    ReleaseArgoStateResponse,
     ReleaseDashboardCompatResponse,
-    ReleaseDashboardCompatRow,
-    ReleaseDriftStateResponse,
     ReleaseTraceabilityResponse,
-    ServiceConfigEntry,
     ServiceConfigResponse,
     ServiceDeploymentInfoResponse,
     ServiceDeploymentsResponse,
-    UpdatePublicHostnameRequest,
     UpdatePublicHostnameResponse,
 )
 from app.api.schemas.observability import (
-    ActiveAlertResponse,
     ActiveAlertsResponse,
+    DeploymentObservabilityResponse,
     DeploymentObservabilityContextResponse,
     DeploymentObservabilityLogsResponse,
     DeploymentObservabilityMetricSnapshotResponse,
     DeploymentObservabilityMetricsResponse,
-    DeploymentObservabilityResponse,
     DeploymentObservabilityTimelineResponse,
     HealthResponse,
     LogsQuickViewResponse,
-    MonitoringIncidentCompatResponse,
     MonitoringIncidentsCompatEnvelope,
-    MonitoringProviderErrorDetailResponse,
     MonitoringProviderStatusResponse,
     MonitoringProvidersDiagnosticsResponse,
     QuickViewLogLineResponse,
@@ -220,21 +150,8 @@ from app.api.schemas.observability import (
     ServiceMetricsSummaryResponse,
     ServiceMetricsTrendsResponse,
 )
-from app.api.schemas.migration import (
-    AdoptServiceRequest,
-    AdoptServiceResponse,
-    MigrationConsolidateRequest,
-    MigrationConsolidateResponse,
-    MigrationValidateRequest,
-    MigrationValidateResponse,
-)
-from app.api.schemas.scaffold import (
-    ScaffoldPreviewFile,
-    ScaffoldPreviewResponse,
-    ScaffoldProjectInfo,
-    ScaffoldServiceRequest,
-    ScaffoldSubmitResponse,
-)
+from app.api.schemas.migration import AdoptServiceResponse, MigrationConsolidateResponse, MigrationValidateResponse
+from app.api.schemas.scaffold import ScaffoldPreviewResponse, ScaffoldProjectInfo, ScaffoldSubmitResponse
 from app.runtime_config import (
     BRANCH_SAFE_FRAGMENT_RE,
     DEFAULT_PORTAL_IMAGES_LOOKBACK,
@@ -256,7 +173,6 @@ from app.runtime_config import (
     promote_to_prod_target as _promote_to_prod_target,
     rollback_target as _rollback_target,
     workloads_base_branch as _workloads_base_branch,
-    workloads_gitops_repo_url as _workloads_gitops_repo_url,
     workloads_repo_slug as _workloads_repo_slug,
 )
 
@@ -3529,40 +3445,9 @@ def configure_backend_services(
     )
 
 
-def _get_deployment_service() -> DeploymentService:
-    return get_backend_service_builders(app).build_deployment_service()
-
-
-def _get_observability_service() -> ObservabilityService:
-    return get_backend_service_builders(app).build_observability_service()
-
-
 # Primary API endpoints begin here. The order loosely follows how the frontend
 # consumes them: system/auth, metadata, deployment mutations, observability, then
 # scaffold/admin maintenance features.
-
-def health(
-    include_providers: bool = Query(default=False, alias="includeProviders"),
-) -> HealthResponse:
-    # Keep the default health check lightweight for liveness/readiness probes, and
-    # only fan out to Prometheus/Loki/Alertmanager when diagnostics are requested.
-    if not include_providers:
-        return HealthResponse(status="ok")
-
-    providers = [
-        probe_monitoring_provider("prometheus", correlation_id=str(uuid4())),
-        probe_monitoring_provider("loki", correlation_id=str(uuid4())),
-        probe_monitoring_provider("alertmanager", correlation_id=str(uuid4())),
-    ]
-    overall = "ok" if all(item["status"] == "healthy" for item in providers) else "degraded"
-    return HealthResponse(
-        status=overall,
-        providers=[MonitoringProviderStatusResponse(**item) for item in providers],
-    )
-
-
-def metrics() -> Response:
-    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 def _build_scaffold_admin_service() -> ScaffoldAdminService:
