@@ -224,7 +224,7 @@ def test_catalog_entry_nextjs_has_dev_and_prod_envs() -> None:
 
 def test_wordpress_template_generates_expected_file_count() -> None:
     files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
-    assert len(files) == 22
+    assert len(files) == 25
 
 
 
@@ -253,13 +253,15 @@ def test_wordpress_template_includes_mysql_bundle_files() -> None:
     files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
     assert "apps/my-svc/base/mysql-service.yaml" in files
     assert "apps/my-svc/base/mysql-statefulset.yaml" in files
-    assert "apps/my-svc/base/wordpress-db-secret.enc.yaml" in files
+    assert "apps/my-svc/envs/dev/wordpress-db-secret.enc.yaml" in files
+    assert "apps/my-svc/envs/prod/wordpress-db-secret.enc.yaml" in files
+    assert "apps/my-svc/envs/dev/wordpress-db-secret-generator.yaml" in files
 
 
 
 def test_wordpress_template_secret_stub_has_sops_block() -> None:
     files = generate_gitops_new_files(_make_input(template="wordpress", image_repo="wordpress:latest"))
-    secret_stub = files["apps/my-svc/base/wordpress-db-secret.enc.yaml"]
+    secret_stub = files["apps/my-svc/envs/dev/wordpress-db-secret.enc.yaml"]
     assert "kind: Secret" in secret_stub
     assert "sops:" in secret_stub
     assert "WORDPRESS_DB_PASSWORD" in secret_stub

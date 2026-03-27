@@ -545,7 +545,6 @@ def _generate_wordpress_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     resources = [
         "namespace.yaml",
         "serviceaccount.yaml",
-        "wordpress-db-secret.enc.yaml",
         "persistentvolumeclaim.yaml",
         "deployment.yaml",
         "service.yaml",
@@ -593,42 +592,6 @@ def _generate_wordpress_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
                 app.kubernetes.io/component: web
             """,
             name=inp.name,
-            namespace=inp.namespace,
-        ),
-        "wordpress-db-secret.enc.yaml": render_template(
-            """
-            # SOPS-encrypted Secret stub for WordPress + MySQL credentials.
-            # Rotate by editing the placeholder values and re-encrypting with SOPS.
-            # See docs/runbooks/sops-secrets.md for the full workflow.
-            apiVersion: v1
-            kind: Secret
-            metadata:
-              name: {db_secret_name}
-              namespace: {namespace}
-            type: Opaque
-            stringData:
-              WORDPRESS_DB_USER: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-              WORDPRESS_DB_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-              WORDPRESS_DB_NAME: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-              MYSQL_ROOT_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-            sops:
-              kms: []
-              gcp_kms: []
-              azure_kv: []
-              hc_vault: []
-              age:
-                - recipient: age1xxx
-                  enc: |
-                    -----BEGIN AGE ENCRYPTED FILE-----
-                    ...
-                    -----END AGE ENCRYPTED FILE-----
-              lastmodified: "2026-03-25T00:00:00Z"
-              mac: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-              pgp: []
-              encrypted_regex: ^(stringData|data)$
-              version: 3.8.1
-            """,
-            db_secret_name=db_secret_name,
             namespace=inp.namespace,
         ),
         "persistentvolumeclaim.yaml": render_template(
@@ -1029,6 +992,7 @@ def _generate_wordpress_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
 
 
 def _generate_wordpress_overlay_files(inp: ScaffoldServiceInput, env_name: str) -> dict[str, str]:
+    db_secret_name = f"{inp.name}-wordpress-db"
     files = {
         "kustomization.yaml": render_template(
             """
@@ -1036,12 +1000,64 @@ def _generate_wordpress_overlay_files(inp: ScaffoldServiceInput, env_name: str) 
             kind: Kustomization
             resources:
               - ../../base
+            generators:
+              - wordpress-db-secret-generator.yaml
             commonLabels:
               homelab.env: {env_name}
             patches:
               - path: patch-deployment.yaml
             """,
             env_name=env_name,
+        ),
+        "wordpress-db-secret-generator.yaml": render_template(
+            """
+            apiVersion: viaduct.ai/v1
+            kind: ksops
+            metadata:
+              name: wordpress-db-secret-generator
+              annotations:
+                config.kubernetes.io/function: |
+                  exec:
+                    path: ksops
+            files:
+              - wordpress-db-secret.enc.yaml
+            """
+        ),
+        "wordpress-db-secret.enc.yaml": render_template(
+            """
+            # SOPS-encrypted Secret stub for WordPress + MySQL credentials.
+            # Rotate by editing the placeholder values and re-encrypting with SOPS.
+            # See docs/runbooks/sops-secrets.md for the full workflow.
+            apiVersion: v1
+            kind: Secret
+            metadata:
+              name: {db_secret_name}
+              namespace: {namespace}
+            type: Opaque
+            stringData:
+              WORDPRESS_DB_USER: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+              WORDPRESS_DB_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+              WORDPRESS_DB_NAME: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+              MYSQL_ROOT_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+            sops:
+              kms: []
+              gcp_kms: []
+              azure_kv: []
+              hc_vault: []
+              age:
+                - recipient: age1xxx
+                  enc: |
+                    -----BEGIN AGE ENCRYPTED FILE-----
+                    ...
+                    -----END AGE ENCRYPTED FILE-----
+              lastmodified: "2026-03-25T00:00:00Z"
+              mac: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+              pgp: []
+              encrypted_regex: ^(stringData|data)$
+              version: 3.8.1
+            """,
+            db_secret_name=db_secret_name,
+            namespace=inp.namespace,
         ),
         "patch-deployment.yaml": render_template(
             """
@@ -1081,6 +1097,8 @@ def _generate_wordpress_overlay_files(inp: ScaffoldServiceInput, env_name: str) 
             kind: Kustomization
             resources:
               - ../../base
+            generators:
+              - wordpress-db-secret-generator.yaml
             commonLabels:
               homelab.env: prod
             patches:
