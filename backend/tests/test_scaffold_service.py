@@ -188,7 +188,7 @@ def test_nextjs_template_has_servicemonitor() -> None:
 def test_nextjs_template_health_path() -> None:
     files = generate_gitops_new_files(_make_input(template="nextjs"))
     deployment = files["apps/my-svc/base/deployment.yaml"]
-    assert "path: /api/health" in deployment
+    assert "path: /" in deployment
 
 
 def test_nextjs_template_container_port_3000() -> None:

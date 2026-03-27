@@ -69,8 +69,8 @@ TEMPLATES: dict[str, dict[str, object]] = {
     "nextjs": {
         "container_port": 3000,
         "service_port": 80,
-        "health_path": "/api/health",
-        "readiness_path": "/api/health",
+        "health_path": "/",
+        "readiness_path": "/",
         "container_name": "web",
         "default_observability_mode": "app-native",
     },
