@@ -736,8 +736,6 @@ class ScaffoldAdminService:
         payload: MigrationConsolidateRequest,
     ) -> MigrationConsolidateResponse:
         """Phase 2: generate a PR that moves service manifests into the target project namespace."""
-        import yaml as _yaml
-
         service_id = payload.service_id.strip().lower()
         target_project_id = payload.target_project_id.strip().lower()
         target_namespace = payload.target_namespace.strip().lower()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.scaffold.models import (
+from app.scaffold.models import (  # noqa: F401
     BACKEND_TEMPLATES,
     DB_TEMPLATES,
     FRONTEND_TEMPLATES,
@@ -12,16 +12,16 @@ from app.scaffold.models import (
     validate_service_name,
 )
 from app.scaffold.render import yaml_string
-from app.scaffold.templates.add_service import (
+from app.scaffold.templates.add_service import (  # noqa: F401
     build_catalog_add_service_entry,
     generate_gitops_add_service_files,
     validate_add_service,
 )
-from app.scaffold.templates.bundles import (
+from app.scaffold.templates.bundles import (  # noqa: F401
     build_catalog_bundle_entries,
     generate_gitops_bundle_files,
 )
-from app.scaffold.templates.standalone import (
+from app.scaffold.templates.standalone import (  # noqa: F401
     build_appproject_addition,
     build_catalog_entry_addition,
     generate_gitops_new_files,

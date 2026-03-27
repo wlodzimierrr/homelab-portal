@@ -26,8 +26,8 @@ from app.deployment_records import (
     store_observability_snapshot,
     upsert_deployment_record,
 )
+from app.deployment_locks import DeploymentLockConflictError  # noqa: F401
 from app.deployment_locks import (
-    DeploymentLockConflictError,
     DeploymentLockRow,
     cleanup_stale_deployment_locks,
     get_deployment_lock,
@@ -74,8 +74,7 @@ from app.service_observability import (
     normalize_observability_mode,
 )
 from app.service_identity_validation import build_service_identity_diagnostics
-from app.service_registry_sync import _kube_get_json, sync_service_registry_from_cluster
-from app.gitops_project_sync import sync_project_registry_from_gitops
+from app.service_registry_sync import _kube_get_json
 from app.github_workflows import dispatch_portal_rollback_workflow
 from app.observability_config import (
     escape_promql_regex_literal,
@@ -100,7 +99,7 @@ from app.services.scaffold_admin_service import ScaffoldAdminService
 from app.services.startup_jobs import register_deployment_reconciler_jobs
 # These schema names are intentionally re-exported from app.main because the
 # split route modules still resolve response models through `main_module.*`.
-from app.api.schemas.auth import LoginResponse
+from app.api.schemas.auth import LoginResponse  # noqa: F401
 from app.api.bootstrap import (
     clear_observability_caches,
     create_api_app,
@@ -108,7 +107,7 @@ from app.api.bootstrap import (
     create_observability_caches,
     install_http_metrics_middleware,
 )
-from app.api.schemas.catalog import (
+from app.api.schemas.catalog import (  # noqa: F401
     CatalogJoinResponse,
     DeploymentLockResponse,
     Project,
@@ -119,7 +118,7 @@ from app.api.schemas.catalog import (
     ServiceRegistrySyncResponse,
     ServicesResponse,
 )
-from app.api.schemas.deployments import (
+from app.api.schemas.deployments import (  # noqa: F401
     CreateDeploymentRecordRequest,
     DeploymentReconcileResponse,
     DeploymentRecordResponse,
@@ -138,7 +137,7 @@ from app.api.schemas.deployments import (
     ServiceDeploymentsResponse,
     UpdatePublicHostnameResponse,
 )
-from app.api.schemas.observability import (
+from app.api.schemas.observability import (  # noqa: F401
     ActiveAlertsResponse,
     DeploymentObservabilityResponse,
     DeploymentObservabilityContextResponse,
@@ -159,8 +158,12 @@ from app.api.schemas.observability import (
     ServiceMetricsSummaryResponse,
     ServiceMetricsTrendsResponse,
 )
-from app.api.schemas.migration import AdoptServiceResponse, MigrationConsolidateResponse, MigrationValidateResponse
-from app.api.schemas.scaffold import ScaffoldPreviewResponse, ScaffoldProjectInfo, ScaffoldSubmitResponse
+from app.api.schemas.migration import (  # noqa: F401
+    AdoptServiceResponse,
+    MigrationConsolidateResponse,
+    MigrationValidateResponse,
+)
+from app.api.schemas.scaffold import ScaffoldPreviewResponse, ScaffoldProjectInfo, ScaffoldSubmitResponse  # noqa: F401
 from app.runtime_config import (
     BRANCH_SAFE_FRAGMENT_RE,
     DEFAULT_PORTAL_IMAGES_LOOKBACK,
@@ -3504,10 +3507,14 @@ def _build_scaffold_admin_service() -> ScaffoldAdminService:
 configure_backend_services()
 
 
-# Route registration now lives in app.api.routes.* so this module can keep
-# the existing endpoint implementations while shedding route concentration.
-import sys
+def _register_api_routes() -> None:
+    # Import lazily to avoid route-module circular imports while still keeping
+    # registration colocated with the app entrypoint.
+    import sys
 
-from app.api.app import register_api_routes
+    from app.api.app import register_api_routes
 
-register_api_routes(app, sys.modules[__name__])
+    register_api_routes(app, sys.modules[__name__])
+
+
+_register_api_routes()

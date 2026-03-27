@@ -12,6 +12,7 @@ import { ToastMessage } from '@/components/toast-message'
 import { UptimeIndicator } from '@/components/uptime-indicator'
 import { Button } from '@/components/ui/button'
 import type { MonitoringProviderStatus } from '@/lib/api/observability'
+import type { DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import {
   type ServiceMetricsRange,
   type ServiceMetricsSummary,

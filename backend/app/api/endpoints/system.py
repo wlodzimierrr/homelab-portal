@@ -4,7 +4,6 @@ Extracted from main.py (Phase R6) to keep the entrypoint focused on app
 bootstrap and service composition.
 """
 
-from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import Query, Response

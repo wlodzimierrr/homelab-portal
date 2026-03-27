@@ -11,7 +11,7 @@ from app.deployment_records import (
     get_latest_deployment_record_for_service,
     upsert_deployment_record,
 )
-from app.deployments.reconciler.comments import (
+from app.deployments.reconciler.comments import (  # noqa: F401
     build_pr_comment_body,
     make_pr_comment_poster,
 )
@@ -35,7 +35,7 @@ from app.deployments.reconciler.live_state import (
     stalled_reason,
     terminal_status,
 )
-from app.deployments.reconciler.models import (
+from app.deployments.reconciler.models import (  # noqa: F401
     DEFAULT_GITHUB_OWNER,
     DEFAULT_GITOPS_REPO,
     DEFAULT_PORTAL_REPO,

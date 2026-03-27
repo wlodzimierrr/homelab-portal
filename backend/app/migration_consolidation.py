@@ -6,8 +6,6 @@ a standalone service into a target project's shared namespace.
 
 from __future__ import annotations
 
-import re
-
 import yaml
 
 
