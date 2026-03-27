@@ -1,7 +1,4 @@
-import pytest
-
 from app.migration_validation import (
-    MigrationConflict,
     check_argo_app_conflicts,
     check_ingress_conflicts,
     check_pvc_scope,
