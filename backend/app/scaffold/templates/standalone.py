@@ -1149,6 +1149,9 @@ def _generate_base_files(
         health_path=health_path,
     )
 
+    base_image_tag = "latest"
+    base_image_pull_policy = "Always"
+
     deployment_lines = [
         "apiVersion: apps/v1",
         "kind: Deployment",
@@ -1171,8 +1174,8 @@ def _generate_base_files(
         f"      serviceAccountName: {inp.name}",
         "      containers:",
         f"        - name: {container_name}",
-        f"          image: {inp.image_repo}:0.1.0",
-        "          imagePullPolicy: IfNotPresent",
+        f"          image: {inp.image_repo}:{base_image_tag}",
+        f"          imagePullPolicy: {base_image_pull_policy}",
         "          ports:",
         "            - name: http",
         f"              containerPort: {container_port}",
@@ -1390,7 +1393,7 @@ def _generate_overlay_files(
             "128Mi",
             "500m",
             "512Mi",
-            "0.1.0",
+            "latest",
         )
     else:
         replicas, cpu_req, mem_req, cpu_lim, mem_lim, image_tag = (
@@ -1399,8 +1402,9 @@ def _generate_overlay_files(
             "64Mi",
             "300m",
             "256Mi",
-            "0.1.0",
+            "latest",
         )
+    image_pull_policy = "Always" if image_tag == "latest" else "IfNotPresent"
 
     ingress_host = inp.prod_host if env_name == "prod" and inp.prod_host else inp.public_host
     files = {
@@ -1431,6 +1435,7 @@ def _generate_overlay_files(
                   containers:
                     - name: {container_name}
                       image: {image_repo}:{image_tag}
+                      imagePullPolicy: {image_pull_policy}
                       env:
                         - name: APP_ENV
                           value: {env_name}
@@ -1448,6 +1453,7 @@ def _generate_overlay_files(
             container_name=container_name,
             image_repo=inp.image_repo,
             image_tag=image_tag,
+            image_pull_policy=image_pull_policy,
             env_name=env_name,
             cpu_req=cpu_req,
             mem_req=mem_req,
