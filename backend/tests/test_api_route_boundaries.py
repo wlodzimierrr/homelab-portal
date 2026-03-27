@@ -7,6 +7,7 @@ from fastapi import Response
 from fastapi.routing import APIRoute
 
 import app.main as app_main
+from app.api.endpoints import admin as admin_endpoints
 from app.api.endpoints import catalog as catalog_endpoints
 from app.api.endpoints import deployments as deployment_endpoints
 from app.api.endpoints import observability as observability_endpoints
@@ -74,7 +75,7 @@ def _override_backend_service_builders(
 def test_split_route_modules_register_expected_main_handlers() -> None:
     expected_routes = [
         ("/health", "GET", app_main.health, app_main.HealthResponse, ["system"]),
-        ("/auth/login", "POST", app_main.login, app_main.LoginResponse, ["auth"]),
+        ("/auth/login", "POST", admin_endpoints.login, app_main.LoginResponse, ["auth"]),
         (
             "/projects",
             "GET",
@@ -243,7 +244,7 @@ def test_scaffold_and_admin_handlers_use_current_service_builder() -> None:
                 ownerEmail="owner@example.com",
             )
         )
-        config = app_main.get_service_config(
+        config = admin_endpoints.get_service_config(
             "demo",
             env="dev",
             current_user=("alice", {"admin"}),
