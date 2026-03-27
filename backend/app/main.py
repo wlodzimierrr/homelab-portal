@@ -27,6 +27,7 @@ from app.deployment_records import (
     upsert_deployment_record,
 )
 from app.deployment_locks import (
+    DeploymentLockConflictError,
     DeploymentLockRow,
     cleanup_stale_deployment_locks,
     get_deployment_lock,
@@ -3413,6 +3414,8 @@ def _build_observability_service() -> ObservabilityService:
 
 
 def _build_catalog_service() -> CatalogService:
+    from app.services import catalog_service as catalog_service_module
+
     return _compose_catalog_service(
         load_project_rows=_load_project_rows,
         load_project_catalog_rows=_load_project_catalog_rows,
@@ -3432,8 +3435,8 @@ def _build_catalog_service() -> CatalogService:
         registry_stale_after_minutes=_registry_stale_after_minutes,
         registry_warning_after_minutes=_registry_warning_after_minutes,
         build_catalog_join=build_catalog_join,
-        sync_project_registry_from_gitops=sync_project_registry_from_gitops,
-        sync_service_registry_from_cluster=sync_service_registry_from_cluster,
+        sync_project_registry_from_gitops=catalog_service_module.sync_project_registry_from_gitops,
+        sync_service_registry_from_cluster=catalog_service_module.sync_service_registry_from_cluster,
         load_ci_metadata_rows=load_ci_metadata_rows,
         load_argo_metadata_rows=load_argo_metadata_rows,
         build_release_join_diagnostics=build_release_join_diagnostics,

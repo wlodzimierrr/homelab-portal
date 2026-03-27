@@ -9,6 +9,11 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+# These imports are intentionally kept at module scope because some API tests
+# monkeypatch the catalog service module directly.
+from app.gitops_project_sync import sync_project_registry_from_gitops
+from app.service_registry_sync import sync_service_registry_from_cluster
+
 from app.api.schemas.catalog import (
     CatalogJoinDiagnosticsResponse,
     CatalogJoinResponse,
