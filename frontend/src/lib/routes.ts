@@ -1,10 +1,10 @@
 const serviceDeploymentsRegex = /^\/services\/([^/]+)\/deployments$/
-const serviceDetailsRegex = /^\/services\/([^/]+)$/
+const serviceOverviewRegex = /^\/services\/([^/]+)$/
 
 // Route helpers live here because the app shell does its own pathname matching.
-// The deployments route must be checked before the generic service-details route.
-export function isServiceDetailsPath(pathname: string) {
-  return serviceDetailsRegex.test(pathname)
+// The deployments route must be checked before the generic service-overview route.
+export function isServiceOverviewPath(pathname: string) {
+  return serviceOverviewRegex.test(pathname)
 }
 
 export function isServiceDeploymentsPath(pathname: string) {
@@ -17,9 +17,9 @@ export function getServiceIdFromPath(pathname: string) {
     return deploymentsMatch[1]
   }
 
-  const detailsMatch = pathname.match(serviceDetailsRegex)
-  if (detailsMatch?.[1]) {
-    return detailsMatch[1]
+  const overviewMatch = pathname.match(serviceOverviewRegex)
+  if (overviewMatch?.[1]) {
+    return overviewMatch[1]
   }
 
   return ''

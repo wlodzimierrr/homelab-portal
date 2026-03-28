@@ -12,18 +12,12 @@ import type {
 } from '@/lib/adapters/logs-quickview'
 import type { ServiceMetricsSummary, ServiceMetricsTrends } from '@/lib/adapters/service-metrics'
 import type { TimelineWindow } from '@/lib/adapters/service-health-timeline'
-import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
 import {
   createServiceIdentity,
   normalizeServiceId,
   type ServiceIdentity,
 } from '@/lib/service-identity'
 import type { MetricSeverity } from '@/components/service-metric-card'
-
-export interface ServiceDetailsPageProps {
-  serviceId: string
-  incidentServiceAlerts?: Record<string, ServiceIncidentBadge>
-}
 
 export type HealthStatus = 'healthy' | 'degraded' | 'unknown'
 export type SyncStatus = 'synced' | 'out_of_sync' | 'unknown'
