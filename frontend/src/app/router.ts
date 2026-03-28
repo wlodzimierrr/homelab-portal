@@ -1,4 +1,4 @@
-import { getServiceIdFromPath, isServiceDeploymentsPath, isServiceDetailsPath } from '@/lib/routes'
+import { getServiceIdFromPath, isServiceDeploymentsPath, isServiceOverviewPath } from '@/lib/routes'
 
 export type AppRoute =
   | { kind: 'login' }
@@ -7,7 +7,7 @@ export type AppRoute =
   | { kind: 'services' }
   | { kind: 'platform-health' }
   | { kind: 'service-deployments'; serviceId: string }
-  | { kind: 'service-details'; serviceId: string }
+  | { kind: 'service-overview'; serviceId: string }
   | { kind: 'settings' }
 
 // Routing stays intentionally lightweight, but centralizing pathname matching
@@ -31,8 +31,8 @@ export function resolveAppRoute(pathname: string): AppRoute {
   if (isServiceDeploymentsPath(pathname)) {
     return { kind: 'service-deployments', serviceId: getServiceIdFromPath(pathname) }
   }
-  if (isServiceDetailsPath(pathname)) {
-    return { kind: 'service-details', serviceId: getServiceIdFromPath(pathname) }
+  if (isServiceOverviewPath(pathname)) {
+    return { kind: 'service-overview', serviceId: getServiceIdFromPath(pathname) }
   }
   if (pathname === '/settings') {
     return { kind: 'settings' }
