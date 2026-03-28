@@ -1,16 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { AppRouteContent } from './app-route-content'
 import { PortalLayout } from '@/components/layout/portal-layout'
 import { ToastMessage } from '@/components/toast-message'
 import { useAuth } from '@/lib/auth'
 import { UNAUTHORIZED_EVENT } from '@/lib/http/auth-events'
-import { DashboardPage } from '@/pages/dashboard-page'
-import { LoginPage } from '@/pages/login-page'
-import { PlatformHealthPage } from '@/pages/platform-health-page'
-import { ProjectsPage } from '@/pages/projects-page'
-import { ServiceDeploymentsPage } from '@/pages/service-deployments-page'
-import { ServiceDetailsPage } from '@/pages/service-details-page'
-import { ServicesPage } from '@/pages/services-page'
-import { SettingsPage } from '@/pages/settings-page'
 import { resolveAppRoute } from './router'
 import { useIncidentFeed } from './use-incident-feed'
 import { useTheme } from './use-theme'
@@ -82,34 +75,14 @@ function AppShell() {
   const { incidentSnapshot, showIncidentBanner, dismissIncidentBanner } = useIncidentFeed(token, pathname)
   const handleLoginSuccess = useCallback(() => navigate('/dashboard', true), [navigate])
 
-  // Route rendering stays explicit even after the split so onboarding remains
-  // straightforward and future routing changes have one obvious entrypoint.
   const content = useMemo(() => {
-    switch (route.kind) {
-      case 'login':
-        return <LoginPage onLoginSuccess={handleLoginSuccess} />
-      case 'dashboard':
-        return <DashboardPage />
-      case 'projects':
-        return <ProjectsPage />
-      case 'services':
-        return <ServicesPage incidentServiceAlerts={incidentSnapshot.serviceAlerts} />
-      case 'platform-health':
-        return <PlatformHealthPage />
-      case 'service-deployments':
-        return <ServiceDeploymentsPage serviceId={route.serviceId} />
-      case 'service-details':
-        return (
-          <ServiceDetailsPage
-            serviceId={route.serviceId}
-            incidentServiceAlerts={incidentSnapshot.serviceAlerts}
-          />
-        )
-      case 'settings':
-        return <SettingsPage />
-      default:
-        return <DashboardPage />
-    }
+    return (
+      <AppRouteContent
+        route={route}
+        incidentServiceAlerts={incidentSnapshot.serviceAlerts}
+        onLoginSuccess={handleLoginSuccess}
+      />
+    )
   }, [handleLoginSuccess, incidentSnapshot.serviceAlerts, route])
 
   if (route.kind === 'login') {
