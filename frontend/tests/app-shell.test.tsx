@@ -1,47 +1,41 @@
 import assert from 'node:assert/strict'
-import { after, before, describe, it } from 'node:test'
+import test from 'node:test'
 import { createElement, type ComponentType } from 'react'
 import { installMockBrowser, renderToHtml } from './test-setup.js'
 
-let AppShell: ComponentType
-let browser: ReturnType<typeof installMockBrowser>
+async function loadAppShell() {
+  const module = await import('../src/app/AppShell.js')
+  return module.default as ComponentType
+}
 
-describe('AppShell service route rendering', () => {
-  before(async () => {
-    browser = installMockBrowser({ pathname: '/services/api-gateway' })
-    ;({ default: AppShell } = await import('../src/app/AppShell.js'))
-  })
+test('AppShell renders the current service overview route', async () => {
+  const browser = installMockBrowser({ pathname: '/services/api-gateway' })
+  const AppShell = await loadAppShell()
+  const html = renderToHtml(createElement(AppShell))
 
-  after(() => {
-    browser.cleanup()
-  })
+  assert.match(html, /Service:\s*api-gateway/)
+  assert.match(html, /View deployment history &amp; rollback/)
+  assert.doesNotMatch(html, /Back to overview/)
+  browser.cleanup()
+})
 
-  it('renders the current service overview route', () => {
-    browser.window.location.pathname = '/services/api-gateway'
+test('AppShell renders the service settings route', async () => {
+  const browser = installMockBrowser({ pathname: '/services/api-gateway/settings' })
+  const AppShell = await loadAppShell()
+  const html = renderToHtml(createElement(AppShell))
 
-    const html = renderToHtml(createElement(AppShell))
+  assert.match(html, /Settings:\s*api-gateway/)
+  assert.match(html, /Back to overview/)
+  browser.cleanup()
+})
 
-    assert.match(html, /Service:\s*api-gateway/)
-    assert.match(html, /View deployments/)
-    assert.doesNotMatch(html, /Back to overview/)
-  })
+test('AppShell renders the current service deployments route', async () => {
+  const browser = installMockBrowser({ pathname: '/services/api-gateway/deployments' })
+  const AppShell = await loadAppShell()
+  const html = renderToHtml(createElement(AppShell))
 
-  it('renders the service settings route', () => {
-    browser.window.location.pathname = '/services/api-gateway/settings'
-
-    const html = renderToHtml(createElement(AppShell))
-
-    assert.match(html, /Settings:\s*api-gateway/)
-    assert.match(html, /Back to overview/)
-  })
-
-  it('renders the current service deployments route', () => {
-    browser.window.location.pathname = '/services/api-gateway/deployments'
-
-    const html = renderToHtml(createElement(AppShell))
-
-    assert.match(html, /Deployments:\s*api-gateway/)
-    assert.match(html, /Back to overview/)
-    assert.doesNotMatch(html, /View deployments/)
-  })
+  assert.match(html, /Deployments:\s*api-gateway/)
+  assert.match(html, /Back to overview/)
+  assert.doesNotMatch(html, /View deployments/)
+  browser.cleanup()
 })

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { ServiceCapabilities } from '@/lib/api/catalog'
 import {
   getServiceRollbackCandidates,
   requestServiceDeployToDev,
@@ -14,27 +15,38 @@ import type { DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import {
   getLatestDeploymentForEnv,
   getRecentDeploymentTags,
-  supportsServiceRollback,
 } from './shared'
+import { resolveServiceActionCapabilities } from './action-capabilities'
 
 interface UseServiceActionsOptions {
   serviceId: string
   serviceEnv?: string
+  capabilities?: ServiceCapabilities | null
+  includeRollback?: boolean
   deploymentHistory: DeploymentHistoryItem[]
   deploymentLock?: ServiceDeploymentLock | null
-  refreshOverview: (options?: { background?: boolean }) => Promise<void>
-  refreshDeploymentInfo: () => Promise<void>
+  refreshService?: (options?: { background?: boolean }) => Promise<void>
+  refreshDeployments?: () => Promise<void>
 }
 
 export function useServiceActions({
   serviceId,
   serviceEnv,
+  capabilities,
+  includeRollback = true,
   deploymentHistory,
   deploymentLock,
-  refreshOverview,
-  refreshDeploymentInfo,
+  refreshService,
+  refreshDeployments,
 }: UseServiceActionsOptions) {
-  const rollbackSupported = useMemo(() => supportsServiceRollback(serviceId), [serviceId])
+  const resolvedCapabilities = useMemo(
+    () => resolveServiceActionCapabilities(serviceId, capabilities),
+    [capabilities, serviceId],
+  )
+  const deploySupported = resolvedCapabilities.canDeployToDev
+  const promoteSupported = resolvedCapabilities.canPromoteToProd
+  const rollbackSupported = includeRollback && resolvedCapabilities.canRollback
+  const rollbackEnvs = rollbackSupported ? resolvedCapabilities.rollbackEnvs : []
   const latestDevDeployment = useMemo(
     () => getLatestDeploymentForEnv(deploymentHistory, 'dev'),
     [deploymentHistory],
@@ -66,7 +78,9 @@ export function useServiceActions({
   const devLockActive = deploymentLock?.env === 'dev'
   const prodLockActive = deploymentLock?.env === 'prod'
 
-  const [rollbackTargetEnvironment, setRollbackTargetEnvironment] = useState<'dev' | 'prod'>('dev')
+  const [rollbackTargetEnvironment, setRollbackTargetEnvironment] = useState<'dev' | 'prod'>(
+    rollbackEnvs[0] ?? 'dev',
+  )
   const [rollbackCandidates, setRollbackCandidates] = useState<ServiceRollbackCandidatesResponse | null>(null)
   const [rollbackCandidatesLoading, setRollbackCandidatesLoading] = useState(false)
   const [rollbackCandidatesError, setRollbackCandidatesError] = useState('')
@@ -85,16 +99,20 @@ export function useServiceActions({
   const [promoteResult, setPromoteResult] = useState<ServicePromoteToProdResponse | null>(null)
 
   useEffect(() => {
-    if (serviceEnv === 'dev' || serviceEnv === 'prod') {
+    if ((serviceEnv === 'dev' || serviceEnv === 'prod') && rollbackEnvs.includes(serviceEnv)) {
       setRollbackTargetEnvironment(serviceEnv)
+      return
     }
-  }, [serviceEnv])
+    if (!rollbackEnvs.includes(rollbackTargetEnvironment)) {
+      setRollbackTargetEnvironment(rollbackEnvs[0] ?? 'dev')
+    }
+  }, [rollbackEnvs, rollbackTargetEnvironment, serviceEnv])
 
   const rollbackLockActive = rollbackTargetEnvironment === 'dev' ? devLockActive : prodLockActive
   const rollbackInFlight = rollbackTargetEnvironment === 'dev' ? devInFlight : prodInFlight
 
   const loadRollbackCandidates = useCallback(async () => {
-    if (!rollbackSupported) {
+    if (!rollbackSupported || !rollbackEnvs.includes(rollbackTargetEnvironment)) {
       setRollbackCandidates(null)
       setRollbackCandidatesError('')
       setSelectedRollbackTag('')
@@ -122,7 +140,7 @@ export function useServiceActions({
     } finally {
       setRollbackCandidatesLoading(false)
     }
-  }, [rollbackSupported, rollbackTargetEnvironment, serviceId])
+  }, [rollbackEnvs, rollbackSupported, rollbackTargetEnvironment, serviceId])
 
   useEffect(() => {
     void loadRollbackCandidates()
@@ -139,8 +157,8 @@ export function useServiceActions({
       })
       setDeployResult(response)
       setDeployReason('')
-      await refreshOverview({ background: true })
-      await refreshDeploymentInfo()
+      await refreshService?.({ background: true })
+      await refreshDeployments?.()
       return response
     } catch (requestError) {
       const message =
@@ -150,7 +168,7 @@ export function useServiceActions({
     } finally {
       setDeploySubmitting(false)
     }
-  }, [deployReason, refreshDeploymentInfo, refreshOverview, serviceId])
+  }, [deployReason, refreshDeployments, refreshService, serviceId])
 
   const submitPromoteRequest = useCallback(async () => {
     setPromoteSubmitting(true)
@@ -163,8 +181,8 @@ export function useServiceActions({
       })
       setPromoteResult(response)
       setPromoteReason('')
-      await refreshOverview({ background: true })
-      await refreshDeploymentInfo()
+      await refreshService?.({ background: true })
+      await refreshDeployments?.()
       return response
     } catch (requestError) {
       const message =
@@ -174,7 +192,7 @@ export function useServiceActions({
     } finally {
       setPromoteSubmitting(false)
     }
-  }, [promoteReason, refreshDeploymentInfo, refreshOverview, serviceId])
+  }, [promoteReason, refreshDeployments, refreshService, serviceId])
 
   const submitRollbackRequest = useCallback(async () => {
     setRollbackSubmitting(true)
@@ -189,8 +207,8 @@ export function useServiceActions({
       })
       setRollbackResult(response)
       setRollbackReason('')
-      await refreshOverview({ background: true })
-      await refreshDeploymentInfo()
+      await refreshService?.({ background: true })
+      await refreshDeployments?.()
       return response
     } catch (requestError) {
       const message =
@@ -201,8 +219,8 @@ export function useServiceActions({
       setRollbackSubmitting(false)
     }
   }, [
-    refreshDeploymentInfo,
-    refreshOverview,
+    refreshDeployments,
+    refreshService,
     rollbackReason,
     rollbackTargetEnvironment,
     selectedRollbackTag,
@@ -210,7 +228,10 @@ export function useServiceActions({
   ])
 
   return {
+    deploySupported,
+    promoteSupported,
     rollbackSupported,
+    rollbackEnvs,
     latestDevDeployment,
     latestProdDeployment,
     recentDevTags,
