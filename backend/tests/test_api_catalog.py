@@ -301,14 +301,41 @@ def test_services_list_returns_cluster_backed_rows(client, monkeypatch) -> None:
 def test_service_detail_returns_cluster_backed_row(client, monkeypatch) -> None:
     monkeypatch.setattr(
         "app.main._load_project_catalog_rows",
-        lambda env=None, project_id=None: [
+        lambda env=None, project_id=None: (
+            [
+                {
+                    "project_id": "homelab-web",
+                    "project_name": "homelab-web",
+                    "env": "prod",
+                    "namespace": "homelab-web",
+                    "app_label": "homelab-web",
+                    "public_host": "homelab.local",
+                }
+            ]
+            if env == "prod"
+            else [
+                {
+                    "project_id": "homelab-web",
+                    "project_name": "homelab-web",
+                    "env": "dev",
+                    "namespace": "homelab-web",
+                    "app_label": "homelab-web",
+                    "observability_mode": "ingress-derived",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_catalog_rows",
+        lambda env=None, service_id=None: [
             {
-                "project_id": "homelab-web",
-                "project_name": "homelab-web",
+                "service_id": "homelab-web",
+                "service_name": "homelab-web",
                 "env": "dev",
                 "namespace": "homelab-web",
                 "app_label": "homelab-web",
-                "observability_mode": "ingress-derived",
+                "argo_app_name": "homelab-web-dev",
+                "project_id": "homelab-web",
             }
         ],
     )
@@ -356,6 +383,23 @@ def test_service_detail_returns_cluster_backed_row(client, monkeypatch) -> None:
         "observabilityMode": "ingress-derived",
         "deploymentLock": None,
         "publicHost": None,
+        "projectContext": {
+            "projectId": "homelab-web",
+            "projectName": "homelab-web",
+            "namespace": "homelab-web",
+            "siblingServiceIds": [],
+            "isLinked": True,
+        },
+        "capabilities": {
+            "canDeployToDev": True,
+            "canPromoteToProd": True,
+            "canRollback": True,
+            "rollbackEnvs": ["dev", "prod"],
+            "canEditConfig": False,
+            "configEnvs": [],
+            "canEditPublicHostname": True,
+            "canAdopt": True,
+        },
     }
 
 

@@ -65,6 +65,29 @@ class DeploymentLockResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ServiceProjectContextResponse(BaseModel):
+    project_id: str | None = Field(default=None, alias="projectId")
+    project_name: str | None = Field(default=None, alias="projectName")
+    namespace: str
+    sibling_service_ids: list[str] = Field(default_factory=list, alias="siblingServiceIds")
+    is_linked: bool = Field(alias="isLinked")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceCapabilitiesResponse(BaseModel):
+    can_deploy_to_dev: bool = Field(alias="canDeployToDev")
+    can_promote_to_prod: bool = Field(alias="canPromoteToProd")
+    can_rollback: bool = Field(alias="canRollback")
+    rollback_envs: list[str] = Field(default_factory=list, alias="rollbackEnvs")
+    can_edit_config: bool = Field(alias="canEditConfig")
+    config_envs: list[str] = Field(default_factory=list, alias="configEnvs")
+    can_edit_public_hostname: bool = Field(alias="canEditPublicHostname")
+    can_adopt: bool = Field(alias="canAdopt")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ServiceDetailResponse(BaseModel):
     id: str
     name: str
@@ -81,6 +104,8 @@ class ServiceDetailResponse(BaseModel):
     observability_mode: str | None = Field(default=None, alias="observabilityMode")
     public_host: str | None = Field(default=None, alias="publicHost")
     deployment_lock: "DeploymentLockResponse | None" = Field(default=None, alias="deploymentLock")
+    project_context: ServiceProjectContextResponse | None = Field(default=None, alias="projectContext")
+    capabilities: ServiceCapabilitiesResponse | None = None
 
     model_config = ConfigDict(populate_by_name=True)
 

@@ -65,7 +65,9 @@ from app.api.schemas.catalog import (  # noqa: F401
     Project,
     ProjectCatalogDiagnosticsResponse,
     ProjectsResponse,
+    ServiceCapabilitiesResponse,
     ServiceDetailResponse,
+    ServiceProjectContextResponse,
     ServiceRegistryDiagnosticsResponse,
     ServiceRegistrySyncResponse,
     ServicesResponse,
@@ -120,6 +122,7 @@ from app.api.schemas.scaffold import ScaffoldPreviewResponse, ScaffoldProjectInf
 # --- runtime config ----------------------------------------------------------
 # Thin callables that read env vars at call time rather than at import time,
 # so tests can override them without reloading the module.
+from app.admin.config_policy import CONFIG_EDIT_TARGETS as _CONFIG_EDIT_TARGETS
 from app.runtime_config import (
     deployment_lock_stale_timeout_seconds as _deployment_lock_stale_timeout_seconds,
     deployment_reconciler_enabled as _deployment_reconciler_enabled,
@@ -619,6 +622,10 @@ def _build_catalog_service() -> CatalogService:
         registry_stale_after_minutes=_registry_stale_after_minutes,
         registry_warning_after_minutes=_registry_warning_after_minutes,
         build_catalog_join=build_catalog_join,
+        dev_deploy_target=_dev_deploy_target,
+        promote_to_prod_target=_promote_to_prod_target,
+        rollback_target=_rollback_target,
+        config_edit_targets=_CONFIG_EDIT_TARGETS,
         sync_project_registry_from_gitops=catalog_service_module.sync_project_registry_from_gitops,
         sync_service_registry_from_cluster=catalog_service_module.sync_service_registry_from_cluster,
         load_ci_metadata_rows=load_ci_metadata_rows,

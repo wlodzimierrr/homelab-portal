@@ -46,6 +46,7 @@ def test_service_details_include_release_metadata(client, monkeypatch) -> None:
     )
     monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("app.main._load_project_catalog_rows", lambda **_kwargs: [])
+    monkeypatch.setattr("app.main._load_service_catalog_rows", lambda **_kwargs: [])
 
     response = client.get(
         "/services/homelab-api?env=dev",
@@ -125,6 +126,7 @@ def test_service_details_fall_back_to_live_runtime_metadata(client, monkeypatch)
     )
     monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("app.main._load_project_catalog_rows", lambda **_kwargs: [])
+    monkeypatch.setattr("app.main._load_service_catalog_rows", lambda **_kwargs: [])
 
     response = client.get(
         "/services/homelab-api?env=dev",

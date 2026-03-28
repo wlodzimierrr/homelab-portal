@@ -280,6 +280,25 @@ export interface ReleaseTraceabilityRow {
   drift?: ReleaseTraceabilityDriftState
 }
 
+export interface ServiceProjectContext {
+  projectId?: string | null
+  projectName?: string | null
+  namespace: string
+  siblingServiceIds: string[]
+  isLinked: boolean
+}
+
+export interface ServiceCapabilities {
+  canDeployToDev: boolean
+  canPromoteToProd: boolean
+  canRollback: boolean
+  rollbackEnvs: string[]
+  canEditConfig: boolean
+  configEnvs: string[]
+  canEditPublicHostname: boolean
+  canAdopt: boolean
+}
+
 export interface ServiceDetails {
   id: string
   name: string
@@ -298,6 +317,8 @@ export interface ServiceDetails {
   endpoints?: ServiceEndpoint[]
   deployments?: ServiceDeployment[]
   deploymentLock?: ServiceDeploymentLock | null
+  projectContext?: ServiceProjectContext | null
+  capabilities?: ServiceCapabilities | null
 }
 
 export interface ServiceRegistryApiRow {

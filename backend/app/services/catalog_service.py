@@ -21,8 +21,10 @@ from app.api.schemas.catalog import (
     Project,
     ProjectCatalogDiagnosticsResponse,
     ProjectsResponse,
+    ServiceCapabilitiesResponse,
     ServiceDetailResponse,
     ServiceIdentityDiagnosticsResponse,
+    ServiceProjectContextResponse,
     ServiceRegistryDiagnosticsResponse,
     ServiceRegistryFreshnessResponse,
     ServiceRegistryJoinMismatchResponse,
@@ -52,6 +54,10 @@ class CatalogServiceDeps:
     registry_stale_after_minutes: Any
     registry_warning_after_minutes: Any
     build_catalog_join: Any
+    dev_deploy_target: Any
+    promote_to_prod_target: Any
+    rollback_target: Any
+    config_edit_targets: Any
     sync_project_registry_from_gitops: Any
     sync_service_registry_from_cluster: Any
     load_ci_metadata_rows: Any
@@ -63,6 +69,116 @@ class CatalogServiceDeps:
 class CatalogService:
     def __init__(self, deps: CatalogServiceDeps) -> None:
         self.deps = deps
+
+    @staticmethod
+    def _supports_optional_target(loader: Any, *args: object) -> bool:
+        try:
+            loader(*args)
+        except HTTPException:
+            return False
+        return True
+
+    @staticmethod
+    def _matching_project_context_row(
+        rows: list[dict[str, Any]],
+        *,
+        service_id: str,
+    ) -> dict[str, Any] | None:
+        service_key = service_id.strip()
+        for row in rows:
+            service_ids = row.get("serviceIds")
+            if isinstance(service_ids, list) and service_key in {
+                str(candidate).strip() for candidate in service_ids
+            }:
+                return row
+        return None
+
+    def _build_service_project_context(
+        self,
+        *,
+        service_id: str,
+        selected_row: dict[str, Any],
+    ) -> ServiceProjectContextResponse:
+        selected_env = str(selected_row["env"])
+        selected_namespace = str(selected_row["namespace"])
+        result = self.deps.build_catalog_join(
+            project_rows=self.deps.load_project_catalog_rows(env=selected_env),
+            service_rows=self.deps.load_service_catalog_rows(env=selected_env, service_id=service_id),
+            env_filter=selected_env,
+            project_id_filter=None,
+            service_id_filter=service_id,
+        )
+        matching_row = self._matching_project_context_row(result.get("rows", []), service_id=service_id)
+        if not matching_row:
+            return ServiceProjectContextResponse(
+                projectId=None,
+                projectName=None,
+                namespace=selected_namespace,
+                siblingServiceIds=[],
+                isLinked=False,
+            )
+
+        sibling_ids = [
+            str(candidate).strip()
+            for candidate in matching_row.get("serviceIds", [])
+            if str(candidate).strip() and str(candidate).strip() != service_id
+        ]
+        project_id = str(matching_row.get("projectId") or "").strip() or None
+        project_name = str(matching_row.get("projectName") or "").strip() or None
+
+        return ServiceProjectContextResponse(
+            projectId=project_id,
+            projectName=project_name,
+            namespace=str(matching_row.get("namespace") or selected_namespace),
+            siblingServiceIds=sibling_ids,
+            isLinked=True,
+        )
+
+    def _build_service_capabilities(
+        self,
+        *,
+        service_id: str,
+        project_context: ServiceProjectContextResponse | None,
+    ) -> ServiceCapabilitiesResponse:
+        can_deploy_to_dev = self._supports_optional_target(self.deps.dev_deploy_target, service_id)
+        can_promote_to_prod = self._supports_optional_target(self.deps.promote_to_prod_target, service_id)
+
+        rollback_envs = [
+            env_name
+            for env_name in ("dev", "prod")
+            if self._supports_optional_target(self.deps.rollback_target, service_id, env_name)
+        ]
+
+        config_envs = sorted(
+            {
+                str(target.env)
+                for target in self.deps.config_edit_targets
+                if str(getattr(target, "service_id", "")).strip() == service_id
+            }
+        )
+
+        project_id = project_context.project_id if project_context else None
+        is_self_owned = project_id is None or project_id == service_id
+        can_edit_public_hostname = bool(
+            is_self_owned
+            and self.deps.load_project_catalog_rows(env="prod", project_id=service_id)
+        )
+
+        # This stays conservative for now: adoption is only surfaced for standalone
+        # or self-owned services, while project-linked services should use later
+        # migration flows instead of the phase-1 adopt action.
+        can_adopt = is_self_owned
+
+        return ServiceCapabilitiesResponse(
+            canDeployToDev=can_deploy_to_dev,
+            canPromoteToProd=can_promote_to_prod,
+            canRollback=bool(rollback_envs),
+            rollbackEnvs=rollback_envs,
+            canEditConfig=bool(config_envs),
+            configEnvs=config_envs,
+            canEditPublicHostname=can_edit_public_hostname,
+            canAdopt=can_adopt,
+        )
 
     @staticmethod
     def _project_catalog_index(
@@ -269,6 +385,14 @@ class CatalogService:
         )
         observability_mode = project_rows[0].get("observability_mode") if project_rows else None
         catalog_public_host = project_rows[0].get("public_host") if project_rows else None
+        project_context = self._build_service_project_context(
+            service_id=str(selected["service_id"]),
+            selected_row=selected,
+        )
+        capabilities = self._build_service_capabilities(
+            service_id=str(selected["service_id"]),
+            project_context=project_context,
+        )
 
         return ServiceDetailResponse(
             id=str(selected["service_id"]),
@@ -286,6 +410,8 @@ class CatalogService:
             observabilityMode=observability_mode if isinstance(observability_mode, str) else None,
             publicHost=catalog_public_host if isinstance(catalog_public_host, str) else None,
             deploymentLock=self.deps.build_deployment_lock_response(active_lock),
+            projectContext=project_context,
+            capabilities=capabilities,
         )
 
     def get_catalog_reconciliation(
