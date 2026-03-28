@@ -221,6 +221,7 @@ from app.helpers.deployment_helpers import (
     _build_service_metrics_queries,
 )
 import app.helpers.deployment_helpers as _deployment_helpers_module
+import app.helpers.catalog_helpers as _catalog_helpers_module
 from app.helpers.catalog_helpers import _load_service_catalog_rows
 from app.helpers.observability_helpers import (
     _load_project_catalog_rows,
@@ -269,6 +270,52 @@ import app.helpers.observability_helpers as _observability_helpers_module
 #
 # Business logic lives in app/helpers/ and app/services/. Endpoint handlers live
 # in app/api/endpoints/. This file should not grow new logic.
+
+
+def _proxy_main_callable(name: str) -> Callable[..., object]:
+    """Route helper-module callbacks through app.main so test monkeypatches stick."""
+
+    def _call(*args: object, **kwargs: object) -> object:
+        return globals()[name](*args, **kwargs)
+
+    return _call
+
+
+# --- monkeypatch seam restoration -------------------------------------------
+# The refactor moved a number of helper functions into dedicated modules, but the
+# test suite intentionally monkeypatches app.main.* as the stable seam. Rebind the
+# helper-module globals that call each other internally so they resolve through
+# app.main at runtime instead of closing over their original module globals.
+_catalog_helpers_module._with_connection = _proxy_main_callable("_with_connection")
+_deployment_helpers_module._load_project_rows = _proxy_main_callable("_load_project_rows")
+_deployment_helpers_module._load_service_rows = _proxy_main_callable("_load_service_rows")
+_deployment_helpers_module._select_preferred_service_row = _proxy_main_callable("_select_preferred_service_row")
+_deployment_helpers_module._load_live_service_runtime_rows = _proxy_main_callable(
+    "_load_live_service_runtime_rows"
+)
+_deployment_helpers_module._load_metric_snapshots_for_window = _proxy_main_callable(
+    "_load_metric_snapshots_for_window"
+)
+_deployment_helpers_module._load_deployment_metric_snapshots = _proxy_main_callable(
+    "_load_deployment_metric_snapshots"
+)
+_observability_helpers_module._load_service_rows = _proxy_main_callable("_load_service_rows")
+_observability_helpers_module._select_preferred_service_row = _proxy_main_callable(
+    "_select_preferred_service_row"
+)
+_observability_helpers_module._get_deployment_record_by_id = _proxy_main_callable(
+    "_get_deployment_record_by_id"
+)
+_observability_helpers_module._resolve_record_window = _proxy_main_callable("_resolve_record_window")
+_observability_helpers_module._expand_observability_query_window = _proxy_main_callable(
+    "_expand_observability_query_window"
+)
+_observability_helpers_module._load_metric_snapshots_for_window = _proxy_main_callable(
+    "_load_metric_snapshots_for_window"
+)
+_observability_helpers_module._load_project_catalog_rows = _proxy_main_callable(
+    "_load_project_catalog_rows"
+)
 
 # --- app init ----------------------------------------------------------------
 app = create_api_app()
