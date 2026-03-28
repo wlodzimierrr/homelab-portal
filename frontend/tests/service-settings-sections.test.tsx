@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import React from 'react'
+import { createElement } from 'react'
 import { ServiceSettingsSections } from '../src/features/service-settings/components/settings-sections.js'
-import { installTestWindow, render } from './test-setup.js'
+import { installMockBrowser, renderToHtml } from './test-setup.js'
 
 test('ServiceSettingsSections renders the moved settings-owned sections', () => {
-  installTestWindow('/services/homelab-api/settings')
-  const markup = render(
-    React.createElement(ServiceSettingsSections, {
+  const browser = installMockBrowser({ pathname: '/services/homelab-api/settings' })
+  const markup = renderToHtml(
+    createElement(ServiceSettingsSections, {
       configSupported: true,
       publicHostEditMode: false,
       setPublicHostEditMode() {},
@@ -48,4 +48,5 @@ test('ServiceSettingsSections renders the moved settings-owned sections', () => 
   assert.match(markup, /Public hostname/)
   assert.match(markup, /Runtime Config/)
   assert.match(markup, /Adopt into Project/)
+  browser.cleanup()
 })
