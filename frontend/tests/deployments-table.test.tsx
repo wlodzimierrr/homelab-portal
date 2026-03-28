@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import React from 'react'
+import { createElement } from 'react'
 import { createServiceIdentity } from '../src/lib/service-identity.js'
 import { DeploymentsTable } from '../src/features/service-deployments/components/deployments-table.js'
-import { installTestWindow, render } from './test-setup.js'
+import { installMockBrowser, renderToHtml } from './test-setup.js'
 
 test('DeploymentsTable still renders deployment history rows', () => {
-  installTestWindow('/services/homelab-api/deployments')
+  const browser = installMockBrowser({ pathname: '/services/homelab-api/deployments' })
   const deployment = {
     id: 'dep-1',
     identity: createServiceIdentity({ serviceId: 'homelab-api', env: 'prod' }),
@@ -23,8 +23,8 @@ test('DeploymentsTable still renders deployment history rows', () => {
     evidenceSource: 'deployment_record' as const,
     metricsSource: 'none' as const,
   }
-  const markup = render(
-    React.createElement(DeploymentsTable, {
+  const markup = renderToHtml(
+    createElement(DeploymentsTable, {
       deployments: [deployment],
       isLoading: false,
       error: '',
@@ -49,4 +49,5 @@ test('DeploymentsTable still renders deployment history rows', () => {
   assert.match(markup, /Rollback/)
   assert.match(markup, /sha-prod-2/)
   assert.match(markup, /Inspecting deploy window/)
+  browser.cleanup()
 })

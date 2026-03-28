@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import React from 'react'
+import { createElement } from 'react'
 import { createServiceIdentity } from '../src/lib/service-identity.js'
 import { RollbackPanel } from '../src/features/service-deployments/components/rollback-panel.js'
-import { installTestWindow, render } from './test-setup.js'
+import { installMockBrowser, renderToHtml } from './test-setup.js'
 
 test('RollbackPanel renders rollback controls on the deployments side', () => {
-  installTestWindow('/services/homelab-api/deployments')
-  const markup = render(
-    React.createElement(RollbackPanel, {
+  const browser = installMockBrowser({ pathname: '/services/homelab-api/deployments' })
+  const markup = renderToHtml(
+    createElement(RollbackPanel, {
       rollbackSupported: true,
       rollbackEnvs: ['dev', 'prod'],
       deploymentHistory: [
@@ -59,4 +59,5 @@ test('RollbackPanel renders rollback controls on the deployments side', () => {
 
   assert.match(markup, /Portal Rollback/)
   assert.match(markup, /Request dev rollback/)
+  browser.cleanup()
 })
