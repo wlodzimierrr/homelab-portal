@@ -221,9 +221,9 @@ from app.helpers.deployment_helpers import (
     _build_service_metrics_queries,
 )
 import app.helpers.deployment_helpers as _deployment_helpers_module
+from app.helpers.catalog_helpers import _load_service_catalog_rows
 from app.helpers.observability_helpers import (
     _load_project_catalog_rows,
-    _load_service_catalog_rows,
     _resolve_service_monitoring_context,
     _resolve_service_monitoring_metadata,
     _build_service_metrics_probe_queries,

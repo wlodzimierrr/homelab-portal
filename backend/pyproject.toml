@@ -25,3 +25,9 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.ruff.lint]
+# app/main.py is an intentional re-export hub: every name imported there is
+# kept in the module's namespace so tests can monkeypatch app.main.<name>.
+# F401 (imported but unused) is suppressed file-wide for that reason.
+per-file-ignores = {"app/main.py" = ["F401"]}

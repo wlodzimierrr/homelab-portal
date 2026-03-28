@@ -42,7 +42,6 @@ from app.service_observability import (
     normalize_observability_mode,
 )
 from app.helpers.deployment_helpers import (
-    _with_connection,
     _load_service_rows,
     _select_preferred_service_row,
     _get_deployment_record_by_id,
@@ -51,12 +50,8 @@ from app.helpers.deployment_helpers import (
     _expand_observability_query_window,
     _load_metric_snapshots_for_window,
     _query_prometheus_range,
-    _build_service_metrics_queries,
 )
-from app.helpers.catalog_helpers import (
-    _load_project_catalog_rows,
-    _load_service_catalog_rows,
-)
+from app.helpers.catalog_helpers import _load_project_catalog_rows
 from app.api.schemas.observability import (
     DeploymentObservabilityContextResponse,
     DeploymentObservabilityLogsResponse,

@@ -48,7 +48,6 @@ from app.runtime_config import (
     BRANCH_SAFE_FRAGMENT_RE,
     DEFAULT_PORTAL_IMAGES_LOOKBACK,
     SHA_IMAGE_TAG_RE,
-    deployment_lock_stale_timeout_seconds as _deployment_lock_stale_timeout_seconds,
     dev_deploy_target as _dev_deploy_target,
     ghcr_token as _ghcr_token,
     github_api_base_url as _github_api_base_url,
