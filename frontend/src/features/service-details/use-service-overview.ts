@@ -5,8 +5,6 @@ import {
   getProjects,
   getService,
   type ServiceDetails,
-  type ServiceCapabilities,
-  type ServiceProjectContext,
 } from '@/lib/api/catalog'
 import { getReleaseTraceability } from '@/lib/api/deployments'
 import { getDeploymentHistory, type DeploymentHistoryItem } from '@/lib/adapters/deployments'
@@ -21,6 +19,10 @@ import {
   safeDecodeServiceId,
   type ServiceOverviewData,
 } from './shared'
+import {
+  normalizeServiceDetail,
+  type NormalizedServiceCapabilities,
+} from './normalizers/service-detail-normalizer'
 
 function hasServiceEndpointMetadata(details: ServiceDetails) {
   return Boolean(
@@ -68,8 +70,12 @@ export function useServiceOverview(serviceId: string) {
   const [deploymentHistory, setDeploymentHistory] = useState<DeploymentHistoryItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
-  const [projectContext, setProjectContext] = useState<ServiceProjectContext | null>(null)
-  const [capabilities, setCapabilities] = useState<ServiceCapabilities | null>(null)
+  const [projectContext, setProjectContext] = useState(() =>
+    normalizeServiceDetail({ serviceId: decodedServiceId }).projectContext,
+  )
+  const [capabilities, setCapabilities] = useState<NormalizedServiceCapabilities>(() =>
+    normalizeServiceDetail({ serviceId: decodedServiceId }).capabilities,
+  )
 
   const loadOverview = useCallback(async (options?: { background?: boolean }) => {
     const background = options?.background === true
@@ -119,9 +125,6 @@ export function useServiceOverview(serviceId: string) {
 
       if (serviceResult.status === 'fulfilled') {
         setServiceIdentity(buildIdentityFromServiceDetails(decodedServiceId, serviceResult.value, baseIdentity))
-        setCapabilities(serviceResult.value.capabilities ?? null)
-      } else {
-        setCapabilities(null)
       }
 
       const releaseFallback =
@@ -194,31 +197,28 @@ export function useServiceOverview(serviceId: string) {
 
       setOverview(finalOverview)
 
-      if (serviceResult.status === 'fulfilled' && serviceResult.value.projectContext) {
-        setProjectContext(serviceResult.value.projectContext)
-      } else if (catalogResult.status === 'fulfilled' && catalogResult.value) {
-        const matchingRow = catalogResult.value.rows.find((row: CatalogJoinRow) =>
-          row.serviceIds.includes(decodedServiceId) || row.primaryServiceId === decodedServiceId,
+      const matchingCatalogRow =
+        catalogResult.status === 'fulfilled' && catalogResult.value
+          ? catalogResult.value.rows.find(
+              (row: CatalogJoinRow) =>
+                row.serviceIds.includes(decodedServiceId) || row.primaryServiceId === decodedServiceId,
+            ) ?? null
+          : null
+
+      if (serviceResult.status !== 'fulfilled' && matchingCatalogRow) {
+        setServiceIdentity((currentIdentity) =>
+          buildIdentityFromCatalogRow(decodedServiceId, matchingCatalogRow, currentIdentity),
         )
-        if (serviceResult.status !== 'fulfilled') {
-          setServiceIdentity((currentIdentity) =>
-            buildIdentityFromCatalogRow(decodedServiceId, matchingRow, currentIdentity),
-          )
-        }
-        if (matchingRow) {
-          setProjectContext({
-            projectId: matchingRow.projectId,
-            projectName: matchingRow.projectName,
-            namespace: matchingRow.namespace,
-            siblingServiceIds: matchingRow.serviceIds.filter((sid: string) => sid !== decodedServiceId),
-            isLinked: true,
-          })
-        } else {
-          setProjectContext(null)
-        }
-      } else {
-        setProjectContext(null)
       }
+
+      const normalizedDetail = normalizeServiceDetail({
+        serviceId: decodedServiceId,
+        serviceDetail: serviceResult.status === 'fulfilled' ? serviceResult.value : null,
+        catalogRow: matchingCatalogRow,
+      })
+
+      setProjectContext(normalizedDetail.projectContext)
+      setCapabilities(normalizedDetail.capabilities)
     } catch (requestError) {
       const message =
         requestError instanceof Error ? requestError.message : 'Failed to load service overview'
