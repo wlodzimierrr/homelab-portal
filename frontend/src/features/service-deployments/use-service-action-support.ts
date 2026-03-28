@@ -22,8 +22,31 @@ export function useServiceActionSupport(serviceId: string) {
   }, [decodedServiceId])
 
   useEffect(() => {
-    void loadServiceActionSupport()
-  }, [loadServiceActionSupport])
+    let cancelled = false
+
+    async function loadInitialServiceActionSupport() {
+      try {
+        const details = await getService(decodedServiceId)
+        if (cancelled) {
+          return
+        }
+        setDeploymentLock(details.deploymentLock ?? null)
+        setCapabilities(details.capabilities ?? null)
+      } catch {
+        if (cancelled) {
+          return
+        }
+        setDeploymentLock(null)
+        setCapabilities(null)
+      }
+    }
+
+    void loadInitialServiceActionSupport()
+
+    return () => {
+      cancelled = true
+    }
+  }, [decodedServiceId])
 
   return {
     decodedServiceId,

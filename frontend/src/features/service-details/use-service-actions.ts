@@ -46,7 +46,10 @@ export function useServiceActions({
   const deploySupported = resolvedCapabilities.canDeployToDev
   const promoteSupported = resolvedCapabilities.canPromoteToProd
   const rollbackSupported = includeRollback && resolvedCapabilities.canRollback
-  const rollbackEnvs = rollbackSupported ? resolvedCapabilities.rollbackEnvs : []
+  const rollbackEnvs = useMemo(
+    () => (rollbackSupported ? resolvedCapabilities.rollbackEnvs : []),
+    [resolvedCapabilities.rollbackEnvs, rollbackSupported],
+  )
   const latestDevDeployment = useMemo(
     () => getLatestDeploymentForEnv(deploymentHistory, 'dev'),
     [deploymentHistory],
