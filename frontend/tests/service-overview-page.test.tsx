@@ -28,5 +28,9 @@ test('ServiceDetailsPage links to deployment history and rollback from overview'
 
   assert.match(markup, /View deployment history &amp; rollback/)
   assert.doesNotMatch(markup, /Portal Rollback/)
+  assert.doesNotMatch(markup, /Latency &amp; Error Trends/)
+  assert.doesNotMatch(markup, /Logs Console/)
+  assert.doesNotMatch(markup, /Logs Quick View/)
+  assert.doesNotMatch(markup, /Service Health Timeline/)
   browser.cleanup()
 })
