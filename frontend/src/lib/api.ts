@@ -5,7 +5,7 @@ import type { ServiceIdentity } from '@/lib/service-identity'
 const serviceEndpointMissingStatuses = new Set([404, 405, 501])
 // Some backends are still rolling out the service-centric endpoints. Keep the older
 // pages working by allowing callers to detect "endpoint missing" explicitly.
-const enableServiceApi = import.meta.env.VITE_ENABLE_SERVICE_API !== 'false'
+const enableServiceApi = import.meta.env?.VITE_ENABLE_SERVICE_API !== 'false'
 
 export interface MonitoringProviderStatus {
   provider: string

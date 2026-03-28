@@ -1025,7 +1025,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               </div>
             ) : null}
 
-            {import.meta.env.DEV ? (
+            {import.meta.env?.DEV ? (
               <section className="space-y-3">
                 <h2 className="text-sm font-semibold">Status Visual Checks</h2>
                 <div className="grid gap-3 md:grid-cols-3">
