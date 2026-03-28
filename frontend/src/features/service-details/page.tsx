@@ -37,11 +37,11 @@ import {
 import { useServiceOverview } from './use-service-overview'
 import { useServiceObservability } from './use-service-observability'
 import { useServiceActions } from './use-service-actions'
-import { DeploymentActionsPanel } from './components/deployment-actions-panel'
+import { ForwardActionsPanel } from './components/forward-actions-panel'
 
-// ServiceDetailsPage is the deepest single-service screen in the portal. It fans in
-// catalog metadata, release/deployment history, metrics, logs, timeline data, and
-// a few admin actions such as deploy/promote/rollback/config edits.
+// ServiceDetailsPage is the single-service overview screen. It fans in
+// catalog metadata, shallow deployment context, metrics, logs, timeline data, and
+// the most common forward deployment actions.
 interface ServiceDetailsPageProps {
   serviceId: string
   incidentServiceAlerts?: Record<string, ServiceIncidentBadge>
@@ -372,35 +372,6 @@ function IncidentServiceBadge({ alert }: { alert: ServiceIncidentBadge }) {
   )
 }
 
-function formatDeploymentAction(action?: string | null) {
-  switch ((action ?? '').trim().toLowerCase()) {
-    case 'deploy':
-      return 'Deploy'
-    case 'promote':
-      return 'Promote'
-    case 'rollback':
-      return 'Rollback'
-    case 'config-change':
-      return 'Config change'
-    default:
-      return action || 'Unknown'
-  }
-}
-
-function getDeploymentOutcomeTone(outcome?: string | null) {
-  const normalized = (outcome ?? '').trim().toLowerCase()
-  if (normalized === 'live') {
-    return 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-  }
-  if (normalized === 'deploying' || normalized === 'pending') {
-    return 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
-  }
-  if (normalized === 'failed') {
-    return 'bg-rose-500/10 text-rose-700 dark:text-rose-300'
-  }
-  return 'bg-muted text-muted-foreground'
-}
-
 const logsPresets: LogsPreset[] = [
   {
     id: 'all',
@@ -446,16 +417,11 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     serviceIdentity,
     overview,
     projectContext,
+    capabilities,
     deploymentHistory,
-    deploymentInfo,
-    deploymentInfoLoading,
-    deploymentInfoError,
     isLoading,
     error,
-    deploymentHistoryUnavailable,
-    deploymentHistoryError,
     loadOverview,
-    loadDeploymentInfo,
   } = useServiceOverview(serviceId)
   const {
     metricsRange,
@@ -488,7 +454,8 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
   const [toastMessage, setToastMessage] = useState('')
   const [toastVariant, setToastVariant] = useState<'success' | 'error' | 'info'>('info')
   const {
-    rollbackSupported,
+    deploySupported,
+    promoteSupported,
     latestDevDeployment,
     latestProdDeployment,
     recentDevTags,
@@ -497,20 +464,6 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     prodInFlight,
     devLockActive,
     prodLockActive,
-    rollbackTargetEnvironment,
-    setRollbackTargetEnvironment,
-    rollbackCandidates,
-    rollbackCandidatesLoading,
-    rollbackCandidatesError,
-    selectedRollbackTag,
-    setSelectedRollbackTag,
-    rollbackReason,
-    setRollbackReason,
-    rollbackSubmitting,
-    rollbackError,
-    rollbackResult,
-    rollbackLockActive,
-    rollbackInFlight,
     deployReason,
     setDeployReason,
     deploySubmitting,
@@ -523,14 +476,14 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     promoteResult,
     submitDeployRequest,
     submitPromoteRequest,
-    submitRollbackRequest,
   } = useServiceActions({
     serviceId: decodedServiceId,
     serviceEnv: serviceIdentity.env,
+    capabilities,
+    includeRollback: false,
     deploymentHistory,
     deploymentLock: overview?.deploymentLock ?? null,
-    refreshOverview: loadOverview,
-    refreshDeploymentInfo: loadDeploymentInfo,
+    refreshService: loadOverview,
   })
 
   const handleSubmitDeploy = useCallback(async () => {
@@ -566,23 +519,6 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
       setToastMessage(message)
     }
   }, [decodedServiceId, submitPromoteRequest])
-
-  const handleSubmitRollback = useCallback(async () => {
-    try {
-      const response = await submitRollbackRequest()
-      setToastVariant('success')
-      setToastMessage(
-        response.status === 'noop'
-          ? response.message ?? `Rollback not needed for ${rollbackTargetEnvironment}.`
-          : `Rollback request accepted for ${decodedServiceId}.`,
-      )
-    } catch (requestError) {
-      const message =
-        requestError instanceof Error ? requestError.message : 'Failed to request service rollback.'
-      setToastVariant('error')
-      setToastMessage(message)
-    }
-  }, [decodedServiceId, rollbackTargetEnvironment, submitRollbackRequest])
 
   const argoUrl = useMemo(
     () => buildArgoAppUrl(serviceIdentity.serviceId || decodedServiceId, serviceIdentity.argoAppName),
@@ -763,7 +699,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
             </Button>
             <Button asChild variant="outline">
               <AppLink to={`/services/${encodeURIComponent(decodedServiceId)}/deployments`}>
-                View deployments
+                View deployment history & rollback
               </AppLink>
             </Button>
           </div>
@@ -1611,130 +1547,10 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               )}
             </section>
 
-            <section className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2 className="text-sm font-semibold">Deploy Info</h2>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void loadDeploymentInfo()}
-                  disabled={deploymentInfoLoading}
-                >
-                  Refresh deploy info
-                </Button>
-              </div>
-              {deploymentInfoError ? (
-                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
-                  <p className="text-xs text-amber-900 dark:text-amber-200">{deploymentInfoError}</p>
-                </div>
-              ) : null}
-              {deploymentInfoLoading ? (
-                <LoadingState label="Loading deploy info..." rows={2} />
-              ) : deploymentInfo ? (
-                <div className="grid gap-3 xl:grid-cols-2">
-                  <article className="rounded-md border border-border bg-background p-4">
-                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Current deployment</p>
-                    <div className="mt-2 space-y-2 text-sm">
-                      <p>
-                        <span className="font-medium">Action:</span> {formatDeploymentAction(deploymentInfo.action)}
-                      </p>
-                      <p>
-                        <span className="font-medium">Result:</span>{' '}
-                        <span
-                          className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${getDeploymentOutcomeTone(
-                            deploymentInfo.result,
-                          )}`}
-                        >
-                          {deploymentInfo.result ?? 'unknown'}
-                        </span>
-                      </p>
-                      <p>
-                        <span className="font-medium">Deployed:</span>{' '}
-                        {formatDate(deploymentInfo.deployedTimestamp ?? undefined)}
-                      </p>
-                      <p className="break-all">
-                        <span className="font-medium">Image:</span>{' '}
-                        {deploymentInfo.imageUrl ? (
-                          <a href={deploymentInfo.imageUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            {deploymentInfo.deployedImage ?? 'N/A'}
-                          </a>
-                        ) : (
-                          deploymentInfo.deployedImage ?? 'N/A'
-                        )}
-                      </p>
-                      {deploymentInfo.previousImage ? (
-                        <p className="break-all">
-                          <span className="font-medium">Previous image:</span> {deploymentInfo.previousImage}
-                        </p>
-                      ) : null}
-                      {deploymentInfo.imageDigest ? (
-                        <p className="break-all">
-                          <span className="font-medium">Digest:</span> {deploymentInfo.imageDigest}
-                        </p>
-                      ) : null}
-                    </div>
-                  </article>
-                  <article className="rounded-md border border-border bg-background p-4">
-                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Traceability</p>
-                    <div className="mt-2 space-y-2 text-sm">
-                      <p>
-                        <span className="font-medium">Commit:</span>{' '}
-                        {deploymentInfo.commitUrl ? (
-                          <a href={deploymentInfo.commitUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            {deploymentInfo.gitCommit ?? 'N/A'}
-                          </a>
-                        ) : (
-                          deploymentInfo.gitCommit ?? 'N/A'
-                        )}
-                      </p>
-                      <p>
-                        <span className="font-medium">Argo:</span> {deploymentInfo.argoApp ?? 'N/A'}
-                      </p>
-                      <p>
-                        <span className="font-medium">Sync/health:</span> {deploymentInfo.syncStatus ?? 'unknown'} /{' '}
-                        {deploymentInfo.healthStatus ?? 'unknown'}
-                      </p>
-                      {deploymentInfo.gitPrUrl ? (
-                        <p>
-                          <span className="font-medium">PR:</span>{' '}
-                          <a href={deploymentInfo.gitPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            #{deploymentInfo.gitPrNumber ?? 'link'}
-                          </a>
-                        </p>
-                      ) : null}
-                      {deploymentInfo.compareUrl ? (
-                        <p>
-                          <span className="font-medium">Compare:</span>{' '}
-                          <a href={deploymentInfo.compareUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                            Open compare view
-                          </a>
-                        </p>
-                      ) : null}
-                      {deploymentInfo.deployReason ? (
-                        <p>
-                          <span className="font-medium">Reason:</span> {deploymentInfo.deployReason}
-                        </p>
-                      ) : null}
-                      {deploymentInfo.resultReason ? (
-                        <p>
-                          <span className="font-medium">Result reason:</span> {deploymentInfo.resultReason}
-                        </p>
-                      ) : null}
-                    </div>
-                  </article>
-                </div>
-              ) : (
-                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
-                  No deployment info is available for this service yet.
-                </p>
-              )}
-            </section>
-
-            <DeploymentActionsPanel
+            <ForwardActionsPanel
               serviceId={decodedServiceId}
-              deploymentHistory={deploymentHistory}
-              rollbackSupported={rollbackSupported}
+              deploySupported={deploySupported}
+              promoteSupported={promoteSupported}
               latestDevDeployment={latestDevDeployment}
               latestProdDeployment={latestProdDeployment}
               recentDevTags={recentDevTags}
@@ -1755,113 +1571,7 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
               promoteError={promoteError}
               promoteResult={promoteResult}
               onSubmitPromote={() => void handleSubmitPromote()}
-              rollbackTargetEnvironment={rollbackTargetEnvironment}
-              setRollbackTargetEnvironment={setRollbackTargetEnvironment}
-              rollbackCandidates={rollbackCandidates}
-              rollbackCandidatesLoading={rollbackCandidatesLoading}
-              rollbackCandidatesError={rollbackCandidatesError}
-              selectedRollbackTag={selectedRollbackTag}
-              setSelectedRollbackTag={setSelectedRollbackTag}
-              rollbackReason={rollbackReason}
-              setRollbackReason={setRollbackReason}
-              rollbackSubmitting={rollbackSubmitting}
-              rollbackError={rollbackError}
-              rollbackResult={rollbackResult}
-              rollbackLockActive={Boolean(rollbackLockActive)}
-              rollbackInFlight={rollbackInFlight}
-              onSubmitRollback={() => void handleSubmitRollback()}
             />
-
-            <section className="space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold">Recent Deployments</h2>
-                <AppLink
-                  to={`/services/${encodeURIComponent(decodedServiceId)}/deployments`}
-                  className="text-xs font-medium text-primary hover:underline"
-                >
-                  Open full history
-                </AppLink>
-              </div>
-              {deploymentHistoryUnavailable ? (
-                <div className="rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
-                  <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
-                    Deployment history unavailable
-                  </p>
-                  <p className="mt-1 text-xs text-amber-900 dark:text-amber-200">
-                    {deploymentHistoryError || 'Live deployment history could not be loaded.'}
-                  </p>
-                  <Button type="button" size="sm" variant="outline" className="mt-3" onClick={() => void loadOverview()}>
-                    Retry deployment history
-                  </Button>
-                </div>
-              ) : deploymentHistory.length === 0 ? (
-                <p className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
-                  No deployments found for this service yet.
-                </p>
-              ) : (
-                <div className="overflow-x-auto rounded-md border border-border">
-                  <table className="min-w-full text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-border">
-                        <th className="px-3 py-2 font-medium text-muted-foreground">Env</th>
-                        <th className="px-3 py-2 font-medium text-muted-foreground">Action</th>
-                        <th className="px-3 py-2 font-medium text-muted-foreground">Version</th>
-                        <th className="px-3 py-2 font-medium text-muted-foreground">Status</th>
-                        <th className="px-3 py-2 font-medium text-muted-foreground">Reason / links</th>
-                        <th className="px-3 py-2 font-medium text-muted-foreground">Deployed At</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {deploymentHistory.slice(0, 5).map((deployment) => (
-                        <tr key={deployment.id} className="border-b border-border/70">
-                          <td className="px-3 py-2 align-top">{deployment.identity.env}</td>
-                          <td className="px-3 py-2 align-top">{formatDeploymentAction(deployment.action)}</td>
-                          <td className="px-3 py-2 align-top">{deployment.version ?? 'N/A'}</td>
-                          <td className="px-3 py-2">
-                            <span
-                              className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium ${getDeploymentOutcomeTone(
-                                deployment.outcome,
-                              )}`}
-                            >
-                              {deployment.outcome ?? 'unknown'}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 align-top text-xs text-muted-foreground">
-                            {deployment.deployReason ? <p>{deployment.deployReason}</p> : <p>N/A</p>}
-                            <div className="mt-1 flex flex-wrap gap-2">
-                              {deployment.gitPrUrl ? (
-                                <a
-                                  href={deployment.gitPrUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="font-medium text-primary hover:underline"
-                                >
-                                  PR #{deployment.gitPrNumber ?? 'link'}
-                                </a>
-                              ) : null}
-                              {deployment.compareUrl ? (
-                                <a
-                                  href={deployment.compareUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="font-medium text-primary hover:underline"
-                                >
-                                  Compare
-                                </a>
-                              ) : null}
-                            </div>
-                            {deployment.failureReason ? <p className="mt-1 text-rose-400">{deployment.failureReason}</p> : null}
-                          </td>
-                          <td className="px-3 py-2 align-top text-muted-foreground">
-                            {formatDate(deployment.deployedAt ?? deployment.requestedAt)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
           </>
         ) : null}
       </div>

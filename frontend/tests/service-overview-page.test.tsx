@@ -21,3 +21,12 @@ test('ServiceDetailsPage links to service settings from overview', () => {
   assert.match(markup, /Service settings/)
   browser.cleanup()
 })
+
+test('ServiceDetailsPage links to deployment history and rollback from overview', () => {
+  const browser = installMockBrowser({ pathname: '/services/homelab-api' })
+  const markup = renderToHtml(createElement(ServiceDetailsPage, { serviceId: 'homelab-api' }))
+
+  assert.match(markup, /View deployment history &amp; rollback/)
+  assert.doesNotMatch(markup, /Portal Rollback/)
+  browser.cleanup()
+})
