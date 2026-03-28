@@ -9,6 +9,7 @@ import { PlatformHealthPage } from '@/pages/platform-health-page'
 import { ProjectsPage } from '@/pages/projects-page'
 import { ServiceDeploymentsPage } from '@/pages/service-deployments-page'
 import { ServiceDetailsPage } from '@/pages/service-details-page'
+import { ServiceSettingsPage } from '@/pages/service-settings-page'
 import { ServicesPage } from '@/pages/services-page'
 import { SettingsPage } from '@/pages/settings-page'
 import { resolveAppRoute } from './router'
@@ -96,6 +97,8 @@ function AppShell() {
         return <ServicesPage incidentServiceAlerts={incidentSnapshot.serviceAlerts} />
       case 'platform-health':
         return <PlatformHealthPage />
+      case 'service-settings':
+        return <ServiceSettingsPage serviceId={route.serviceId} />
       case 'service-deployments':
         return <ServiceDeploymentsPage serviceId={route.serviceId} />
       case 'service-details':

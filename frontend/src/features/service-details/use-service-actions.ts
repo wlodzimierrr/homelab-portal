@@ -10,20 +10,10 @@ import {
   type ServiceRollbackCandidatesResponse,
   type ServiceRollbackResponse,
 } from '@/lib/api/deployments'
-import {
-  getServiceConfig,
-  setServiceConfig,
-  updateServicePublicHostname,
-  type ServiceConfigEntry,
-  type ServiceSetConfigResponse,
-  type UpdatePublicHostnameResponse,
-} from '@/lib/api/admin'
-import { ApiRequestError } from '@/lib/http/errors'
 import type { DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import {
   getLatestDeploymentForEnv,
   getRecentDeploymentTags,
-  supportsConfigEditing,
   supportsServiceRollback,
 } from './shared'
 
@@ -32,7 +22,6 @@ interface UseServiceActionsOptions {
   serviceEnv?: string
   deploymentHistory: DeploymentHistoryItem[]
   deploymentLock?: ServiceDeploymentLock | null
-  initialPublicHost?: string
   refreshOverview: (options?: { background?: boolean }) => Promise<void>
   refreshDeploymentInfo: () => Promise<void>
 }
@@ -42,12 +31,10 @@ export function useServiceActions({
   serviceEnv,
   deploymentHistory,
   deploymentLock,
-  initialPublicHost,
   refreshOverview,
   refreshDeploymentInfo,
 }: UseServiceActionsOptions) {
   const rollbackSupported = useMemo(() => supportsServiceRollback(serviceId), [serviceId])
-  const configSupported = useMemo(() => supportsConfigEditing(serviceId), [serviceId])
   const latestDevDeployment = useMemo(
     () => getLatestDeploymentForEnv(deploymentHistory, 'dev'),
     [deploymentHistory],
@@ -96,29 +83,12 @@ export function useServiceActions({
   const [promoteSubmitting, setPromoteSubmitting] = useState(false)
   const [promoteError, setPromoteError] = useState('')
   const [promoteResult, setPromoteResult] = useState<ServicePromoteToProdResponse | null>(null)
-  const [configEnv, setConfigEnv] = useState<'dev' | 'prod'>('dev')
-  const [configEntries, setConfigEntries] = useState<ServiceConfigEntry[]>([])
-  const [configLoading, setConfigLoading] = useState(false)
-  const [configError, setConfigError] = useState('')
-  const [configSelectedValues, setConfigSelectedValues] = useState<Record<string, string>>({})
-  const [configSubmitting, setConfigSubmitting] = useState(false)
-  const [configSubmitError, setConfigSubmitError] = useState('')
-  const [configSubmitResult, setConfigSubmitResult] = useState<ServiceSetConfigResponse | null>(null)
-  const [publicHostEditMode, setPublicHostEditMode] = useState(false)
-  const [publicHostValue, setPublicHostValue] = useState(initialPublicHost ?? '')
-  const [publicHostSubmitting, setPublicHostSubmitting] = useState(false)
-  const [publicHostError, setPublicHostError] = useState('')
-  const [publicHostResult, setPublicHostResult] = useState<UpdatePublicHostnameResponse | null>(null)
 
   useEffect(() => {
     if (serviceEnv === 'dev' || serviceEnv === 'prod') {
       setRollbackTargetEnvironment(serviceEnv)
     }
   }, [serviceEnv])
-
-  useEffect(() => {
-    setPublicHostValue(initialPublicHost ?? '')
-  }, [initialPublicHost])
 
   const rollbackLockActive = rollbackTargetEnvironment === 'dev' ? devLockActive : prodLockActive
   const rollbackInFlight = rollbackTargetEnvironment === 'dev' ? devInFlight : prodInFlight
@@ -239,84 +209,8 @@ export function useServiceActions({
     serviceId,
   ])
 
-  const loadConfig = useCallback(async (env: 'dev' | 'prod') => {
-    setConfigLoading(true)
-    setConfigError('')
-    setConfigSubmitResult(null)
-    try {
-      const result = await getServiceConfig(serviceId, env)
-      setConfigEntries(result.entries)
-      const initial: Record<string, string> = {}
-      for (const entry of result.entries) {
-        initial[entry.key] = entry.value
-      }
-      setConfigSelectedValues(initial)
-    } catch (err) {
-      setConfigError(err instanceof Error ? err.message : 'Failed to load config.')
-    } finally {
-      setConfigLoading(false)
-    }
-  }, [serviceId])
-
-  useEffect(() => {
-    if (configSupported) {
-      void loadConfig(configEnv)
-    }
-  }, [configSupported, configEnv, loadConfig])
-
-  const submitConfigEdit = useCallback(async (key: string) => {
-    const value = configSelectedValues[key]
-    if (!value) return null
-    setConfigSubmitting(true)
-    setConfigSubmitError('')
-    setConfigSubmitResult(null)
-    try {
-      const result = await setServiceConfig(serviceId, {
-        env: configEnv,
-        configKey: key,
-        configValue: value,
-      })
-      setConfigSubmitResult(result)
-      await loadConfig(configEnv)
-      return result
-    } catch (err) {
-      if (err instanceof ApiRequestError && err.status === 429) {
-        setConfigSubmitError('Rate limited: config edits are limited to one every 30 seconds.')
-      } else {
-        setConfigSubmitError(err instanceof Error ? err.message : 'Failed to submit config change.')
-      }
-      throw err
-    } finally {
-      setConfigSubmitting(false)
-    }
-  }, [configEnv, configSelectedValues, loadConfig, serviceId])
-
-  const submitPublicHostname = useCallback(async () => {
-    const trimmed = publicHostValue.trim()
-    if (!trimmed) return null
-    setPublicHostSubmitting(true)
-    setPublicHostError('')
-    setPublicHostResult(null)
-    try {
-      const result = await updateServicePublicHostname(serviceId, trimmed)
-      setPublicHostResult(result)
-      setPublicHostEditMode(false)
-      return result
-    } catch (err) {
-      if (err instanceof ApiRequestError && err.status === 204) {
-        setPublicHostEditMode(false)
-        return null
-      }
-      setPublicHostError(err instanceof Error ? err.message : 'Failed to update public hostname.')
-      throw err
-    } finally {
-      setPublicHostSubmitting(false)
-    }
-  }, [publicHostValue, serviceId])
-
   return {
     rollbackSupported,
-    configSupported,
     latestDevDeployment,
     latestProdDeployment,
     recentDevTags,
@@ -352,25 +246,5 @@ export function useServiceActions({
     submitDeployRequest,
     submitPromoteRequest,
     submitRollbackRequest,
-    configEnv,
-    setConfigEnv,
-    configEntries,
-    configLoading,
-    configError,
-    configSelectedValues,
-    setConfigSelectedValues,
-    configSubmitting,
-    configSubmitError,
-    configSubmitResult,
-    submitConfigEdit,
-    loadConfig,
-    publicHostEditMode,
-    setPublicHostEditMode,
-    publicHostValue,
-    setPublicHostValue,
-    publicHostSubmitting,
-    publicHostError,
-    publicHostResult,
-    submitPublicHostname,
   }
 }
