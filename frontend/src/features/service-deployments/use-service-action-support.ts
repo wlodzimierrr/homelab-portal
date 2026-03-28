@@ -3,6 +3,7 @@ import { getService } from '@/lib/api/catalog'
 import type { ServiceDeploymentLock } from '@/lib/api/deployments'
 import { safeDecodeServiceId } from '@/features/service-details/shared'
 import {
+  EMPTY_SERVICE_CAPABILITIES,
   normalizeServiceDetail,
   type NormalizedServiceCapabilities,
 } from '@/features/service-details/normalizers/service-detail-normalizer'
@@ -10,9 +11,7 @@ import {
 export function useServiceActionSupport(serviceId: string) {
   const decodedServiceId = useMemo(() => safeDecodeServiceId(serviceId), [serviceId])
   const [deploymentLock, setDeploymentLock] = useState<ServiceDeploymentLock | null>(null)
-  const [capabilities, setCapabilities] = useState<NormalizedServiceCapabilities>(() =>
-    normalizeServiceDetail({ serviceId: decodedServiceId }).capabilities,
-  )
+  const [capabilities, setCapabilities] = useState<NormalizedServiceCapabilities>(EMPTY_SERVICE_CAPABILITIES)
 
   const loadServiceActionSupport = useCallback(async (options?: { background?: boolean }) => {
     try {
@@ -27,7 +26,7 @@ export function useServiceActionSupport(serviceId: string) {
     } catch {
       if (!options?.background) {
         setDeploymentLock(null)
-        setCapabilities(normalizeServiceDetail({ serviceId: decodedServiceId }).capabilities)
+        setCapabilities(EMPTY_SERVICE_CAPABILITIES)
       }
     }
   }, [decodedServiceId])
@@ -53,7 +52,7 @@ export function useServiceActionSupport(serviceId: string) {
           return
         }
         setDeploymentLock(null)
-        setCapabilities(normalizeServiceDetail({ serviceId: decodedServiceId }).capabilities)
+        setCapabilities(EMPTY_SERVICE_CAPABILITIES)
       }
     }
 

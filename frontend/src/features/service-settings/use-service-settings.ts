@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { adoptService } from '@/lib/api'
 import {
   getServiceConfig,
@@ -8,14 +8,12 @@ import {
   type ServiceSetConfigResponse,
   type UpdatePublicHostnameResponse,
 } from '@/lib/api/admin'
-import type { ServiceProjectContext } from '@/lib/api/catalog'
 import { ApiRequestError } from '@/lib/http/errors'
 import type { NormalizedServiceCapabilities } from '@/features/service-details/normalizers/service-detail-normalizer'
 
 interface UseServiceSettingsOptions {
   serviceId: string
   initialPublicHost?: string
-  projectContext: ServiceProjectContext | null
   capabilities: NormalizedServiceCapabilities
   refreshOverview: (options?: { background?: boolean }) => Promise<void>
 }
@@ -23,15 +21,11 @@ interface UseServiceSettingsOptions {
 export function useServiceSettings({
   serviceId,
   initialPublicHost,
-  projectContext,
   capabilities,
   refreshOverview,
 }: UseServiceSettingsOptions) {
-  const configSupported = useMemo(() => capabilities.canEditConfig, [capabilities.canEditConfig])
-  const adoptSupported = useMemo(() => capabilities.canAdopt && !projectContext?.isLinked, [
-    capabilities.canAdopt,
-    projectContext?.isLinked,
-  ])
+  const configSupported = capabilities.canEditConfig
+  const adoptSupported = capabilities.canAdopt
 
   const [configEnv, setConfigEnv] = useState<'dev' | 'prod'>('dev')
   const [configEntries, setConfigEntries] = useState<ServiceConfigEntry[]>([])
