@@ -5,6 +5,7 @@ import {
   getProjects,
   getService,
   type ServiceDetails,
+  type ServiceProjectContext,
 } from '@/lib/api/catalog'
 import { getReleaseTraceability } from '@/lib/api/deployments'
 import { getDeploymentHistory, type DeploymentHistoryItem } from '@/lib/adapters/deployments'
@@ -20,6 +21,7 @@ import {
   type ServiceOverviewData,
 } from './shared'
 import {
+  EMPTY_SERVICE_CAPABILITIES,
   normalizeServiceDetail,
   type NormalizedServiceCapabilities,
 } from './normalizers/service-detail-normalizer'
@@ -70,12 +72,8 @@ export function useServiceOverview(serviceId: string) {
   const [deploymentHistory, setDeploymentHistory] = useState<DeploymentHistoryItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
-  const [projectContext, setProjectContext] = useState(() =>
-    normalizeServiceDetail({ serviceId: decodedServiceId }).projectContext,
-  )
-  const [capabilities, setCapabilities] = useState<NormalizedServiceCapabilities>(() =>
-    normalizeServiceDetail({ serviceId: decodedServiceId }).capabilities,
-  )
+  const [projectContext, setProjectContext] = useState<ServiceProjectContext | null>(null)
+  const [capabilities, setCapabilities] = useState<NormalizedServiceCapabilities>(EMPTY_SERVICE_CAPABILITIES)
 
   const loadOverview = useCallback(async (options?: { background?: boolean }) => {
     const background = options?.background === true

@@ -4,7 +4,6 @@ import type {
   ServiceDetails,
   ServiceProjectContext,
 } from '@/lib/api/catalog'
-import { normalizeServiceId } from '@/lib/service-identity'
 
 type SupportedEnvironment = 'dev' | 'prod'
 
@@ -19,6 +18,17 @@ export interface NormalizedServiceCapabilities {
   canAdopt: boolean
 }
 
+export const EMPTY_SERVICE_CAPABILITIES: NormalizedServiceCapabilities = {
+  canDeployToDev: false,
+  canPromoteToProd: false,
+  canRollback: false,
+  rollbackEnvs: [],
+  canEditConfig: false,
+  configEnvs: [],
+  canEditPublicHostname: false,
+  canAdopt: true,
+}
+
 export interface NormalizedServiceDetail {
   projectContext: ServiceProjectContext | null
   capabilities: NormalizedServiceCapabilities
@@ -28,25 +38,6 @@ interface NormalizeServiceDetailOptions {
   serviceId: string
   serviceDetail?: Pick<ServiceDetails, 'projectContext' | 'capabilities'> | null
   catalogRow?: CatalogJoinRow | null
-}
-
-function supportsServiceDeployToDevFallback(serviceId: string) {
-  const normalized = normalizeServiceId(serviceId)
-  return normalized === 'homelab-api' || normalized === 'homelab-web'
-}
-
-function supportsServicePromoteToProdFallback(serviceId: string) {
-  const normalized = normalizeServiceId(serviceId)
-  return normalized === 'homelab-api' || normalized === 'homelab-web'
-}
-
-function supportsServiceRollbackFallback(serviceId: string) {
-  const normalized = normalizeServiceId(serviceId)
-  return normalized === 'homelab-api' || normalized === 'homelab-web'
-}
-
-function supportsConfigEditingFallback(serviceId: string) {
-  return normalizeServiceId(serviceId) === 'homelab-api'
 }
 
 function normalizeSupportedEnvironments(value?: string[] | null): SupportedEnvironment[] {
@@ -99,40 +90,26 @@ export function normalizeServiceProjectContext({
 }
 
 export function normalizeServiceCapabilities(
-  serviceId: string,
   capabilities?: ServiceCapabilities | null,
   projectContext?: ServiceProjectContext | null,
 ): NormalizedServiceCapabilities {
   const explicitRollbackEnvs = normalizeSupportedEnvironments(capabilities?.rollbackEnvs)
-  const canRollback =
-    capabilities?.canRollback ??
-    (explicitRollbackEnvs.length > 0 ? true : supportsServiceRollbackFallback(serviceId))
-  const rollbackEnvs =
-    explicitRollbackEnvs.length > 0
-      ? explicitRollbackEnvs
-      : canRollback
-        ? (['dev', 'prod'] as SupportedEnvironment[])
-        : []
+  const canRollback = capabilities?.canRollback ?? explicitRollbackEnvs.length > 0
+  const rollbackEnvs = canRollback ? explicitRollbackEnvs : []
 
   const explicitConfigEnvs = normalizeSupportedEnvironments(capabilities?.configEnvs)
-  const canEditConfig = capabilities?.canEditConfig ?? supportsConfigEditingFallback(serviceId)
-  const configEnvs =
-    explicitConfigEnvs.length > 0
-      ? explicitConfigEnvs
-      : canEditConfig
-        ? (['dev', 'prod'] as SupportedEnvironment[])
-        : []
+  const canEditConfig = capabilities?.canEditConfig ?? explicitConfigEnvs.length > 0
+  const configEnvs = canEditConfig ? explicitConfigEnvs : []
 
   return {
-    canDeployToDev: capabilities?.canDeployToDev ?? supportsServiceDeployToDevFallback(serviceId),
-    canPromoteToProd:
-      capabilities?.canPromoteToProd ?? supportsServicePromoteToProdFallback(serviceId),
+    canDeployToDev: capabilities?.canDeployToDev ?? EMPTY_SERVICE_CAPABILITIES.canDeployToDev,
+    canPromoteToProd: capabilities?.canPromoteToProd ?? EMPTY_SERVICE_CAPABILITIES.canPromoteToProd,
     canRollback,
     rollbackEnvs,
     canEditConfig,
     configEnvs,
-    // Keep permissive legacy defaults until the backend contract is universally present.
-    canEditPublicHostname: capabilities?.canEditPublicHostname ?? true,
+    canEditPublicHostname:
+      capabilities?.canEditPublicHostname ?? EMPTY_SERVICE_CAPABILITIES.canEditPublicHostname,
     canAdopt: capabilities?.canAdopt ?? !projectContext?.isLinked,
   }
 }
@@ -146,6 +123,6 @@ export function normalizeServiceDetail({
 
   return {
     projectContext,
-    capabilities: normalizeServiceCapabilities(serviceId, serviceDetail?.capabilities, projectContext),
+    capabilities: normalizeServiceCapabilities(serviceDetail?.capabilities, projectContext),
   }
 }

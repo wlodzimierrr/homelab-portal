@@ -24,7 +24,6 @@ export function ServiceSettingsPage({ serviceId }: ServiceSettingsPageProps) {
   const settings = useServiceSettings({
     serviceId: decodedServiceId,
     initialPublicHost: overview?.publicHost,
-    projectContext,
     capabilities,
     refreshOverview: loadOverview,
   })

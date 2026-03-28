@@ -59,7 +59,7 @@ test('normalizeServiceDetail prefers backend project context and capabilities wh
   assert.equal(normalized.capabilities.canAdopt, false)
 })
 
-test('normalizeServiceDetail falls back to catalog context and legacy capability defaults when backend fields are absent', () => {
+test('normalizeServiceDetail still falls back to catalog project context when backend projectContext is absent', () => {
   const normalized = normalizeServiceDetail({
     serviceId: 'homelab-api',
     catalogRow: {
@@ -83,24 +83,24 @@ test('normalizeServiceDetail falls back to catalog context and legacy capability
     siblingServiceIds: ['homelab-web'],
     isLinked: true,
   })
-  assert.equal(normalized.capabilities.canDeployToDev, true)
-  assert.equal(normalized.capabilities.canPromoteToProd, true)
-  assert.equal(normalized.capabilities.canRollback, true)
-  assert.deepEqual(normalized.capabilities.rollbackEnvs, ['dev', 'prod'])
-  assert.equal(normalized.capabilities.canEditConfig, true)
-  assert.deepEqual(normalized.capabilities.configEnvs, ['dev', 'prod'])
-  assert.equal(normalized.capabilities.canEditPublicHostname, true)
+  assert.equal(normalized.capabilities.canDeployToDev, false)
+  assert.equal(normalized.capabilities.canPromoteToProd, false)
+  assert.equal(normalized.capabilities.canRollback, false)
+  assert.deepEqual(normalized.capabilities.rollbackEnvs, [])
+  assert.equal(normalized.capabilities.canEditConfig, false)
+  assert.deepEqual(normalized.capabilities.configEnvs, [])
+  assert.equal(normalized.capabilities.canEditPublicHostname, false)
   assert.equal(normalized.capabilities.canAdopt, false)
 })
 
 test('normalizeServiceCapabilities keeps adopt fallback permissive when project context is absent', () => {
-  const normalized = normalizeServiceCapabilities('service-without-backend-capabilities', null, null)
+  const normalized = normalizeServiceCapabilities(null, null)
 
   assert.equal(normalized.canDeployToDev, false)
   assert.equal(normalized.canPromoteToProd, false)
   assert.equal(normalized.canRollback, false)
   assert.equal(normalized.canEditConfig, false)
-  assert.equal(normalized.canEditPublicHostname, true)
+  assert.equal(normalized.canEditPublicHostname, false)
   assert.equal(normalized.canAdopt, true)
 })
 

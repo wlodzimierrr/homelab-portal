@@ -15,7 +15,6 @@ import {
   getLatestDeploymentForEnv,
   getRecentDeploymentTags,
 } from './shared'
-import { resolveServiceActionCapabilities } from './action-capabilities'
 import type { NormalizedServiceCapabilities } from './normalizers/service-detail-normalizer'
 
 interface UseServiceActionsOptions {
@@ -39,16 +38,12 @@ export function useServiceActions({
   refreshService,
   refreshDeployments,
 }: UseServiceActionsOptions) {
-  const resolvedCapabilities = useMemo(
-    () => resolveServiceActionCapabilities(capabilities),
-    [capabilities],
-  )
-  const deploySupported = resolvedCapabilities.canDeployToDev
-  const promoteSupported = resolvedCapabilities.canPromoteToProd
-  const rollbackSupported = includeRollback && resolvedCapabilities.canRollback
+  const deploySupported = capabilities.canDeployToDev
+  const promoteSupported = capabilities.canPromoteToProd
+  const rollbackSupported = includeRollback && capabilities.canRollback
   const rollbackEnvs = useMemo(
-    () => (rollbackSupported ? resolvedCapabilities.rollbackEnvs : []),
-    [resolvedCapabilities.rollbackEnvs, rollbackSupported],
+    () => (rollbackSupported ? capabilities.rollbackEnvs : []),
+    [capabilities.rollbackEnvs, rollbackSupported],
   )
   const latestDevDeployment = useMemo(
     () => getLatestDeploymentForEnv(deploymentHistory, 'dev'),
