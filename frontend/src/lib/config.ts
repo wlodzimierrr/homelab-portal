@@ -1,4 +1,4 @@
-const env = import.meta.env
+const env = import.meta.env ?? {}
 
 const TEMPLATE_TOKEN_REGEX = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}|\{([a-zA-Z0-9_]+)\}/g
 
@@ -17,7 +17,7 @@ export interface MonitoringUrlResult {
 }
 
 function warnTemplate(context: string, message: string) {
-  if (import.meta.env.DEV) {
+  if (import.meta.env?.DEV) {
     console.warn(`[monitoring-url] ${context}: ${message}`)
   }
 }
