@@ -13,9 +13,10 @@ test('ServiceDetailsPage no longer renders settings-owned section titles in its 
   assert.doesNotMatch(markup, /Adopt into Project/)
 })
 
-test('ServiceDetailsPage links to service settings from overview', () => {
+test('ServiceDetailsPage links to deployment history and rollback from overview', () => {
   installTestWindow('/services/homelab-api')
   const markup = render(React.createElement(ServiceDetailsPage, { serviceId: 'homelab-api' }))
 
-  assert.match(markup, /Service settings/)
+  assert.match(markup, /View deployment history &amp; rollback/)
+  assert.doesNotMatch(markup, /Portal Rollback/)
 })
