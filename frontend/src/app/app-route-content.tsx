@@ -32,6 +32,7 @@ export function AppRouteContent({
       return <ServicesPage incidentServiceAlerts={incidentServiceAlerts} />
     case 'platform-health':
       return <PlatformHealthPage />
+    case 'service-settings':
     case 'service-overview':
     case 'service-deployments':
       return (

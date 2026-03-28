@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getCatalogReconciliation, type CatalogJoinRow, getProjects, getService } from '@/lib/api/catalog'
+import {
+  getCatalogReconciliation,
+  type CatalogJoinRow,
+  getProjects,
+  getService,
+  type ServiceCapabilities,
+  type ServiceProjectContext,
+} from '@/lib/api/catalog'
 import { getReleaseTraceability, getServiceDeploymentInfo } from '@/lib/api/deployments'
 import { getDeploymentHistory, type DeploymentHistoryItem } from '@/lib/adapters/deployments'
 import { getServiceIdentity } from '@/lib/adapters/services'
@@ -30,12 +37,8 @@ export function useServiceOverview(serviceId: string) {
   const [error, setError] = useState('')
   const [deploymentHistoryUnavailable, setDeploymentHistoryUnavailable] = useState(false)
   const [deploymentHistoryError, setDeploymentHistoryError] = useState('')
-  const [projectContext, setProjectContext] = useState<{
-    projectId: string
-    projectName: string
-    namespace: string
-    siblingServiceIds: string[]
-  } | null>(null)
+  const [projectContext, setProjectContext] = useState<ServiceProjectContext | null>(null)
+  const [capabilities, setCapabilities] = useState<ServiceCapabilities | null>(null)
 
   const loadOverview = useCallback(async (options?: { background?: boolean }) => {
     const background = options?.background === true
@@ -68,6 +71,9 @@ export function useServiceOverview(serviceId: string) {
 
       if (serviceResult.status === 'fulfilled') {
         setServiceIdentity(buildIdentityFromServiceDetails(decodedServiceId, serviceResult.value, identity))
+        setCapabilities(serviceResult.value.capabilities ?? null)
+      } else {
+        setCapabilities(null)
       }
 
       const releaseFallback =
@@ -146,7 +152,9 @@ export function useServiceOverview(serviceId: string) {
 
       setOverview(finalOverview)
 
-      if (catalogResult.status === 'fulfilled') {
+      if (serviceResult.status === 'fulfilled' && serviceResult.value.projectContext) {
+        setProjectContext(serviceResult.value.projectContext)
+      } else if (catalogResult.status === 'fulfilled') {
         const matchingRow = catalogResult.value.rows.find((row: CatalogJoinRow) =>
           row.serviceIds.includes(decodedServiceId) || row.primaryServiceId === decodedServiceId,
         )
@@ -156,10 +164,13 @@ export function useServiceOverview(serviceId: string) {
             projectName: matchingRow.projectName,
             namespace: matchingRow.namespace,
             siblingServiceIds: matchingRow.serviceIds.filter((sid: string) => sid !== decodedServiceId),
+            isLinked: true,
           })
         } else {
           setProjectContext(null)
         }
+      } else {
+        setProjectContext(null)
       }
     } catch (requestError) {
       const message =
@@ -214,6 +225,7 @@ export function useServiceOverview(serviceId: string) {
     serviceIdentity,
     overview,
     projectContext,
+    capabilities,
     deploymentHistory,
     deploymentInfo,
     deploymentInfoLoading,

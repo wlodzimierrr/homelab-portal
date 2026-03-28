@@ -1,4 +1,9 @@
-import { getServiceIdFromPath, isServiceDeploymentsPath, isServiceOverviewPath } from '@/lib/routes'
+import {
+  getServiceIdFromPath,
+  isServiceDeploymentsPath,
+  isServiceOverviewPath,
+  isServiceSettingsPath,
+} from '@/lib/routes'
 
 export type AppRoute =
   | { kind: 'login' }
@@ -6,6 +11,7 @@ export type AppRoute =
   | { kind: 'projects' }
   | { kind: 'services' }
   | { kind: 'platform-health' }
+  | { kind: 'service-settings'; serviceId: string }
   | { kind: 'service-deployments'; serviceId: string }
   | { kind: 'service-overview'; serviceId: string }
   | { kind: 'settings' }
@@ -27,6 +33,9 @@ export function resolveAppRoute(pathname: string): AppRoute {
   }
   if (pathname === '/platform-health') {
     return { kind: 'platform-health' }
+  }
+  if (isServiceSettingsPath(pathname)) {
+    return { kind: 'service-settings', serviceId: getServiceIdFromPath(pathname) }
   }
   if (isServiceDeploymentsPath(pathname)) {
     return { kind: 'service-deployments', serviceId: getServiceIdFromPath(pathname) }
