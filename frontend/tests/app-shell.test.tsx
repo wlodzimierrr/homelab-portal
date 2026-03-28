@@ -26,6 +26,15 @@ describe('AppShell service route rendering', () => {
     assert.doesNotMatch(html, /Back to overview/)
   })
 
+  it('renders the service settings route', () => {
+    browser.window.location.pathname = '/services/api-gateway/settings'
+
+    const html = renderToHtml(createElement(AppShell))
+
+    assert.match(html, /Settings:\s*api-gateway/)
+    assert.match(html, /Back to overview/)
+  })
+
   it('renders the current service deployments route', () => {
     browser.window.location.pathname = '/services/api-gateway/deployments'
 

@@ -1,3 +1,4 @@
+const serviceSettingsRegex = /^\/services\/([^/]+)\/settings$/
 const serviceDeploymentsRegex = /^\/services\/([^/]+)\/deployments$/
 const serviceOverviewRegex = /^\/services\/([^/]+)$/
 
@@ -7,11 +8,20 @@ export function isServiceOverviewPath(pathname: string) {
   return serviceOverviewRegex.test(pathname)
 }
 
+export function isServiceSettingsPath(pathname: string) {
+  return serviceSettingsRegex.test(pathname)
+}
+
 export function isServiceDeploymentsPath(pathname: string) {
   return serviceDeploymentsRegex.test(pathname)
 }
 
 export function getServiceIdFromPath(pathname: string) {
+  const settingsMatch = pathname.match(serviceSettingsRegex)
+  if (settingsMatch?.[1]) {
+    return settingsMatch[1]
+  }
+
   const deploymentsMatch = pathname.match(serviceDeploymentsRegex)
   if (deploymentsMatch?.[1]) {
     return deploymentsMatch[1]
