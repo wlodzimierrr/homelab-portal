@@ -16,6 +16,7 @@ export function ServiceSettingsPage({ serviceId }: ServiceSettingsPageProps) {
     decodedServiceId,
     overview,
     projectContext,
+    capabilities,
     isLoading,
     error,
     loadOverview,
@@ -24,6 +25,7 @@ export function ServiceSettingsPage({ serviceId }: ServiceSettingsPageProps) {
     serviceId: decodedServiceId,
     initialPublicHost: overview?.publicHost,
     projectContext,
+    capabilities,
     refreshOverview: loadOverview,
   })
 

@@ -96,14 +96,6 @@ export const timelineWindowOptions: Array<{ value: TimelineWindow; label: string
   { value: '7d', label: '7d' },
 ]
 
-export function supportsServiceRollback(serviceId: string) {
-  return serviceId === 'homelab-api' || serviceId === 'homelab-web'
-}
-
-export function supportsConfigEditing(serviceId: string) {
-  return serviceId === 'homelab-api'
-}
-
 export function normalizeHealthStatus(value?: string): HealthStatus {
   if (!value) {
     return 'unknown'

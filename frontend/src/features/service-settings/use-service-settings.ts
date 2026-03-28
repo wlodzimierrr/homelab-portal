@@ -10,12 +10,13 @@ import {
 } from '@/lib/api/admin'
 import type { ServiceProjectContext } from '@/lib/api/catalog'
 import { ApiRequestError } from '@/lib/http/errors'
-import { supportsConfigEditing } from '@/features/service-details/shared'
+import type { NormalizedServiceCapabilities } from '@/features/service-details/normalizers/service-detail-normalizer'
 
 interface UseServiceSettingsOptions {
   serviceId: string
   initialPublicHost?: string
   projectContext: ServiceProjectContext | null
+  capabilities: NormalizedServiceCapabilities
   refreshOverview: (options?: { background?: boolean }) => Promise<void>
 }
 
@@ -23,10 +24,14 @@ export function useServiceSettings({
   serviceId,
   initialPublicHost,
   projectContext,
+  capabilities,
   refreshOverview,
 }: UseServiceSettingsOptions) {
-  const configSupported = useMemo(() => supportsConfigEditing(serviceId), [serviceId])
-  const adoptSupported = !projectContext?.isLinked
+  const configSupported = useMemo(() => capabilities.canEditConfig, [capabilities.canEditConfig])
+  const adoptSupported = useMemo(() => capabilities.canAdopt && !projectContext?.isLinked, [
+    capabilities.canAdopt,
+    projectContext?.isLinked,
+  ])
 
   const [configEnv, setConfigEnv] = useState<'dev' | 'prod'>('dev')
   const [configEntries, setConfigEntries] = useState<ServiceConfigEntry[]>([])

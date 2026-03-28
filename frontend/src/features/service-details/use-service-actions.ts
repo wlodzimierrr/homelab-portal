@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { ServiceCapabilities } from '@/lib/api/catalog'
 import {
   getServiceRollbackCandidates,
   requestServiceDeployToDev,
@@ -17,11 +16,12 @@ import {
   getRecentDeploymentTags,
 } from './shared'
 import { resolveServiceActionCapabilities } from './action-capabilities'
+import type { NormalizedServiceCapabilities } from './normalizers/service-detail-normalizer'
 
 interface UseServiceActionsOptions {
   serviceId: string
   serviceEnv?: string
-  capabilities?: ServiceCapabilities | null
+  capabilities: NormalizedServiceCapabilities
   includeRollback?: boolean
   deploymentHistory: DeploymentHistoryItem[]
   deploymentLock?: ServiceDeploymentLock | null
@@ -40,8 +40,8 @@ export function useServiceActions({
   refreshDeployments,
 }: UseServiceActionsOptions) {
   const resolvedCapabilities = useMemo(
-    () => resolveServiceActionCapabilities(serviceId, capabilities),
-    [capabilities, serviceId],
+    () => resolveServiceActionCapabilities(capabilities),
+    [capabilities],
   )
   const deploySupported = resolvedCapabilities.canDeployToDev
   const promoteSupported = resolvedCapabilities.canPromoteToProd
