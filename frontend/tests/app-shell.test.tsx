@@ -39,3 +39,13 @@ test('AppShell renders the current service deployments route', async () => {
   assert.doesNotMatch(html, /View deployments/)
   browser.cleanup()
 })
+
+test('AppShell still renders the projects route when visited directly', async () => {
+  const browser = installMockBrowser({ pathname: '/projects' })
+  const AppShell = await loadAppShell()
+  const html = renderToHtml(createElement(AppShell))
+
+  assert.match(html, /Catalog Diagnostics/)
+  assert.match(html, /GitOps catalog status, reconciliation signals, and project-to-service linkage details/)
+  browser.cleanup()
+})

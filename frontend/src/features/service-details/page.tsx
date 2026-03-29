@@ -24,6 +24,7 @@ import { useServiceActions } from './use-service-actions'
 import { ForwardActionsPanel } from './components/forward-actions-panel'
 import { OverviewMetricsSummary } from './components/overview-metrics-summary'
 import { OverviewObservabilityLinks } from './components/overview-observability-links'
+import { ServiceGroupingContext } from './components/service-grouping-context'
 
 // ServiceDetailsPage is the single-service overview screen. It fans in
 // catalog metadata, shallow deployment context, and the most common forward
@@ -309,38 +310,10 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
             </div>
 
             {projectContext ? (
-              <article className="rounded-md border border-border bg-background p-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Project</p>
-                <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
-                  <AppLink
-                    to={`/projects#${encodeURIComponent(`${projectContext.projectId}-${serviceIdentity.env || 'dev'}`)}`}
-                    className="text-sm font-medium text-primary hover:underline"
-                  >
-                    {projectContext.projectName}
-                  </AppLink>
-                  <span className="text-xs text-muted-foreground">
-                    Namespace: <span className="font-mono">{projectContext.namespace}</span>
-                  </span>
-                </div>
-                {projectContext.siblingServiceIds.length > 0 ? (
-                  <div className="mt-2">
-                    <p className="text-xs text-muted-foreground">
-                      Sibling services:{' '}
-                      {projectContext.siblingServiceIds.map((sid, i) => (
-                        <span key={sid}>
-                          {i > 0 ? ', ' : ''}
-                          <AppLink
-                            to={`/services/${encodeURIComponent(sid)}`}
-                            className="text-primary hover:underline"
-                          >
-                            {sid}
-                          </AppLink>
-                        </span>
-                      ))}
-                    </p>
-                  </div>
-                ) : null}
-              </article>
+              <ServiceGroupingContext
+                projectContext={projectContext}
+                serviceEnv={serviceIdentity.env}
+              />
             ) : null}
 
             {(latestDevDeployment ?? latestProdDeployment) ? (
