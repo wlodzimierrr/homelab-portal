@@ -3,6 +3,7 @@ import { Menu, X } from 'lucide-react'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
 import { AppLink } from '@/components/navigation/app-link'
+import { primaryMobileNavLinks } from '@/components/navigation/primary-nav-links'
 import type { IncidentSeverity } from '@/lib/incident-alerts'
 import { cn } from '@/lib/utils'
 
@@ -15,14 +16,6 @@ interface TopbarProps {
   incidentHighestSeverity: IncidentSeverity | null
   onIncidentDismiss: () => void
 }
-
-const mobileLinks = [
-  { to: '/dashboard', label: 'Dashboard' },
-  { to: '/projects', label: 'Projects' },
-  { to: '/services', label: 'Services' },
-  { to: '/platform-health', label: 'Platform Health' },
-  { to: '/settings', label: 'Settings' },
-]
 
 function getIncidentTone(severity: IncidentSeverity | null) {
   if (severity === 'critical') {
@@ -95,7 +88,7 @@ export function Topbar({
       {isMobileMenuOpen ? (
         <nav className="bg-background px-4 py-3 md:hidden">
           <ul className="space-y-1">
-            {mobileLinks.map((link) => (
+            {primaryMobileNavLinks.map((link) => (
               <li key={link.to}>
                 <AppLink
                   to={link.to}

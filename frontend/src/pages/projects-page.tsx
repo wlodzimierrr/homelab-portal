@@ -76,8 +76,8 @@ function SummaryCard({ label, value, meta }: { label: string; value: string; met
   )
 }
 
-// Projects page shows the GitOps-owned catalog, then overlays reconciliation and
-// freshness diagnostics so operators can tell whether missing links are structural or stale.
+// Projects stays as a secondary diagnostics page: it shows the GitOps-owned
+// catalog and the reconciliation/freshness signals needed to debug catalog state.
 export function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([])
   const [catalogRows, setCatalogRows] = useState<CatalogJoinRow[]>([])
@@ -157,10 +157,13 @@ export function ProjectsPage() {
     (diagnostics?.catalogJoin.ambiguousJoinCount ?? 0)
 
   return (
-    <PageShell title="Projects" description="GitOps-owned application projects and ownership details.">
+    <PageShell
+      title="Catalog Diagnostics"
+      description="GitOps catalog status, reconciliation signals, and project-to-service linkage details."
+    >
       <div className="mb-4 rounded-md border border-border bg-card p-4 text-sm text-muted-foreground">
-        Projects are sourced from GitOps app definitions. Add or change entries in `workloads/apps/*/envs/*`
-        and re-run the catalog sync instead of creating projects in the UI.
+        This page is for catalog and registry diagnostics. Use it to inspect GitOps project rows, namespace
+        linkage, and reconciliation status when service grouping looks wrong elsewhere in the portal.
       </div>
 
       {!isLoading ? (
@@ -181,7 +184,7 @@ export function ProjectsPage() {
             meta={`Last sync: ${formatTimestamp(diagnostics?.freshness.lastSyncedAt)}`}
           />
           <SummaryCard
-            label="Projects tracked"
+            label="Catalog rows tracked"
             value={String(projects.length)}
             meta={diagnostics ? `Rows in registry: ${diagnostics.freshness.rowCount}` : 'Diagnostics unavailable'}
           />
@@ -204,7 +207,7 @@ export function ProjectsPage() {
 
       {!isLoading && warnings.length > 0 ? (
         <div className="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
-          <p className="text-sm font-medium text-amber-900 dark:text-amber-200">Partial project readiness</p>
+          <p className="text-sm font-medium text-amber-900 dark:text-amber-200">Partial catalog readiness</p>
           <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-amber-900 dark:text-amber-200">
             {warnings.map((warning) => (
               <li key={warning}>{warning}</li>
@@ -217,12 +220,20 @@ export function ProjectsPage() {
       {!isLoading && error ? <ErrorState message={error} onRetry={() => void loadProjects()} /> : null}
       {!isLoading && !error && sortedProjects.length === 0 ? (
         <EmptyState
-          title="No GitOps projects found."
-          description="Sync the project catalog from workloads/apps definitions to populate this page."
+          title="No GitOps catalog rows found."
+          description="Sync the project catalog from workloads/apps definitions to populate this diagnostics page."
         />
       ) : null}
       {!isLoading && !error && sortedProjects.length > 0 ? (
-        <ul className="space-y-2 text-sm">
+        <div className="space-y-3">
+          <div className="rounded-md border border-border/70 bg-background p-3 text-sm text-muted-foreground">
+            <p className="font-medium text-foreground">Tracked GitOps project rows</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              These entries are useful when diagnosing catalog linkage and namespace ownership. They are not the
+              primary service workflow surface.
+            </p>
+          </div>
+          <ul className="space-y-2 text-sm">
           {sortedProjects.map((project) => (
             <li
               key={project.id}
@@ -283,7 +294,8 @@ export function ProjectsPage() {
               ) : null}
             </li>
           ))}
-        </ul>
+          </ul>
+        </div>
       ) : null}
     </PageShell>
   )

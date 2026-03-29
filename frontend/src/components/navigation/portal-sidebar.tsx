@@ -1,15 +1,7 @@
-import { FolderKanban, HeartPulse, LayoutDashboard, Server, Settings } from 'lucide-react'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { cn } from '@/lib/utils'
 import { AppLink } from '@/components/navigation/app-link'
-
-const links = [
-  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/projects', label: 'Projects', icon: FolderKanban },
-  { to: '/services', label: 'Services', icon: Server },
-  { to: '/platform-health', label: 'Platform Health', icon: HeartPulse },
-  { to: '/settings', label: 'Settings', icon: Settings },
-]
+import { primaryNavLinks } from '@/components/navigation/primary-nav-links'
 
 interface PortalSidebarProps {
   pathname: string
@@ -28,7 +20,7 @@ export function PortalSidebar({ pathname, theme, onThemeToggle }: PortalSidebarP
         <ThemeToggle theme={theme} onToggle={onThemeToggle} />
       </div>
       <nav className="space-y-1">
-        {links.map(({ to, label, icon: Icon }) => (
+        {primaryNavLinks.map(({ to, label, icon: Icon }) => (
           <AppLink
             key={to}
             to={to}
