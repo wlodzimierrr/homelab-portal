@@ -1,4 +1,5 @@
 from app.release_traceability import (
+    build_release_traceability_probe,
     build_release_join_diagnostics,
     build_release_traceability_rows,
     compute_is_drifted,
@@ -152,3 +153,85 @@ def test_build_release_join_diagnostics_reports_unmatched_keys() -> None:
     assert diagnostics["argoUnmatchedCount"] == 1
     assert diagnostics["ciUnmatchedKeys"] == ["portal-project|Portal Project|dev"]
     assert diagnostics["argoUnmatchedKeys"] == ["portal-project|Portal Project|dev"]
+
+
+def test_build_release_traceability_probe_reports_exact_matches() -> None:
+    probe = build_release_traceability_probe(
+        project_rows=[{"service_id": "portfolio-next", "service_name": "Portfolio Next", "env": "dev"}],
+        ci_rows=[
+            {
+                "serviceId": "portfolio-next",
+                "serviceName": "Portfolio Next",
+                "env": "dev",
+                "commitSha": "abc123",
+                "imageRef": "ghcr.io/example/portfolio-next:sha-abc123",
+            }
+        ],
+        argo_rows=[
+            {
+                "serviceId": "portfolio-next",
+                "serviceName": "Portfolio Next",
+                "env": "dev",
+                "appName": "portfolio-next-dev",
+                "syncStatus": "Synced",
+                "healthStatus": "Healthy",
+                "revision": "abc123",
+            }
+        ],
+        service_id="portfolio-next",
+        env="dev",
+    )
+
+    assert probe["projectRowPresent"] is True
+    assert probe["joinRowPresent"] is True
+    assert probe["joinHasMeaningfulMetadata"] is True
+    assert probe["ci"]["status"] == "matched"
+    assert probe["ci"]["matchedBy"] == "service_id"
+    assert probe["argo"]["status"] == "matched"
+    assert probe["argo"]["hasAppName"] is True
+
+
+def test_build_release_traceability_probe_reports_missing_metadata() -> None:
+    probe = build_release_traceability_probe(
+        project_rows=[{"service_id": "portfolio-next", "service_name": "Portfolio Next", "env": "dev"}],
+        ci_rows=[],
+        argo_rows=[],
+        service_id="portfolio-next",
+        env="dev",
+    )
+
+    assert probe["projectRowPresent"] is True
+    assert probe["joinRowPresent"] is True
+    assert probe["joinHasMeaningfulMetadata"] is False
+    assert probe["ci"]["status"] == "missing"
+    assert probe["argo"]["status"] == "missing"
+
+
+def test_build_release_traceability_probe_derives_service_id_from_ci_image_and_argo_app() -> None:
+    probe = build_release_traceability_probe(
+        project_rows=[{"service_id": "portfolio-next", "service_name": "Portfolio Next", "env": "dev"}],
+        ci_rows=[
+            {
+                "env": "dev",
+                "commitSha": "abc123",
+                "imageRef": "ghcr.io/example/portfolio-next:sha-abc123",
+            }
+        ],
+        argo_rows=[
+            {
+                "env": "dev",
+                "appName": "portfolio-next-dev",
+                "syncStatus": "Synced",
+                "healthStatus": "Healthy",
+                "revision": "abc123",
+            }
+        ],
+        service_id="portfolio-next",
+        env="dev",
+    )
+
+    assert probe["projectRowPresent"] is True
+    assert probe["ci"]["status"] == "matched"
+    assert probe["ci"]["rowServiceId"] == "portfolio-next"
+    assert probe["argo"]["status"] == "matched"
+    assert probe["argo"]["rowServiceId"] == "portfolio-next"

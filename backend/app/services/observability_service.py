@@ -262,6 +262,7 @@ class ObservabilityService:
             }
             window_start = now - durations[safe_range]
             queries = self.deps.build_service_metrics_queries(
+                service_id=service_id,
                 namespace=namespace,
                 app_label=app_label,
                 selected_range=safe_range,
@@ -350,6 +351,7 @@ class ObservabilityService:
             step_seconds = self.deps.select_timeline_step_seconds(now - window_start, config)
             correlation_id = str(uuid4())
             queries = self.deps.build_service_metrics_queries(
+                service_id=service_id,
                 namespace=namespace,
                 app_label=app_label,
                 selected_range=safe_range,

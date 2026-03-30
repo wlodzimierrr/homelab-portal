@@ -4,8 +4,28 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from app.service_observability import ObservabilityMode
+
 
 SERVICE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
+
+# This is the platform-level observability contract for scaffolded services.
+# Service-page behavior should consume declared modes rather than guessing from
+# template names or ad hoc frontend special cases.
+TEMPLATE_DEFAULT_OBSERVABILITY_MODE: dict[str, ObservabilityMode] = {
+    "python-fastapi": "app-native",
+    "python-django": "app-native",
+    "python-flask": "app-native",
+    "static-nginx": "ingress-derived",
+    "react": "ingress-derived",
+    "vue": "ingress-derived",
+    "wordpress": "ingress-derived",
+    "nextjs": "ingress-derived",
+    "node-express": "app-native",
+    "node-nestjs": "app-native",
+    "postgres": "no-http",
+    "mysql": "no-http",
+}
 
 # Template metadata stays centralized so standalone, bundle, and add-service
 # generators derive ports, probes, and observability defaults from one source.
@@ -16,7 +36,7 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/health",
         "readiness_path": "/health",
         "container_name": "app",
-        "default_observability_mode": "app-native",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["python-fastapi"],
     },
     "python-django": {
         "container_port": 8000,
@@ -24,7 +44,7 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/health/",
         "readiness_path": "/health/",
         "container_name": "app",
-        "default_observability_mode": "app-native",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["python-django"],
     },
     "python-flask": {
         "container_port": 5000,
@@ -32,7 +52,7 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/health",
         "readiness_path": "/health",
         "container_name": "app",
-        "default_observability_mode": "app-native",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["python-flask"],
     },
     "static-nginx": {
         "container_port": 80,
@@ -40,7 +60,7 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/health",
         "readiness_path": "/health",
         "container_name": "web",
-        "default_observability_mode": "ingress-derived",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["static-nginx"],
     },
     "react": {
         "container_port": 80,
@@ -48,7 +68,7 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/health",
         "readiness_path": "/health",
         "container_name": "web",
-        "default_observability_mode": "ingress-derived",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["react"],
     },
     "vue": {
         "container_port": 80,
@@ -56,7 +76,7 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/",
         "readiness_path": "/",
         "container_name": "web",
-        "default_observability_mode": "ingress-derived",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["vue"],
     },
     "wordpress": {
         "container_port": 80,
@@ -64,7 +84,7 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/wp-login.php",
         "readiness_path": "/wp-login.php",
         "container_name": "web",
-        "default_observability_mode": "ingress-derived",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["wordpress"],
     },
     "nextjs": {
         "container_port": 3000,
@@ -72,7 +92,7 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/",
         "readiness_path": "/",
         "container_name": "web",
-        "default_observability_mode": "app-native",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["nextjs"],
     },
     "node-express": {
         "container_port": 3000,
@@ -80,7 +100,7 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/health",
         "readiness_path": "/health",
         "container_name": "app",
-        "default_observability_mode": "app-native",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["node-express"],
     },
     "node-nestjs": {
         "container_port": 3000,
@@ -88,19 +108,19 @@ TEMPLATES: dict[str, dict[str, object]] = {
         "health_path": "/health",
         "readiness_path": "/health",
         "container_name": "app",
-        "default_observability_mode": "app-native",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["node-nestjs"],
     },
     "postgres": {
         "db_port": 5432,
         "db_image": "postgres:17-alpine",
         "db_engine": "postgres",
-        "default_observability_mode": "no-http",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["postgres"],
     },
     "mysql": {
         "db_port": 3306,
         "db_image": "mysql:8.0",
         "db_engine": "mysql",
-        "default_observability_mode": "no-http",
+        "default_observability_mode": TEMPLATE_DEFAULT_OBSERVABILITY_MODE["mysql"],
     },
 }
 

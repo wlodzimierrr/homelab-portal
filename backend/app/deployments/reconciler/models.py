@@ -14,37 +14,38 @@ DEFAULT_GITOPS_REPO = "homelab-workloads"
 DEFAULT_PORTAL_REPO = "homelab-portal"
 DEFAULT_PULL_REQUEST_LIMIT = 30
 DEFAULT_VERIFICATION_TIMEOUT_SECONDS = 15 * 60
+CANONICAL_SERVICE_ID_RE_FRAGMENT = r"[a-z0-9]+(?:-[a-z0-9]+)*"
 
 DEV_AUTOBUMP_HEAD_RE = re.compile(r"^automation/dev-image-bump-([0-9a-f]{40})$")
 MANUAL_DEV_DEPLOY_HEAD_RE = re.compile(
-    r"^automation/dev-deploy-(homelab-api|homelab-web)-([a-z0-9][a-z0-9.-]*)-[0-9]{14}$"
+    rf"^automation/dev-deploy-({CANONICAL_SERVICE_ID_RE_FRAGMENT})-([a-z0-9][a-z0-9.-]*)-[0-9]{{14}}$"
 )
 MANUAL_PROD_PROMOTE_HEAD_RE = re.compile(
-    r"^automation/prod-promote-(homelab-api|homelab-web)-([a-z0-9][a-z0-9.-]*)-[0-9]{14}$"
+    rf"^automation/prod-promote-({CANONICAL_SERVICE_ID_RE_FRAGMENT})-([a-z0-9][a-z0-9.-]*)-[0-9]{{14}}$"
 )
 MANUAL_ROLLBACK_HEAD_RE = re.compile(
-    r"^automation/(dev|prod)-rollback-(homelab-api|homelab-web)-([a-z0-9][a-z0-9.-]*)-[0-9]{14}$"
+    rf"^automation/(dev|prod)-rollback-({CANONICAL_SERVICE_ID_RE_FRAGMENT})-([a-z0-9][a-z0-9.-]*)-[0-9]{{14}}$"
 )
 ENV_MUTATION_HEAD_RE = re.compile(r"^automation/([a-z0-9-]+)-(promote|rollback)-image-update-.+$")
 CONFIG_CHANGE_HEAD_RE = re.compile(
-    r"^automation/([a-z0-9-]+)-config-change-(homelab-api|homelab-web)-replicas-.+$"
+    rf"^automation/([a-z0-9-]+)-config-change-({CANONICAL_SERVICE_ID_RE_FRAGMENT})-replicas-.+$"
 )
 DEV_AUTOBUMP_TITLE_RE = re.compile(r"^chore\(dev\): bump portal images to (sha-[0-9a-f]{40})$")
 MANUAL_DEV_DEPLOY_TITLE_RE = re.compile(
-    r"^Deploy (homelab-api|homelab-web): (sha-[0-9a-f]{40}|v?[0-9]+(?:\.[0-9]+){2}(?:[.-][0-9A-Za-z.-]+)?) to dev$"
+    rf"^Deploy ({CANONICAL_SERVICE_ID_RE_FRAGMENT}): (sha-[0-9a-f]{{40}}|v?[0-9]+(?:\.[0-9]+){{2}}(?:[.-][0-9A-Za-z.-]+)?) to dev$"
 )
 MANUAL_PROD_PROMOTE_TITLE_RE = re.compile(
-    r"^Promote (homelab-api|homelab-web): (sha-[0-9a-f]{40}|v?[0-9]+(?:\.[0-9]+){2}(?:[.-][0-9A-Za-z.-]+)?) to prod$"
+    rf"^Promote ({CANONICAL_SERVICE_ID_RE_FRAGMENT}): (sha-[0-9a-f]{{40}}|v?[0-9]+(?:\.[0-9]+){{2}}(?:[.-][0-9A-Za-z.-]+)?) to prod$"
 )
 MANUAL_ROLLBACK_TITLE_RE = re.compile(
-    r"^Rollback (homelab-api|homelab-web): (sha-[0-9a-f]{40}|v?[0-9]+(?:\.[0-9]+){2}(?:[.-][0-9A-Za-z.-]+)?) in (dev|prod)$"
+    rf"^Rollback ({CANONICAL_SERVICE_ID_RE_FRAGMENT}): (sha-[0-9a-f]{{40}}|v?[0-9]+(?:\.[0-9]+){{2}}(?:[.-][0-9A-Za-z.-]+)?) in (dev|prod)$"
 )
 PROMOTE_TITLE_RE = re.compile(r"^chore\(([a-z0-9-]+)\): promote portal images from dev \((sha-[0-9a-f]{40})\)$")
 ROLLBACK_TITLE_RE = re.compile(r"^chore\(([a-z0-9-]+)\): rollback portal images to requested tags$")
 CONFIG_CHANGE_TITLE_RE = re.compile(
-    r"^chore\(([a-z0-9-]+)\): set (homelab-api|homelab-web) replicas to ([0-9]+)$"
+    rf"^chore\(([a-z0-9-]+)\): set ({CANONICAL_SERVICE_ID_RE_FRAGMENT}) replicas to ([0-9]+)$"
 )
-IMAGE_REF_RE = re.compile(r"(ghcr\.io/[^/\s]+/(homelab-api|homelab-web):([^\s`]+))")
+IMAGE_REF_RE = re.compile(r"(ghcr\.io/[^/\s]+/([A-Za-z0-9._-]+):([^\s`]+))")
 REASON_LINE_RE = re.compile(r"^\s*-\s+Reason:\s+(.+?)\s*$", re.MULTILINE)
 
 

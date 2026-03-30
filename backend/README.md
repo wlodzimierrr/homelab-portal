@@ -91,6 +91,17 @@ Deterministic drift rule for `/releases`:
 3. else `expectedImageRef != liveImageRef` when both values exist => drifted
 4. otherwise not drifted
 
+Scaffold observability defaults:
+
+- `python-fastapi`, `python-django`, `python-flask` -> `app-native`
+- `node-express`, `node-nestjs` -> `app-native`
+- `react`, `vue`, `static-nginx`, `nextjs`, `wordpress` -> `ingress-derived`
+- `postgres`, `mysql` -> `no-http`
+
+These defaults are the platform contract for newly scaffolded services and
+bundles. Service pages should consume the declared mode rather than inferring
+behavior from template names.
+
 Logs quick-view config:
 
 - `LOKI_BASE_URL` (default: `http://loki.monitoring.svc.cluster.local:3100`)

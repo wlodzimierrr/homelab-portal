@@ -1,5 +1,6 @@
 import pytest
 
+from app.scaffold.models import TEMPLATE_DEFAULT_OBSERVABILITY_MODE, TEMPLATES
 from app.scaffold_service import (
     ScaffoldAddServiceInput,
     ScaffoldBundleInput,
@@ -66,6 +67,27 @@ def test_validate_service_name_rejects_spaces() -> None:
 def test_validate_service_name_rejects_too_long() -> None:
     with pytest.raises(ScaffoldError):
         validate_service_name("a" * 64)
+
+
+def test_template_observability_contract_matrix_is_explicit() -> None:
+    assert TEMPLATE_DEFAULT_OBSERVABILITY_MODE == {
+        "python-fastapi": "app-native",
+        "python-django": "app-native",
+        "python-flask": "app-native",
+        "static-nginx": "ingress-derived",
+        "react": "ingress-derived",
+        "vue": "ingress-derived",
+        "wordpress": "ingress-derived",
+        "nextjs": "ingress-derived",
+        "node-express": "app-native",
+        "node-nestjs": "app-native",
+        "postgres": "no-http",
+        "mysql": "no-http",
+    }
+
+    assert set(TEMPLATE_DEFAULT_OBSERVABILITY_MODE) == set(TEMPLATES)
+    for template_id, metadata in TEMPLATES.items():
+        assert metadata["default_observability_mode"] == TEMPLATE_DEFAULT_OBSERVABILITY_MODE[template_id]
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +199,12 @@ def test_react_template_network_policy_port_80() -> None:
 
 def test_nextjs_template_file_count() -> None:
     files = generate_gitops_new_files(_make_input(template="nextjs"))
-    assert len(files) == 17
+    assert len(files) == 16
 
 
-def test_nextjs_template_has_servicemonitor() -> None:
+def test_nextjs_template_has_no_servicemonitor() -> None:
     files = generate_gitops_new_files(_make_input(template="nextjs"))
-    assert any("servicemonitor" in path for path in files)
+    assert not any("servicemonitor" in path for path in files)
 
 
 def test_nextjs_template_health_path() -> None:
@@ -209,10 +231,10 @@ def test_nextjs_template_network_policy_port_3000() -> None:
     assert "port: 3000" in netpol
 
 
-def test_catalog_entry_nextjs_uses_app_native_observability() -> None:
+def test_catalog_entry_nextjs_uses_ingress_derived_observability() -> None:
     inp = _make_input(template="nextjs")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "mode: app-native" in result
+    assert "mode: ingress-derived" in result
 
 
 def test_catalog_entry_nextjs_has_dev_and_prod_envs() -> None:
@@ -961,12 +983,12 @@ def test_bundle_no_servicemonitor_sidecar_frontend() -> None:
     assert "apps/my-proj/base/servicemonitor-frontend.yaml" not in files
 
 
-def test_bundle_servicemonitor_nextjs_frontend() -> None:
-    """Next.js frontend is app-native, should get a ServiceMonitor."""
+def test_bundle_no_servicemonitor_nextjs_frontend() -> None:
+    """Next.js frontend is ingress-derived by default, so no ServiceMonitor is generated."""
     files = generate_gitops_bundle_files(_make_bundle_input(
         frontend_template="nextjs",
     ))
-    assert "apps/my-proj/base/servicemonitor-frontend.yaml" in files
+    assert "apps/my-proj/base/servicemonitor-frontend.yaml" not in files
 
 
 def test_bundle_name_validation() -> None:
