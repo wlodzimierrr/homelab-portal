@@ -9,6 +9,32 @@ class _DummyConn:
     pass
 
 
+class _QueryCursor:
+    def __init__(self, rows: list[tuple[object, ...]]) -> None:
+        self.rows = rows
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, sql: str, params: tuple[object, ...]) -> None:
+        self.calls.append((" ".join(sql.split()), params))
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class _QueryConn:
+    def __init__(self, rows: list[tuple[object, ...]]) -> None:
+        self.cursor_instance = _QueryCursor(rows)
+
+    def cursor(self):
+        return self.cursor_instance
+
+
 def test_upsert_service_registry_records_prunes_conflicting_noncanonical_rows() -> None:
     synced_at = datetime(2026, 3, 6, tzinfo=timezone.utc)
     record = service_registry_sync.ServiceRegistryRecord(
@@ -201,6 +227,63 @@ def test_build_records_from_services_and_deployments_skips_backing_postgres_serv
     assert row.namespace == "homelab-api"
 
 
+def test_resolve_service_registry_sync_namespaces_prefers_project_registry(monkeypatch) -> None:
+    monkeypatch.setenv("SERVICE_REGISTRY_SYNC_NAMESPACES", "legacy-a,legacy-b")
+    conn = _QueryConn([("homelab-api",), ("portfolio-next",)])
+
+    result = service_registry_sync.resolve_service_registry_sync_namespaces(
+        conn,
+        env_name="dev",
+    )
+
+    assert result == {
+        "namespaces": ["homelab-api", "portfolio-next"],
+        "source": "project_registry",
+        "reason": "derived_from_project_registry",
+    }
+    assert conn.cursor_instance.calls == [
+        (
+            "SELECT DISTINCT namespace FROM project_registry WHERE env = %s AND namespace IS NOT NULL AND BTRIM(namespace) <> '' ORDER BY namespace",
+            ("dev",),
+        )
+    ]
+
+
+def test_resolve_service_registry_sync_namespaces_falls_back_to_env_allowlist(monkeypatch) -> None:
+    monkeypatch.setenv("SERVICE_REGISTRY_SYNC_NAMESPACES", "homelab-api,homelab-web")
+    conn = _QueryConn([])
+
+    result = service_registry_sync.resolve_service_registry_sync_namespaces(
+        conn,
+        env_name="dev",
+    )
+
+    assert result == {
+        "namespaces": ["homelab-api", "homelab-web"],
+        "source": "env_allowlist_fallback",
+        "reason": "project_registry_empty",
+    }
+
+
+def test_inspect_service_registry_sync_namespace_coverage_reports_derived_source() -> None:
+    conn = _QueryConn([("portfolio-next",), ("scaffold-smoke",)])
+
+    result = service_registry_sync.inspect_service_registry_sync_namespace_coverage(
+        conn,
+        env_name="dev",
+        namespace="portfolio-next",
+    )
+
+    assert result == {
+        "namespace": "portfolio-next",
+        "covered": True,
+        "reason": "namespace_present_in_project_registry",
+        "configuredNamespaces": ["portfolio-next", "scaffold-smoke"],
+        "source": "project_registry",
+        "resolutionReason": "derived_from_project_registry",
+    }
+
+
 def test_sync_service_registry_collects_source_failures(monkeypatch) -> None:
     monkeypatch.setattr(
         service_registry_sync,
@@ -253,11 +336,15 @@ def test_sync_service_registry_collects_source_failures(monkeypatch) -> None:
         "_prune_service_registry_records",
         lambda conn, env_name, namespaces, keep_keys: 0,
     )
+    monkeypatch.setattr(
+        service_registry_sync,
+        "_load_declared_sync_namespaces",
+        lambda conn, env_name: ("homelab-web", "broken"),
+    )
 
     summary = service_registry_sync.sync_service_registry_from_cluster(
         _DummyConn(),
         env_name="dev",
-        namespaces=("homelab-web", "broken"),
         argo_namespace="argocd",
     )
 
@@ -273,6 +360,11 @@ def test_sync_service_registry_collects_source_failures(monkeypatch) -> None:
         "kubernetes_deployments",
     }
     assert summary["sourceFailures"][0]["scope"] == "broken"
+    assert summary["namespaceResolution"] == {
+        "namespaces": ["homelab-web", "broken"],
+        "source": "project_registry",
+        "reason": "derived_from_project_registry",
+    }
 
 
 def test_normalize_service_id_removes_unsafe_chars() -> None:

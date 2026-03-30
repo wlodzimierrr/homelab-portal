@@ -19,6 +19,7 @@ logger = logging.getLogger("homelab.backend.service_registry_sync")
 
 DEFAULT_SYNC_NAMESPACES = ("homelab-api", "homelab-web")
 DEFAULT_ARGO_NAMESPACE = "argocd"
+SERVICE_REGISTRY_SYNC_NAMESPACES_ENV = "SERVICE_REGISTRY_SYNC_NAMESPACES"
 SERVICE_ACCOUNT_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 SERVICE_ACCOUNT_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
@@ -50,6 +51,109 @@ def _parse_csv_env(var_name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
     raw = os.getenv(var_name, "")
     values = [part.strip() for part in raw.split(",") if part.strip()]
     return tuple(values) if values else fallback
+
+
+def _load_declared_sync_namespaces(
+    conn: psycopg.Connection,
+    *,
+    env_name: str,
+) -> tuple[str, ...]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT namespace
+            FROM project_registry
+            WHERE env = %s
+              AND namespace IS NOT NULL
+              AND BTRIM(namespace) <> ''
+            ORDER BY namespace
+            """,
+            (env_name,),
+        )
+        rows = cur.fetchall()
+    return tuple(str(namespace).strip() for (namespace,) in rows if str(namespace).strip())
+
+
+def resolve_service_registry_sync_namespaces(
+    conn: psycopg.Connection,
+    *,
+    env_name: str,
+    namespaces: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    if namespaces is not None:
+        resolved = tuple(dict.fromkeys(part.strip() for part in namespaces if part.strip()))
+        return {
+            "namespaces": list(resolved),
+            "source": "explicit_parameter",
+            "reason": "explicit_namespaces_parameter",
+        }
+
+    declared_namespaces = _load_declared_sync_namespaces(conn, env_name=env_name)
+    if declared_namespaces:
+        return {
+            "namespaces": list(declared_namespaces),
+            "source": "project_registry",
+            "reason": "derived_from_project_registry",
+        }
+
+    env_allowlist = _parse_csv_env(SERVICE_REGISTRY_SYNC_NAMESPACES_ENV, ())
+    if env_allowlist:
+        return {
+            "namespaces": list(env_allowlist),
+            "source": "env_allowlist_fallback",
+            "reason": "project_registry_empty",
+        }
+
+    return {
+        "namespaces": list(DEFAULT_SYNC_NAMESPACES),
+        "source": "default_allowlist_fallback",
+        "reason": "project_registry_empty_and_env_allowlist_unset",
+    }
+
+
+def inspect_service_registry_sync_namespace_coverage(
+    conn: psycopg.Connection,
+    *,
+    env_name: str,
+    namespace: str,
+    namespaces: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    normalized_namespace = namespace.strip()
+    if not normalized_namespace:
+        raise ValueError("Namespace must be non-empty for sync coverage inspection.")
+
+    resolution = resolve_service_registry_sync_namespaces(
+        conn,
+        env_name=env_name,
+        namespaces=namespaces,
+    )
+    configured_namespaces = list(resolution["namespaces"])
+    source = str(resolution["source"])
+    covered = normalized_namespace in configured_namespaces
+
+    if covered:
+        reason = {
+            "project_registry": "namespace_present_in_project_registry",
+            "env_allowlist_fallback": "namespace_present_in_allowlist_fallback",
+            "default_allowlist_fallback": "namespace_present_in_default_allowlist",
+            "explicit_parameter": "namespace_present_in_explicit_parameter",
+        }.get(source, "namespace_present")
+    else:
+        reason = {
+            "project_registry": "namespace_missing_from_project_registry",
+            "env_allowlist_fallback": "namespace_missing_from_allowlist_fallback",
+            "default_allowlist_fallback": "namespace_missing_from_default_allowlist",
+            "explicit_parameter": "namespace_missing_from_explicit_parameter",
+        }.get(source, "namespace_missing")
+
+    return {
+        "namespace": normalized_namespace,
+        "covered": covered,
+        "reason": reason,
+        "configuredNamespaces": configured_namespaces,
+        "source": source,
+        "resolutionReason": resolution["reason"],
+    }
 
 
 def _kubernetes_api_base_url() -> str:
@@ -453,10 +557,12 @@ def sync_service_registry_from_cluster(
     synced_at = _utc_now()
 
     safe_env = env_name or os.getenv("PORTAL_ENV", "dev")
-    safe_namespaces = namespaces or _parse_csv_env(
-        "SERVICE_REGISTRY_SYNC_NAMESPACES",
-        DEFAULT_SYNC_NAMESPACES,
+    namespace_resolution = resolve_service_registry_sync_namespaces(
+        conn,
+        env_name=safe_env,
+        namespaces=namespaces,
     )
+    safe_namespaces = tuple(str(item) for item in namespace_resolution["namespaces"])
     safe_argo_namespace = argo_namespace or os.getenv(
         "SERVICE_REGISTRY_SYNC_ARGO_NAMESPACE",
         DEFAULT_ARGO_NAMESPACE,
@@ -557,6 +663,7 @@ def sync_service_registry_from_cluster(
         "source": "cluster_services",
         "env": safe_env,
         "namespaces": list(safe_namespaces),
+        "namespaceResolution": namespace_resolution,
         "discovered": len(records),
         "upserted": len(unique_records),
         "inserted": inserted,

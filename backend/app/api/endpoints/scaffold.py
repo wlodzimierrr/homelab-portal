@@ -76,6 +76,8 @@ WORKLOADS_KUSTOMIZATION_PATH = "environments/dev/workloads/kustomization.yaml"
 WORKLOADS_PROD_KUSTOMIZATION_PATH = "environments/prod/workloads/kustomization.yaml"
 WORKLOADS_APPPROJECT_PATH = "bootstrap/project-homelab.yaml"
 WORKLOADS_CATALOG_PATH = "services.yaml"
+WORKLOADS_CATALOG_SYNC_CRONJOB_PATH = "apps/homelab-api/base/catalog-sync-cronjob.yaml"
+SERVICE_REGISTRY_SYNC_NAMESPACES_ENV = "SERVICE_REGISTRY_SYNC_NAMESPACES"
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +216,131 @@ def _build_scaffold_add_service_input(payload: ScaffoldServiceRequest) -> Scaffo
 # ---------------------------------------------------------------------------
 
 
+def parse_service_registry_sync_namespaces(cronjob_yaml: str) -> list[str]:
+    """Read the live-registry sync namespace allowlist from the CronJob manifest."""
+    lines = cronjob_yaml.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != f"- name: {SERVICE_REGISTRY_SYNC_NAMESPACES_ENV}":
+            continue
+        if index + 1 >= len(lines):
+            raise ScaffoldError(
+                "Expected SERVICE_REGISTRY_SYNC_NAMESPACES env var to be followed by a value entry.",
+                status_code=502,
+            )
+        match = _re.match(r"^\s*value:\s*(.+?)\s*$", lines[index + 1])
+        if not match:
+            raise ScaffoldError(
+                "Failed to parse SERVICE_REGISTRY_SYNC_NAMESPACES value from catalog-sync CronJob.",
+                status_code=502,
+            )
+        return [part.strip() for part in match.group(1).split(",") if part.strip()]
+    return []
+
+
+def inspect_service_registry_sync_namespace_coverage(
+    cronjob_yaml: str,
+    namespace: str,
+) -> dict[str, object]:
+    """Return deterministic diagnostics for one namespace against the CronJob allowlist."""
+    normalized_namespace = namespace.strip()
+    if not normalized_namespace:
+        raise ScaffoldError("Namespace must be non-empty for live registry sync coverage.", status_code=422)
+
+    configured_namespaces = parse_service_registry_sync_namespaces(cronjob_yaml)
+    if not configured_namespaces:
+        return {
+            "namespace": normalized_namespace,
+            "covered": False,
+            "reason": "env_var_missing_or_empty",
+            "configuredNamespaces": [],
+            "sourcePath": WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
+            "sourceEnvVar": SERVICE_REGISTRY_SYNC_NAMESPACES_ENV,
+        }
+    if normalized_namespace in configured_namespaces:
+        return {
+            "namespace": normalized_namespace,
+            "covered": True,
+            "reason": "namespace_present",
+            "configuredNamespaces": configured_namespaces,
+            "sourcePath": WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
+            "sourceEnvVar": SERVICE_REGISTRY_SYNC_NAMESPACES_ENV,
+        }
+    return {
+        "namespace": normalized_namespace,
+        "covered": False,
+        "reason": "namespace_missing_from_allowlist",
+        "configuredNamespaces": configured_namespaces,
+        "sourcePath": WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
+        "sourceEnvVar": SERVICE_REGISTRY_SYNC_NAMESPACES_ENV,
+    }
+
+
+def update_service_registry_sync_namespaces(cronjob_yaml: str, namespace: str) -> str:
+    """Keep SERVICE_REGISTRY_SYNC_NAMESPACES valid CSV and free of duplicates."""
+    normalized_namespace = namespace.strip()
+    if not normalized_namespace:
+        raise ScaffoldError("Namespace must be non-empty for live registry sync coverage.", status_code=422)
+
+    def _merge_csv(existing_value: str) -> str:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for candidate in [part.strip() for part in existing_value.split(",") if part.strip()] + [normalized_namespace]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            ordered.append(candidate)
+        return ",".join(ordered)
+
+    lines = cronjob_yaml.splitlines(keepends=True)
+    sync_name_index: int | None = None
+    portal_env_value_index: int | None = None
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == f"- name: {SERVICE_REGISTRY_SYNC_NAMESPACES_ENV}":
+            sync_name_index = index
+            break
+        if stripped == "- name: PORTAL_ENV":
+            portal_env_value_index = index + 1
+
+    if sync_name_index is not None:
+        if sync_name_index + 1 >= len(lines):
+            raise ScaffoldError(
+                "Expected SERVICE_REGISTRY_SYNC_NAMESPACES env var to be followed by a value entry.",
+                status_code=502,
+            )
+        match = _re.match(r"^(\s*value:\s*)(.+?)(\r?\n?)$", lines[sync_name_index + 1])
+        if not match:
+            raise ScaffoldError(
+                "Failed to parse SERVICE_REGISTRY_SYNC_NAMESPACES value from catalog-sync CronJob.",
+                status_code=502,
+            )
+        prefix, existing_value, suffix = match.groups()
+        line_ending = suffix or "\n"
+        lines[sync_name_index + 1] = f"{prefix}{_merge_csv(existing_value)}{line_ending}"
+        return "".join(lines)
+
+    if portal_env_value_index is None or portal_env_value_index >= len(lines):
+        raise ScaffoldError(
+            "Expected PORTAL_ENV env var in catalog-sync CronJob manifest.",
+            status_code=502,
+        )
+
+    indent_match = _re.match(r"^(\s*)- name:", lines[portal_env_value_index - 1])
+    if not indent_match:
+        raise ScaffoldError(
+            "Failed to determine env var indentation in catalog-sync CronJob manifest.",
+            status_code=502,
+        )
+    env_indent = indent_match.group(1)
+    value_indent = f"{env_indent}  "
+    lines[portal_env_value_index + 1:portal_env_value_index + 1] = [
+        f"{env_indent}- name: {SERVICE_REGISTRY_SYNC_NAMESPACES_ENV}\n",
+        f"{value_indent}value: {normalized_namespace}\n",
+    ]
+    return "".join(lines)
+
+
 def generate_scaffold_files_and_updates(
     payload: ScaffoldServiceRequest,
     workloads_repo: str,
@@ -234,6 +361,11 @@ def generate_scaffold_files_and_updates(
         base_kust_path = f"apps/{inp.project_id}/base/kustomization.yaml"
         base_kustomization_raw = git_provider.read_file(workloads_repo, base_branch, base_kust_path)  # type: ignore[union-attr]
         services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
+        catalog_sync_cronjob_raw = git_provider.read_file(
+            workloads_repo,
+            base_branch,
+            WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
+        )  # type: ignore[union-attr]
 
         validate_add_service(inp, base_kustomization_raw, services_yaml_raw)
 
@@ -258,6 +390,10 @@ def generate_scaffold_files_and_updates(
         modified_files[WORKLOADS_CATALOG_PATH] = build_catalog_add_service_entry(
             services_yaml_raw, inp,
         )
+        modified_files[WORKLOADS_CATALOG_SYNC_CRONJOB_PATH] = update_service_registry_sync_namespaces(
+            catalog_sync_cronjob_raw,
+            inp.namespace,
+        )
         return new_files, modified_files
 
     if is_bundle:
@@ -267,6 +403,11 @@ def generate_scaffold_files_and_updates(
         kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)  # type: ignore[union-attr]
         appproject_raw = git_provider.read_file(workloads_repo, base_branch, WORKLOADS_APPPROJECT_PATH)  # type: ignore[union-attr]
         services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
+        catalog_sync_cronjob_raw = git_provider.read_file(
+            workloads_repo,
+            base_branch,
+            WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
+        )  # type: ignore[union-attr]
 
         new_files = generate_gitops_bundle_files(inp_bundle)
         single_inp = ScaffoldServiceInput(
@@ -280,6 +421,10 @@ def generate_scaffold_files_and_updates(
             kustomization_path: update_kustomization_resources(kustomization_raw, f"{inp_bundle.name}-app.yaml"),
             WORKLOADS_APPPROJECT_PATH: build_appproject_addition(appproject_raw, single_inp),
             WORKLOADS_CATALOG_PATH: build_catalog_bundle_entries(services_yaml_raw, inp_bundle),
+            WORKLOADS_CATALOG_SYNC_CRONJOB_PATH: update_service_registry_sync_namespaces(
+                catalog_sync_cronjob_raw,
+                inp_bundle.namespace,
+            ),
         }
     else:
         inp_single = _build_scaffold_input(payload)
@@ -288,12 +433,21 @@ def generate_scaffold_files_and_updates(
         kustomization_raw = git_provider.read_file(workloads_repo, base_branch, kustomization_path)  # type: ignore[union-attr]
         appproject_raw = git_provider.read_file(workloads_repo, base_branch, WORKLOADS_APPPROJECT_PATH)  # type: ignore[union-attr]
         services_yaml_raw = git_provider.read_file(workloads_repo, base_branch, WORKLOADS_CATALOG_PATH)  # type: ignore[union-attr]
+        catalog_sync_cronjob_raw = git_provider.read_file(
+            workloads_repo,
+            base_branch,
+            WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
+        )  # type: ignore[union-attr]
 
         new_files = generate_gitops_new_files(inp_single)
         modified_files = {
             kustomization_path: update_kustomization_resources(kustomization_raw, f"{inp_single.name}-app.yaml"),
             WORKLOADS_APPPROJECT_PATH: build_appproject_addition(appproject_raw, inp_single),
             WORKLOADS_CATALOG_PATH: build_catalog_entry_addition(services_yaml_raw, inp_single),
+            WORKLOADS_CATALOG_SYNC_CRONJOB_PATH: update_service_registry_sync_namespaces(
+                catalog_sync_cronjob_raw,
+                inp_single.namespace,
+            ),
         }
 
     return new_files, modified_files
