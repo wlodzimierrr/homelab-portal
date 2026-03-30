@@ -8,7 +8,6 @@ import { StatusCard } from '@/components/status-card'
 import { ToastMessage } from '@/components/toast-message'
 import { Button } from '@/components/ui/button'
 import type { DeploymentHistoryItem } from '@/lib/adapters/deployments'
-import type { ServiceMetricsSummary } from '@/lib/adapters/service-metrics'
 import { evaluateDeploymentHistoryItem, summarizeDeploymentAlerts } from '@/lib/deployment-alerts'
 import type { ServiceIncidentBadge } from '@/lib/incident-alerts'
 import {
@@ -25,6 +24,10 @@ import { ForwardActionsPanel } from './components/forward-actions-panel'
 import { OverviewMetricsSummary } from './components/overview-metrics-summary'
 import { OverviewObservabilityLinks } from './components/overview-observability-links'
 import { ServiceGroupingContext } from './components/service-grouping-context'
+import {
+  buildDeploymentMetadataMessage,
+  buildOverviewMetricsCoverageMessage,
+} from './overview-messaging'
 
 // ServiceDetailsPage is the single-service overview screen. It fans in
 // catalog metadata, shallow deployment context, and the most common forward
@@ -46,27 +49,6 @@ function formatDate(value?: string) {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(parsed)
-}
-
-function buildMetricsCoverageMessage(metrics: ServiceMetricsSummary) {
-  if (metrics.observabilityDiagnostics?.status && metrics.observabilityDiagnostics.status !== 'ok') {
-    return metrics.observabilityDiagnostics.message ?? ''
-  }
-
-  const missingLabels = [
-    metrics.noData.p95LatencyMs ? 'P95 latency' : null,
-    metrics.noData.errorRatePct ? 'error rate' : null,
-  ].filter((label): label is string => Boolean(label))
-
-  if (missingLabels.length === 0) {
-    return ''
-  }
-
-  if (!metrics.noData.uptimePct || !metrics.noData.restartCount) {
-    return `${missingLabels.join(' and ')} require service-level HTTP instrumentation. Showing infrastructure-level uptime and restart signals where available.`
-  }
-
-  return `${missingLabels.join(' and ')} require service-level HTTP instrumentation. Prometheus is healthy, but this service is not emitting matching request metrics yet.`
 }
 
 function IncidentServiceBadge({ alert }: { alert: ServiceIncidentBadge }) {
@@ -245,8 +227,14 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
     [decodedServiceId, incidentServiceAlerts, serviceId],
   )
   const metricsCoverageMessage = useMemo(
-    () => buildMetricsCoverageMessage(metrics),
-    [metrics],
+    () =>
+      buildOverviewMetricsCoverageMessage({
+        version: overview?.version,
+        observabilityMode: overview?.observabilityMode,
+        capabilities,
+        metrics,
+      }),
+    [capabilities, metrics, overview?.observabilityMode, overview?.version],
   )
 
   return (
@@ -294,9 +282,10 @@ export function ServiceDetailsPage({ serviceId, incidentServiceAlerts = {} }: Se
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">Deployed Version</p>
                 <p className="mt-2 text-xl font-semibold">{overview.version}</p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  {overview.version && overview.version !== 'N/A'
-                    ? 'Resolved from live release metadata.'
-                    : 'Deployment metadata is not available for this service yet.'}
+                  {buildDeploymentMetadataMessage({
+                    version: overview.version,
+                    capabilities,
+                  })}
                 </p>
               </article>
               <OverviewMetricsSummary

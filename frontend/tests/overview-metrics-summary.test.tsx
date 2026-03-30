@@ -44,3 +44,36 @@ test('OverviewMetricsSummary renders the compact service metrics panel', () => {
   assert.doesNotMatch(markup, /Service Health Timeline/)
   browser.cleanup()
 })
+
+test('OverviewMetricsSummary renders explanatory coverage copy when provided', () => {
+  const browser = installMockBrowser({ pathname: '/services/homelab-wordpress' })
+  const markup = renderToHtml(
+    createElement(OverviewMetricsSummary, {
+      health: 'unknown',
+      metrics: {
+        serviceId: 'homelab-wordpress',
+        range: '24h',
+        generatedAt: '2026-03-30T12:00:00Z',
+        noData: {
+          uptimePct: false,
+          p95LatencyMs: true,
+          errorRatePct: true,
+          restartCount: false,
+        },
+        observabilityDiagnostics: {
+          mode: 'ingress-derived',
+          status: 'no_retained_data',
+          missingMetrics: [],
+        },
+      },
+      isLoading: false,
+      error: '',
+      coverageMessage: 'Runtime status is available. Latency and error metrics for ingress-derived services require recent ingress traffic.',
+      onRetry() {},
+    }),
+  )
+
+  assert.match(markup, /Runtime status is available\./)
+  assert.match(markup, /require recent ingress traffic/)
+  browser.cleanup()
+})
