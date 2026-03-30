@@ -128,6 +128,48 @@ def test_load_recent_gitops_deployment_events_parses_manual_prod_promote_pull_re
     assert event.metadata["operatorReason"] == "Promote the verified dev release to prod."
 
 
+def test_load_recent_gitops_deployment_events_parses_manual_dev_deploy_for_generic_service() -> None:
+    source_sha = "d" * 40
+
+    def _fake_fetch(_path: str) -> object:
+        return [
+            {
+                "number": 81,
+                "title": f"Deploy portfolio-next: sha-{source_sha} to dev",
+                "html_url": "https://github.com/wlodzimierrr/homelab-workloads/pull/81",
+                "state": "open",
+                "created_at": "2026-03-13T09:00:00Z",
+                "closed_at": None,
+                "merged_at": None,
+                "merge_commit_sha": None,
+                "body": "\n".join(
+                    [
+                        "Portal-requested dev deploy.",
+                        "- Service: `portfolio-next`",
+                        f"- Target image: `ghcr.io/wlodzimierrr/portfolio-next:sha-{source_sha}`",
+                        "- Reason: Ship the new portfolio build to dev.",
+                    ]
+                ),
+                "user": {"login": "wlodzimierrr"},
+                "head": {"ref": f"automation/dev-deploy-portfolio-next-sha-{source_sha[:12]}-20260313090000"},
+            }
+        ]
+
+    events = deployment_reconciler.load_recent_gitops_deployment_events(
+        github_fetch_json=_fake_fetch,
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.service_id == "portfolio-next"
+    assert event.env == "dev"
+    assert event.action == "deploy"
+    assert event.source_commit_sha == source_sha
+    assert event.target_image == f"ghcr.io/wlodzimierrr/portfolio-next:sha-{source_sha}"
+    assert event.request_key == "gitops-pr:81:portfolio-next:dev:deploy"
+    assert event.metadata["operatorReason"] == "Ship the new portfolio build to dev."
+
+
 def test_load_recent_gitops_deployment_events_parses_config_change_pull_request() -> None:
     def _fake_fetch(_path: str) -> object:
         return [

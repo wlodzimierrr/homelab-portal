@@ -1,4 +1,5 @@
 from app.observability_config import (
+    build_ingress_service_pattern,
     escape_promql_regex_literal,
     load_observability_config,
     render_query_template,
@@ -28,3 +29,8 @@ def test_render_query_template_replaces_variables() -> None:
 def test_escape_promql_regex_literal_keeps_hyphen_and_escapes_regex_metacharacters() -> None:
     assert escape_promql_regex_literal("homelab-api") == "homelab-api"
     assert escape_promql_regex_literal("service.api+(canary)") == r"service\.api\+\(canary\)"
+
+
+def test_build_ingress_service_pattern_includes_service_id_fallback() -> None:
+    assert build_ingress_service_pattern("web", "homelab-wordpress") == ".*(web|homelab-wordpress).*"
+    assert build_ingress_service_pattern("homelab-wordpress", "homelab-wordpress") == ".*homelab-wordpress.*"

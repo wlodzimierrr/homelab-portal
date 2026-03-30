@@ -33,6 +33,7 @@ from app.monitoring_providers import (
     raise_provider_bad_payload_error,
 )
 from app.observability_config import (
+    build_ingress_service_pattern,
     escape_promql_regex_literal,
     load_observability_config,
     parse_duration_token,
@@ -1537,6 +1538,7 @@ def _load_metric_snapshots_for_window(
     def _load() -> dict[str, dict[str, float]]:
         config = load_observability_config()
         queries = _build_service_metrics_queries(
+            service_id=service_id,
             namespace=namespace,
             app_label=app_label,
             selected_range=comparison_window_token,
@@ -1837,13 +1839,14 @@ def _query_prometheus_range(
 
 def _build_service_metrics_queries(
     *,
+    service_id: str,
     namespace: str,
     app_label: str,
     selected_range: str,
     config,
 ) -> dict[str, tuple[str, ...]]:
     pod_pattern = escape_promql_regex_literal(app_label)
-    ingress_service_pattern = f".*{escape_promql_regex_literal(app_label)}.*"
+    ingress_service_pattern = build_ingress_service_pattern(app_label, service_id)
     deployment_name = app_label
     values = {
         "namespace": namespace,

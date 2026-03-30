@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import TypedDict
+from typing import Literal, TypedDict
 from app.service_identity import normalize_service_id
 
 # Release traceability joins three imperfect sources: project registry rows, CI
@@ -59,7 +59,115 @@ class ReleaseJoinDiagnostics(TypedDict):
     argoUnmatchedKeys: list[str]
 
 
+ReleaseMetadataMatchStatus = Literal["matched", "missing"]
+ReleaseMetadataMatchMethod = Literal["service_id", "service_name", "normalized_service_id"]
+
+
+class ReleaseMetadataMatchProbe(TypedDict):
+    status: ReleaseMetadataMatchStatus
+    matchedBy: ReleaseMetadataMatchMethod | None
+    rowServiceId: str | None
+    rowServiceName: str | None
+    env: str
+    hasCommitSha: bool
+    hasImageRef: bool
+    hasExpectedRevision: bool
+    hasLiveRevision: bool
+    hasAppName: bool
+
+
+class ReleaseTraceabilityProbe(TypedDict):
+    serviceId: str
+    normalizedServiceId: str
+    env: str
+    projectRowPresent: bool
+    projectRowServiceName: str | None
+    joinRowPresent: bool
+    joinHasMeaningfulMetadata: bool
+    ci: ReleaseMetadataMatchProbe
+    argo: ReleaseMetadataMatchProbe
+
+
 UNKNOWN = "unknown"
+
+
+def _extract_service_id_from_image_ref(image_ref: object) -> str | None:
+    if not isinstance(image_ref, str):
+        return None
+    trimmed = image_ref.strip()
+    if not trimmed:
+        return None
+    repo_ref = trimmed.split("@", 1)[0]
+    repo_ref = repo_ref.rsplit(":", 1)[0]
+    image_name = repo_ref.rsplit("/", 1)[-1].strip()
+    if not image_name:
+        return None
+    normalized = normalize_service_id(image_name)
+    return normalized if normalized != "unknown-service" else None
+
+
+def _extract_service_id_from_app_name(app_name: object, env: str) -> str | None:
+    if not isinstance(app_name, str):
+        return None
+    trimmed = app_name.strip()
+    if not trimmed:
+        return None
+    normalized_env = env.strip().lower()
+    suffix = f"-{normalized_env}" if normalized_env else ""
+    if suffix and trimmed.lower().endswith(suffix):
+        trimmed = trimmed[: -len(suffix)]
+    normalized = normalize_service_id(trimmed)
+    return normalized if normalized != "unknown-service" else None
+
+
+def _normalize_ci_metadata_row(row: CiMetadataRow) -> CiMetadataRow:
+    normalized = dict(row)
+    service_id = str(normalized.get("serviceId", "")).strip()
+    if service_id:
+        normalized["serviceId"] = normalize_service_id(service_id)
+        return normalized
+
+    service_name = str(normalized.get("serviceName", "")).strip()
+    if service_name:
+        normalized["serviceId"] = normalize_service_id(service_name)
+        return normalized
+
+    derived = _extract_service_id_from_image_ref(normalized.get("imageRef"))
+    if derived:
+        normalized["serviceId"] = derived
+    return normalized
+
+
+def _normalize_argo_metadata_row(row: ArgoMetadataRow) -> ArgoMetadataRow:
+    normalized = dict(row)
+    service_id = str(normalized.get("serviceId", "")).strip()
+    env = str(normalized.get("env", "")).strip()
+    if service_id:
+        normalized["serviceId"] = normalize_service_id(service_id)
+        return normalized
+
+    service_name = str(normalized.get("serviceName", "")).strip()
+    if service_name:
+        normalized["serviceId"] = normalize_service_id(service_name)
+        return normalized
+
+    derived = _extract_service_id_from_app_name(normalized.get("appName"), env)
+    if derived:
+        normalized["serviceId"] = derived
+        return normalized
+
+    derived = _extract_service_id_from_image_ref(normalized.get("imageRef"))
+    if derived:
+        normalized["serviceId"] = derived
+    return normalized
+
+
+def _normalize_ci_metadata_rows(rows: list[CiMetadataRow]) -> list[CiMetadataRow]:
+    return [_normalize_ci_metadata_row(row) for row in rows]
+
+
+def _normalize_argo_metadata_rows(rows: list[ArgoMetadataRow]) -> list[ArgoMetadataRow]:
+    return [_normalize_argo_metadata_row(row) for row in rows]
 
 
 def _normalize_sync(value: str | None) -> str:
@@ -80,6 +188,99 @@ def _normalize_health(value: str | None) -> str:
     return UNKNOWN
 
 
+def _build_empty_match_probe(*, env: str) -> ReleaseMetadataMatchProbe:
+    return {
+        "status": "missing",
+        "matchedBy": None,
+        "rowServiceId": None,
+        "rowServiceName": None,
+        "env": env,
+        "hasCommitSha": False,
+        "hasImageRef": False,
+        "hasExpectedRevision": False,
+        "hasLiveRevision": False,
+        "hasAppName": False,
+    }
+
+
+def _row_has_meaningful_release_metadata(row: dict[str, object]) -> bool:
+    for key in ("commitSha", "imageRef", "deployedAt"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+
+    argo = row.get("argo")
+    if not isinstance(argo, dict):
+        return False
+
+    for key in ("syncStatus", "healthStatus", "revision", "liveRevision", "imageRef"):
+        value = argo.get(key)
+        if isinstance(value, str) and value.strip() and value.strip().lower() != UNKNOWN:
+            return True
+    return False
+
+
+def _build_metadata_match_probe(
+    *,
+    rows: list[dict[str, object]],
+    service_id: str,
+    service_name: str | None,
+    env: str,
+) -> ReleaseMetadataMatchProbe:
+    exact_index: dict[tuple[str, str], dict[str, object]] = {}
+    normalized_index: dict[tuple[str, str], dict[str, object]] = {}
+
+    for row in rows:
+        row_service_id = str(row.get("serviceId", "")).strip()
+        row_env = str(row.get("env", "")).strip()
+        if not row_service_id or not row_env:
+            continue
+        exact_index[(row_service_id, row_env)] = row
+        normalized_index[(normalize_service_id(row_service_id), row_env)] = row
+
+    matched_row: dict[str, object] | None = None
+    matched_by: ReleaseMetadataMatchMethod | None = None
+    candidates: list[tuple[tuple[str, str], ReleaseMetadataMatchMethod]] = [
+        ((service_id, env), "service_id")
+    ]
+    if service_name:
+        candidates.append(((service_name, env), "service_name"))
+
+    for candidate, method in candidates:
+        if candidate in exact_index:
+            matched_row = exact_index[candidate]
+            matched_by = method
+            break
+
+    if matched_row is None:
+        normalized_key = (normalize_service_id(service_id), env)
+        if normalized_key in normalized_index:
+            matched_row = normalized_index[normalized_key]
+            matched_by = "normalized_service_id"
+
+    if matched_row is None:
+        return _build_empty_match_probe(env=env)
+
+    row_service_id = str(matched_row.get("serviceId", "")).strip() or None
+    row_service_name = str(matched_row.get("serviceName", "")).strip() or None
+    live_revision = matched_row.get("liveRevision")
+    if not isinstance(live_revision, str):
+        live_revision = matched_row.get("revision")
+
+    return {
+        "status": "matched",
+        "matchedBy": matched_by,
+        "rowServiceId": row_service_id,
+        "rowServiceName": row_service_name,
+        "env": env,
+        "hasCommitSha": isinstance(matched_row.get("commitSha"), str) and bool(str(matched_row.get("commitSha")).strip()),
+        "hasImageRef": isinstance(matched_row.get("imageRef"), str) and bool(str(matched_row.get("imageRef")).strip()),
+        "hasExpectedRevision": isinstance(matched_row.get("expectedRevision"), str) and bool(str(matched_row.get("expectedRevision")).strip()),
+        "hasLiveRevision": isinstance(live_revision, str) and bool(str(live_revision).strip()),
+        "hasAppName": isinstance(matched_row.get("appName"), str) and bool(str(matched_row.get("appName")).strip()),
+    }
+
+
 def _read_env_json_rows(name: str) -> list[dict]:
     raw = os.getenv(name)
     if not raw:
@@ -94,11 +295,15 @@ def _read_env_json_rows(name: str) -> list[dict]:
 
 
 def load_ci_metadata_rows() -> list[CiMetadataRow]:
-    return [row for row in _read_env_json_rows("RELEASE_CI_METADATA_JSON")]
+    return _normalize_ci_metadata_rows(
+        [row for row in _read_env_json_rows("RELEASE_CI_METADATA_JSON")]
+    )
 
 
 def load_argo_metadata_rows() -> list[ArgoMetadataRow]:
-    return [row for row in _read_env_json_rows("RELEASE_ARGO_METADATA_JSON")]
+    return _normalize_argo_metadata_rows(
+        [row for row in _read_env_json_rows("RELEASE_ARGO_METADATA_JSON")]
+    )
 
 
 # Drift is intentionally conservative: explicit out-of-sync always wins, then
@@ -137,6 +342,8 @@ def build_release_traceability_rows(
     service_id_filter: str | None,
     limit: int,
 ) -> list[ReleaseTraceabilityRow]:
+    ci_rows = _normalize_ci_metadata_rows(ci_rows)
+    argo_rows = _normalize_argo_metadata_rows(argo_rows)
     ci_index: dict[tuple[str, str], CiMetadataRow] = {}
     ci_normalized_index: dict[tuple[str, str], CiMetadataRow] = {}
     argo_index: dict[tuple[str, str], ArgoMetadataRow] = {}
@@ -321,6 +528,64 @@ def build_release_traceability_rows(
     return rows[:limit]
 
 
+def build_release_traceability_probe(
+    *,
+    project_rows: list[ProjectRow],
+    ci_rows: list[CiMetadataRow],
+    argo_rows: list[ArgoMetadataRow],
+    service_id: str,
+    env: str,
+) -> ReleaseTraceabilityProbe:
+    ci_rows = _normalize_ci_metadata_rows(ci_rows)
+    argo_rows = _normalize_argo_metadata_rows(argo_rows)
+    project_row = next(
+        (
+            row
+            for row in project_rows
+            if str(row.get("service_id", "")).strip() == service_id
+            and str(row.get("env", "")).strip() == env
+        ),
+        None,
+    )
+    service_name = (
+        str(project_row.get("service_name", "")).strip()
+        if project_row and isinstance(project_row.get("service_name"), str)
+        else None
+    ) or None
+
+    joined_rows = build_release_traceability_rows(
+        project_rows=project_rows,
+        ci_rows=ci_rows,
+        argo_rows=argo_rows,
+        env_filter=env,
+        service_id_filter=service_id,
+        limit=1,
+    )
+    joined_row = joined_rows[0] if joined_rows else None
+
+    return {
+        "serviceId": service_id,
+        "normalizedServiceId": normalize_service_id(service_id),
+        "env": env,
+        "projectRowPresent": project_row is not None,
+        "projectRowServiceName": service_name,
+        "joinRowPresent": joined_row is not None,
+        "joinHasMeaningfulMetadata": _row_has_meaningful_release_metadata(joined_row) if joined_row else False,
+        "ci": _build_metadata_match_probe(
+            rows=ci_rows,
+            service_id=service_id,
+            service_name=service_name,
+            env=env,
+        ),
+        "argo": _build_metadata_match_probe(
+            rows=argo_rows,
+            service_id=service_id,
+            service_name=service_name,
+            env=env,
+        ),
+    }
+
+
 def build_release_join_diagnostics(
     *,
     project_rows: list[ProjectRow],
@@ -329,6 +594,8 @@ def build_release_join_diagnostics(
     env_filter: str | None,
     service_id_filter: str | None,
 ) -> ReleaseJoinDiagnostics:
+    ci_rows = _normalize_ci_metadata_rows(ci_rows)
+    argo_rows = _normalize_argo_metadata_rows(argo_rows)
     ci_index: dict[tuple[str, str], CiMetadataRow] = {}
     ci_normalized_index: dict[tuple[str, str], CiMetadataRow] = {}
     argo_index: dict[tuple[str, str], ArgoMetadataRow] = {}

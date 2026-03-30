@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Callable
 from urllib import request as urlrequest
 
+from app.service_identity import normalize_service_id
 from app.deployments.reconciler.models import (
     CONFIG_CHANGE_HEAD_RE,
     CONFIG_CHANGE_TITLE_RE,
@@ -109,7 +110,10 @@ def extract_images_from_body(body: object) -> dict[str, str]:
     for match in IMAGE_REF_RE.finditer(body):
         full_ref = match.group(1)
         image_name = match.group(2)
-        images[image_name] = full_ref
+        service_id = normalize_service_id(image_name)
+        if service_id == "unknown-service":
+            continue
+        images[service_id] = full_ref
     return images
 
 
@@ -250,14 +254,7 @@ def load_recent_gitops_deployment_events(
         merge_sha = pr.get("merge_commit_sha") if isinstance(pr.get("merge_commit_sha"), str) else None
         requested_reason = extract_requested_reason_from_body(pr.get("body"))
 
-        for current_service_id, image_ref in (
-            ("homelab-api", images.get("homelab-api")),
-            ("homelab-web", images.get("homelab-web")),
-        ):
-            if current_service_id == "homelab-api" and not image_ref:
-                continue
-            if current_service_id == "homelab-web" and not image_ref:
-                continue
+        for current_service_id, image_ref in sorted(images.items()):
             if service_id and current_service_id != service_id:
                 continue
 

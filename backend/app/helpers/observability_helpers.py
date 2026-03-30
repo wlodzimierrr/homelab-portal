@@ -33,6 +33,7 @@ from app.monitoring_providers import (
     raise_provider_bad_payload_error,
 )
 from app.observability_config import (
+    build_ingress_service_pattern,
     escape_promql_regex_literal,
     load_observability_config,
     render_query_template,
@@ -113,8 +114,9 @@ def _build_service_metrics_probe_queries(
     *,
     namespace: str,
     app_label: str,
+    service_id: str,
 ) -> dict[str, str]:
-    ingress_service_pattern = f".*{escape_promql_regex_literal(app_label)}.*"
+    ingress_service_pattern = build_ingress_service_pattern(app_label, service_id)
     return {
         "app_request_series": (
             f'count(http_requests_total{{namespace="{namespace}", app="{app_label}"}}) or vector(0)'
@@ -152,7 +154,11 @@ def _build_metrics_observability_diagnostics(
     missing_metrics: list[str],
     correlation_id: str,
 ) -> ServiceMetricsObservabilityDiagnosticsResponse:
-    probe_queries = _build_service_metrics_probe_queries(namespace=namespace, app_label=app_label)
+    probe_queries = _build_service_metrics_probe_queries(
+        namespace=namespace,
+        app_label=app_label,
+        service_id=service_id,
+    )
     normalized_mode = normalize_observability_mode(observability_mode)
 
     source_available: bool | None = None

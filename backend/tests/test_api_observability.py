@@ -257,6 +257,29 @@ def test_service_metrics_summary_supports_per_metric_no_data(client, monkeypatch
     assert body["providerStatus"]["provider"] == "prometheus"
 
 
+def test_service_metrics_summary_ingress_queries_include_service_id_fallback(client, monkeypatch) -> None:
+    requested_urls: list[str] = []
+
+    def _mock_urlopen(request, **kwargs):
+        requested_urls.append(getattr(request, "full_url", request))
+        return _MockPrometheusResponse({"status": "success", "data": {"result": []}})
+
+    monkeypatch.setattr("app.monitoring_providers.urlrequest.urlopen", _mock_urlopen)
+    monkeypatch.setattr(
+        "app.main._resolve_service_monitoring_context",
+        lambda _service_id: ("wordpress-ns", "web", "ingress-derived"),
+    )
+
+    response = client.get(
+        "/services/homelab-wordpress/metrics/summary?range=24h",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    decoded_urls = [urlparse.unquote_plus(url) for url in requested_urls]
+    assert any('service=~".*(web|homelab-wordpress).*"' in url for url in decoded_urls)
+
+
 def test_service_metrics_summary_translates_prometheus_http_errors(client, monkeypatch) -> None:
     def _mock_urlopen(*args, **kwargs):
         raise HTTPError(

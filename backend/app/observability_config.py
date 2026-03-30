@@ -99,6 +99,22 @@ def escape_promql_regex_literal(value: str) -> str:
     return PROMQL_REGEX_META.sub(r"\\\1", value)
 
 
+def build_ingress_service_pattern(*values: str | None) -> str:
+    candidates: list[str] = []
+    for value in values:
+        trimmed = (value or "").strip()
+        if not trimmed:
+            continue
+        escaped = escape_promql_regex_literal(trimmed)
+        if escaped not in candidates:
+            candidates.append(escaped)
+    if not candidates:
+        return ".*"
+    if len(candidates) == 1:
+        return f".*{candidates[0]}.*"
+    return f".*({'|'.join(candidates)}).*"
+
+
 # The loader clamps env-driven limits to keep untrusted config from creating huge
 # query windows or runaway response sizes.
 def load_observability_config() -> ObservabilityConfig:
