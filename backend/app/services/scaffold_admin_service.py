@@ -82,6 +82,8 @@ class ScaffoldAdminServiceDeps:
     update_services_yaml_public_host: Any
     update_patch_ingress_host: Any
     workloads_catalog_path: str
+    workloads_catalog_sync_cronjob_path: str
+    update_service_registry_sync_namespaces: Any
     build_default_git_provider: Any
 
 
@@ -614,6 +616,25 @@ class ScaffoldAdminService:
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
+        envs = entry.get("envs", [])
+        namespace = service_id
+        if envs and isinstance(envs[0], dict):
+            namespace = str(envs[0].get("namespace") or service_id).strip() or service_id
+
+        try:
+            catalog_sync_cronjob_raw = git_provider.read_file(
+                workloads_repo,
+                base_branch,
+                self.deps.workloads_catalog_sync_cronjob_path,
+            )
+            updated_catalog_sync_cronjob = self.deps.update_service_registry_sync_namespaces(
+                catalog_sync_cronjob_raw,
+                namespace,
+            )
+        except Exception as exc:
+            self._raise_git_service_http_exception(exc, not_found_is_404=True)
+            raise
+
         initiated_at = datetime.now(tz=timezone.utc)
         timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
         branch_name = f"adopt/{service_id}-{timestamp}"
@@ -621,9 +642,10 @@ class ScaffoldAdminService:
         pr_body = (
             f"## Service adoption: {service_id}\n\n"
             f"**Project:** {project_id}\n"
-            f"**Action:** Add `project_id: {project_id}` to service entry\n\n"
-            f"This is a metadata-only change (Phase 1 soft-link). "
-            f"No namespace or manifest changes are included.\n\n"
+            f"**Action:** Add `project_id: {project_id}` to service entry\n"
+            f"**Namespace:** {namespace}\n\n"
+            f"This updates metadata and ensures the service namespace is included in "
+            f"`SERVICE_REGISTRY_SYNC_NAMESPACES` for live registry sync coverage.\n\n"
             f"After merge, run catalog sync to update the portal.\n"
         )
 
@@ -632,7 +654,10 @@ class ScaffoldAdminService:
             git_provider.commit_to_branch(
                 workloads_repo,
                 branch_name,
-                {self.deps.workloads_catalog_path: updated_yaml},
+                {
+                    self.deps.workloads_catalog_path: updated_yaml,
+                    self.deps.workloads_catalog_sync_cronjob_path: updated_catalog_sync_cronjob,
+                },
                 f"feat(adopt): link {service_id} to project {project_id}",
             )
             pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)

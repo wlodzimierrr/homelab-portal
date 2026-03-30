@@ -685,9 +685,11 @@ def _build_catalog_service() -> CatalogService:
 def _build_scaffold_admin_service() -> ScaffoldAdminService:
     from app.api.endpoints.scaffold import (
         WORKLOADS_CATALOG_PATH,
+        WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
         generate_scaffold_files_and_updates,
         read_current_host_from_patch_ingress,
         read_current_public_host_from_services_yaml,
+        update_service_registry_sync_namespaces,
         update_patch_ingress_host,
         update_services_yaml_public_host,
     )
@@ -705,6 +707,8 @@ def _build_scaffold_admin_service() -> ScaffoldAdminService:
         update_services_yaml_public_host=update_services_yaml_public_host,
         update_patch_ingress_host=update_patch_ingress_host,
         workloads_catalog_path=WORKLOADS_CATALOG_PATH,
+        workloads_catalog_sync_cronjob_path=WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
+        update_service_registry_sync_namespaces=update_service_registry_sync_namespaces,
         build_default_git_provider=build_default_git_provider,
     )
 

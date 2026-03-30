@@ -122,7 +122,7 @@ Severity mapping for `/alerts/active` is normalized to `warning|critical` for co
 Service registry sync config:
 
 - `PORTAL_ENV` (default: `dev`)
-- `SERVICE_REGISTRY_SYNC_NAMESPACES` (CSV, default: `homelab-api,homelab-web`)
+- `SERVICE_REGISTRY_SYNC_NAMESPACES` (optional CSV fallback/override; primary sync scope is now derived from `project_registry`)
 - `SERVICE_REGISTRY_SYNC_ARGO_NAMESPACE` (default: `argocd`)
 - `KUBERNETES_API_URL` (optional override when not using in-cluster `KUBERNETES_SERVICE_HOST`/`PORT`)
 - `KUBERNETES_BEARER_TOKEN` (optional override for service-account token)
@@ -131,6 +131,7 @@ Service registry sync config:
 
 Cluster sync populates `service_registry` with `source=cluster_services`; `GET /services` reads only those live cluster-backed rows.
 GitOps project sync populates `project_registry` from `workloads/apps/*/envs/*` and enriches rows with owner/repo/runbook metadata from `workloads/services.yaml`.
+Service registry sync now derives namespace coverage from `project_registry` for the current env. The CSV env var remains only as an explicit fallback/override when no declared project namespaces are available yet.
 `GET /catalog/reconciliation` provides the deterministic bridge between GitOps projects and live cluster services.
 The in-cluster scheduler lives in `workloads/apps/homelab-api/base/catalog-sync-cronjob.yaml` and runs `python scripts/sync_catalog_registries.py` every 10 minutes.
 CronJob logs now emit:
