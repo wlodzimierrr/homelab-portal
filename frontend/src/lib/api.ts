@@ -297,6 +297,9 @@ export interface ServiceCapabilities {
   configEnvs: string[]
   canEditPublicHostname: boolean
   canAdopt: boolean
+  canDelete: boolean
+  decommissionMode: 'standalone' | 'project-component' | 'unsupported'
+  decommissionReason?: string | null
 }
 
 export interface ServiceDetails {
@@ -747,5 +750,28 @@ export function adoptService(serviceId: string, projectId: string) {
   return request<AdoptServiceResponse>(`/services/${encodeURIComponent(serviceId)}/adopt`, {
     method: 'POST',
     body: JSON.stringify({ projectId }),
+  })
+}
+
+export interface ServiceDecommissionResponse {
+  status: 'accepted'
+  serviceId: string
+  projectId?: string | null
+  requestedBy: string
+  repository: string
+  baseBranch: string
+  branchName: string
+  prUrl: string
+  prNumber: number
+  updatedPaths: string[]
+  removedPaths: string[]
+  preservedArtifacts: string[]
+  message: string
+  initiatedAt: string
+}
+
+export function decommissionService(serviceId: string) {
+  return request<ServiceDecommissionResponse>(`/services/${encodeURIComponent(serviceId)}/decommission`, {
+    method: 'POST',
   })
 }

@@ -1225,6 +1225,12 @@ def test_catalog_add_service_entry_shares_argo_app() -> None:
     assert "argo_app: my-proj-prod" in new_entry
 
 
+def test_catalog_add_service_entry_includes_workload_ref() -> None:
+    result = build_catalog_add_service_entry(_SERVICES_YAML, _make_add_service_input())
+    new_entry = result[len(_SERVICES_YAML):]
+    assert "workload_ref: apps/my-proj/base/worker-deployment.yaml" in new_entry
+
+
 def test_catalog_add_service_entry_dev_and_prod_envs() -> None:
     result = build_catalog_add_service_entry(_SERVICES_YAML, _make_add_service_input())
     new_entry = result[len(_SERVICES_YAML):]

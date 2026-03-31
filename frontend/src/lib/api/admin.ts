@@ -1,7 +1,9 @@
 export {
+  decommissionService,
   getServiceConfig,
   setServiceConfig,
   updateServicePublicHostname,
+  type ServiceDecommissionResponse,
   type ServiceConfigEntry,
   type ServiceConfigResponse,
   type ServiceSetConfigRequest,

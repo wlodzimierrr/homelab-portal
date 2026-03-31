@@ -187,6 +187,42 @@ def test_open_pr_returns_minimal_object() -> None:
     }
 
 
+def test_list_files_returns_filtered_recursive_blob_paths() -> None:
+    def _urlopen(request, timeout=0):
+        url = request.full_url
+        method = request.get_method()
+        if method == "GET" and url.endswith("/git/ref/heads/main"):
+            return _MockResponse(
+                {
+                    "ref": "refs/heads/main",
+                    "object": {"sha": "head-sha", "url": "https://api.github.com/ref/main"},
+                }
+            )
+        if method == "GET" and url.endswith("/git/commits/head-sha"):
+            return _MockResponse({"sha": "head-sha", "tree": {"sha": "base-tree-sha"}})
+        if method == "GET" and "recursive=1" in url and url.endswith("/git/trees/base-tree-sha?recursive=1"):
+            return _MockResponse(
+                {
+                    "tree": [
+                        {"path": "apps/demo/base/deployment.yaml", "type": "blob"},
+                        {"path": "apps/demo/base", "type": "tree"},
+                        {"path": "apps/demo/envs/dev/patch-deployment.yaml", "type": "blob"},
+                        {"path": "services.yaml", "type": "blob"},
+                    ]
+                }
+            )
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    service = GitHubGitService(token="test-token", urlopen_func=_urlopen)
+
+    result = service.list_files("example/workloads", "main", "apps/demo")
+
+    assert result == [
+        "apps/demo/base/deployment.yaml",
+        "apps/demo/envs/dev/patch-deployment.yaml",
+    ]
+
+
 def test_commit_to_branch_creates_single_multi_file_commit() -> None:
     requests: list[tuple[str, str, object | None]] = []
     blob_counter = 0
@@ -249,6 +285,63 @@ def test_commit_to_branch_creates_single_multi_file_commit() -> None:
         ],
     }
     assert len(requests) == 7
+
+
+def test_commit_to_branch_supports_file_deletions() -> None:
+    def _urlopen(request, timeout=0):
+        url = request.full_url
+        method = request.get_method()
+        if method == "GET" and url.endswith("/git/ref/heads/main"):
+            return _MockResponse(
+                {
+                    "ref": "refs/heads/main",
+                    "object": {"sha": "head-sha", "url": "https://api.github.com/ref/main"},
+                }
+            )
+        if method == "GET" and url.endswith("/git/commits/head-sha"):
+            return _MockResponse({"sha": "head-sha", "tree": {"sha": "base-tree-sha"}})
+        if method == "POST" and url.endswith("/git/blobs"):
+            return _MockResponse({"sha": "blob-sha-1"})
+        if method == "POST" and url.endswith("/git/trees"):
+            payload = json.loads(request.data.decode("utf-8"))
+            assert payload["base_tree"] == "base-tree-sha"
+            assert payload["tree"] == [
+                {
+                    "path": "services.yaml",
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": "blob-sha-1",
+                },
+                {
+                    "path": "apps/demo/base/deployment.yaml",
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": None,
+                },
+            ]
+            return _MockResponse({"sha": "tree-sha-2"})
+        if method == "POST" and url.endswith("/git/commits"):
+            return _MockResponse({"sha": "commit-sha-2"})
+        if method == "PATCH" and url.endswith("/git/refs/heads/main"):
+            return _MockResponse({"ref": "refs/heads/main"})
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    service = GitHubGitService(token="test-token", urlopen_func=_urlopen)
+
+    result = service.commit_to_branch(
+        "example/workloads",
+        "main",
+        {
+            "services.yaml": "services: []\n",
+            "apps/demo/base/deployment.yaml": None,
+        },
+        "chore(decommission): remove demo from workloads",
+    )
+
+    assert result["files"] == [
+        "apps/demo/base/deployment.yaml",
+        "services.yaml",
+    ]
 
 
 def test_close_pr_returns_closed_minimal_object() -> None:

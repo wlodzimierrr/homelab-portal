@@ -67,3 +67,22 @@ class ScaffoldSubmitResponse(BaseModel):
     )
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class ServiceDecommissionResponse(BaseModel):
+    status: str
+    service_id: str = Field(alias="serviceId")
+    project_id: str | None = Field(default=None, alias="projectId")
+    requested_by: str = Field(alias="requestedBy")
+    repository: str
+    base_branch: str = Field(alias="baseBranch")
+    branch_name: str = Field(alias="branchName")
+    pr_url: str = Field(alias="prUrl")
+    pr_number: int = Field(alias="prNumber")
+    updated_paths: list[str] = Field(alias="updatedPaths")
+    removed_paths: list[str] = Field(alias="removedPaths")
+    preserved_artifacts: list[str] = Field(alias="preservedArtifacts")
+    message: str
+    initiated_at: str = Field(alias="initiatedAt")
+
+    model_config = ConfigDict(populate_by_name=True)

@@ -31,7 +31,7 @@ export function ServiceSettingsPage({ serviceId }: ServiceSettingsPageProps) {
   return (
     <PageShell
       title={`Settings: ${decodedServiceId || 'unknown'}`}
-      description="Runtime config, public hostname, and catalog-linking actions for this service."
+      description="Runtime config, public hostname, catalog-linking, and decommission actions for this service."
     >
       <div className="space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
@@ -64,6 +64,7 @@ export function ServiceSettingsPage({ serviceId }: ServiceSettingsPageProps) {
 
         {!isLoading && !error ? (
           <ServiceSettingsSections
+              serviceId={decodedServiceId}
               configSupported={settings.configSupported}
               publicHostEditMode={settings.publicHostEditMode}
               setPublicHostEditMode={settings.setPublicHostEditMode}
@@ -92,6 +93,14 @@ export function ServiceSettingsPage({ serviceId }: ServiceSettingsPageProps) {
               adoptError={settings.adoptError}
               adoptResult={settings.adoptResult}
               onSubmitAdopt={() => void settings.submitAdopt()}
+              decommissionMode={capabilities.decommissionMode}
+              decommissionReason={capabilities.decommissionReason}
+              decommissionConfirmation={settings.decommissionConfirmation}
+              setDecommissionConfirmation={settings.setDecommissionConfirmation}
+              decommissionSubmitting={settings.decommissionSubmitting}
+              decommissionError={settings.decommissionError}
+              decommissionResult={settings.decommissionResult}
+              onSubmitDecommission={() => void settings.submitDecommission()}
             />
         ) : null}
       </div>

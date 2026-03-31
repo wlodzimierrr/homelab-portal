@@ -506,6 +506,8 @@ def build_catalog_add_service_entry(existing_services_yaml: str, inp: ScaffoldAd
     display_name = " ".join(word.capitalize() for word in inp.project_id.split("-")) + f" {inp.service_name.capitalize()}"
     repo_url = inp.repo_url or inp.workloads_repo_url
     observability_mode = str(TEMPLATES[inp.template]["default_observability_mode"])
+    workload_kind = "statefulset" if inp.template in DB_TEMPLATES else "deployment"
+    workload_ref = f"apps/{inp.project_id}/base/{inp.service_name}-{workload_kind}.yaml"
 
     entry = (
         f"  - service_id: {service_id}\n"
@@ -523,10 +525,12 @@ def build_catalog_add_service_entry(existing_services_yaml: str, inp: ScaffoldAd
         f"        namespace: {inp.namespace}\n"
         f"        app_label: {service_id}\n"
         f"        argo_app: {inp.project_id}-dev\n"
+        f"        workload_ref: {workload_ref}\n"
         "      - name: prod\n"
         f"        namespace: {inp.namespace}\n"
         f"        app_label: {service_id}\n"
         f"        argo_app: {inp.project_id}-prod\n"
+        f"        workload_ref: {workload_ref}\n"
     )
     suffix = "" if existing_services_yaml.endswith("\n") else "\n"
     return existing_services_yaml + suffix + entry

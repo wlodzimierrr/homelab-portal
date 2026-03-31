@@ -72,14 +72,17 @@ class GitProvider(Protocol):
     ) -> GitPullRequest:
         """Open a pull request and return the minimal PR identity payload."""
 
+    def list_files(self, repo: str, branch: str, prefix: str = "") -> list[str]:
+        """List tracked blob paths on a branch, optionally filtered by path prefix."""
+
     def commit_to_branch(
         self,
         repo: str,
         branch: str,
-        files_dict: Mapping[str, str],
+        files_dict: Mapping[str, str | None],
         message: str,
     ) -> GitCommitResult:
-        """Write multiple file updates into one commit on an existing branch."""
+        """Write multiple file updates and deletions into one commit on an existing branch."""
 
     def close_pr(self, repo: str, pr_id: int) -> GitPullRequest:
         """Close a pull request by number and return the minimal PR identity payload."""
@@ -260,14 +263,55 @@ class GitHubGitProvider:
         response = self._request_json("POST", f"/repos/{repo}/pulls", payload=payload)
         return _coerce_pull_request(response)
 
+    def list_files(self, repo: str, branch: str, prefix: str = "") -> list[str]:
+        """List tracked blob paths from the branch tree, optionally filtered by prefix."""
+
+        if self._dry_run:
+            self._log_dry_run(
+                "list_files",
+                repo=repo,
+                branch=branch,
+                prefix=prefix,
+            )
+            return []
+
+        branch_ref = self._get_branch_ref(repo, branch)
+        head_commit = self._request_json("GET", f"/repos/{repo}/git/commits/{branch_ref['sha']}")
+        tree_sha = _extract_nested_str(head_commit, "tree", "sha")
+        if not tree_sha:
+            raise GitServiceError(f"GitHub did not return a tree SHA for branch {branch}.")
+
+        tree = self._request_json(
+            "GET",
+            f"/repos/{repo}/git/trees/{tree_sha}",
+            query={"recursive": "1"},
+        )
+        if not isinstance(tree, dict):
+            raise GitServiceError(f"GitHub returned an invalid tree payload for branch {branch}.")
+
+        normalized_prefix = prefix.strip().lstrip("/")
+        tree_entries = tree.get("tree")
+        if not isinstance(tree_entries, list):
+            raise GitServiceError(f"GitHub returned an invalid recursive tree for branch {branch}.")
+
+        paths = [
+            path
+            for item in tree_entries
+            if isinstance(item, dict)
+            and item.get("type") == "blob"
+            and isinstance(path := item.get("path"), str)
+            and (not normalized_prefix or path == normalized_prefix or path.startswith(f"{normalized_prefix}/"))
+        ]
+        return sorted(paths)
+
     def commit_to_branch(
         self,
         repo: str,
         branch: str,
-        files_dict: Mapping[str, str],
+        files_dict: Mapping[str, str | None],
         message: str,
     ) -> GitCommitResult:
-        """Create a single commit with multiple file updates and fast-forward the branch."""
+        """Create a single commit with multiple file updates and deletions."""
 
         if not files_dict:
             raise GitServiceError("commit_to_branch requires at least one file update.")
@@ -293,8 +337,19 @@ class GitHubGitProvider:
         if not base_tree_sha:
             raise GitServiceError(f"GitHub did not return a tree SHA for branch {branch}.")
 
-        tree_items: list[dict[str, str]] = []
+        tree_items: list[dict[str, str | None]] = []
         for file_path, content in files_dict.items():
+            if content is None:
+                tree_items.append(
+                    {
+                        "path": file_path,
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": None,
+                    }
+                )
+                continue
+
             blob = self._request_json(
                 "POST",
                 f"/repos/{repo}/git/blobs",
@@ -525,7 +580,13 @@ def open_pr(repo: str, from_branch: str, to_branch: str, title: str, description
     return build_default_git_provider().open_pr(repo, from_branch, to_branch, title, description)
 
 
-def commit_to_branch(repo: str, branch: str, files_dict: Mapping[str, str], message: str) -> GitCommitResult:
+def list_files(repo: str, branch: str, prefix: str = "") -> list[str]:
+    """List tracked files using the default configured Git service."""
+
+    return build_default_git_provider().list_files(repo, branch, prefix)
+
+
+def commit_to_branch(repo: str, branch: str, files_dict: Mapping[str, str | None], message: str) -> GitCommitResult:
     """Commit multiple files using the default configured Git service."""
 
     return build_default_git_provider().commit_to_branch(repo, branch, files_dict, message)

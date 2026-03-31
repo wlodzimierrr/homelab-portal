@@ -16,6 +16,9 @@ export interface NormalizedServiceCapabilities {
   configEnvs: SupportedEnvironment[]
   canEditPublicHostname: boolean
   canAdopt: boolean
+  canDelete: boolean
+  decommissionMode: 'standalone' | 'project-component' | 'unsupported'
+  decommissionReason: string | null
 }
 
 export const EMPTY_SERVICE_CAPABILITIES: NormalizedServiceCapabilities = {
@@ -27,6 +30,9 @@ export const EMPTY_SERVICE_CAPABILITIES: NormalizedServiceCapabilities = {
   configEnvs: [],
   canEditPublicHostname: false,
   canAdopt: true,
+  canDelete: false,
+  decommissionMode: 'unsupported',
+  decommissionReason: null,
 }
 
 export interface NormalizedServiceDetail {
@@ -111,6 +117,11 @@ export function normalizeServiceCapabilities(
     canEditPublicHostname:
       capabilities?.canEditPublicHostname ?? EMPTY_SERVICE_CAPABILITIES.canEditPublicHostname,
     canAdopt: capabilities?.canAdopt ?? !projectContext?.isLinked,
+    canDelete: capabilities?.canDelete ?? EMPTY_SERVICE_CAPABILITIES.canDelete,
+    decommissionMode:
+      capabilities?.decommissionMode ?? EMPTY_SERVICE_CAPABILITIES.decommissionMode,
+    decommissionReason:
+      capabilities?.decommissionReason ?? EMPTY_SERVICE_CAPABILITIES.decommissionReason,
   }
 }
 

@@ -21,6 +21,7 @@ from app.api.schemas.migration import (
     MigrationValidateResponse,
 )
 from app.api.schemas.scaffold import (
+    ServiceDecommissionResponse,
     ScaffoldPreviewResponse,
     ScaffoldProjectInfo,
     ScaffoldServiceRequest,
@@ -579,6 +580,16 @@ def scaffold_submit(
 
 def scaffold_list_projects() -> list[ScaffoldProjectInfo]:
     return _get_scaffold_admin_service().scaffold_list_projects()
+
+
+def decommission_service(
+    service_id: str,
+    _admin: str = Depends(require_admin),
+) -> ServiceDecommissionResponse:
+    return _get_scaffold_admin_service().decommission_service(
+        service_id=service_id,
+        admin_user=_admin,
+    )
 
 
 def adopt_service(

@@ -55,6 +55,7 @@ from app.api.schemas.migration import (
     MigrationValidateResponse,
 )
 from app.api.schemas.scaffold import (
+    ServiceDecommissionResponse,
     ScaffoldPreviewFile,
     ScaffoldPreviewResponse,
     ScaffoldProjectInfo,
@@ -68,6 +69,10 @@ from app.migration_consolidation import (
 )
 from app.migration_validation import validate_migration
 from app.service_onboarding_verification import ServiceOnboardingVerificationTarget
+
+WORKLOADS_APPPROJECT_PATH = "bootstrap/project-homelab.yaml"
+WORKLOADS_DEV_KUSTOMIZATION_PATH = "environments/dev/workloads/kustomization.yaml"
+WORKLOADS_PROD_KUSTOMIZATION_PATH = "environments/prod/workloads/kustomization.yaml"
 
 
 @dataclass(frozen=True)
@@ -88,6 +93,15 @@ class ScaffoldAdminServiceDeps:
     update_service_registry_sync_namespaces: Any
     verify_service_onboarding_targets: Any
     build_default_git_provider: Any
+
+
+@dataclass(frozen=True)
+class DecommissionPlan:
+    mode: str
+    project_id: str | None
+    service_name: str | None = None
+    workload_ref: str | None = None
+    reason: str | None = None
 
 
 class ScaffoldAdminService:
@@ -277,6 +291,198 @@ class ScaffoldAdminService:
         if isinstance(exc, GitServiceError):
             status_code = status.HTTP_404_NOT_FOUND if not_found_is_404 else status.HTTP_502_BAD_GATEWAY
             raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+    @staticmethod
+    def _load_services_catalog_entry(services_yaml_raw: str, service_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        import yaml as _yaml
+
+        data = _yaml.safe_load(services_yaml_raw)
+        if not isinstance(data, dict) or not isinstance(data.get("services"), list):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="services.yaml is empty or invalid.",
+            )
+
+        services = [svc for svc in data["services"] if isinstance(svc, dict)]
+        entry = next(
+            (svc for svc in services if str(svc.get("service_id") or "").strip() == service_id),
+            None,
+        )
+        if entry is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Service '{service_id}' not found in services.yaml.",
+            )
+
+        return entry, services
+
+    @staticmethod
+    def _remove_service_from_catalog(services_yaml_raw: str, service_id: str) -> str:
+        import yaml as _yaml
+
+        data = _yaml.safe_load(services_yaml_raw)
+        if not isinstance(data, dict) or not isinstance(data.get("services"), list):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="services.yaml is empty or invalid.",
+            )
+
+        filtered = [
+            svc
+            for svc in data["services"]
+            if not (
+                isinstance(svc, dict)
+                and str(svc.get("service_id") or "").strip() == service_id
+            )
+        ]
+        data["services"] = filtered
+        return _yaml.safe_dump(data, sort_keys=False)
+
+    @staticmethod
+    def _remove_resource_from_kustomization(kustomization_raw: str, resource_name: str) -> str:
+        import yaml as _yaml
+
+        data = _yaml.safe_load(kustomization_raw)
+        if not isinstance(data, dict):
+            return kustomization_raw
+
+        resources = data.get("resources")
+        if not isinstance(resources, list):
+            return kustomization_raw
+
+        filtered_resources = [
+            resource
+            for resource in resources
+            if str(resource).strip() != resource_name
+        ]
+        if filtered_resources == resources:
+            return kustomization_raw
+
+        data["resources"] = filtered_resources
+        return _yaml.safe_dump(data, sort_keys=False)
+
+    @staticmethod
+    def _remove_appproject_document(appproject_raw: str, service_id: str) -> str:
+        import yaml as _yaml
+
+        documents = list(_yaml.safe_load_all(appproject_raw))
+        filtered_documents = [
+            document
+            for document in documents
+            if not (
+                isinstance(document, dict)
+                and str(document.get("kind") or "").strip() == "AppProject"
+                and isinstance(document.get("metadata"), dict)
+                and str(document["metadata"].get("name") or "").strip() == service_id
+            )
+        ]
+        if filtered_documents == documents:
+            return appproject_raw
+        return _yaml.safe_dump_all(filtered_documents, sort_keys=False).rstrip() + "\n"
+
+    @staticmethod
+    def _remove_patch_from_kustomization(kustomization_raw: str, patch_name: str) -> str:
+        import yaml as _yaml
+
+        data = _yaml.safe_load(kustomization_raw)
+        if not isinstance(data, dict):
+            return kustomization_raw
+
+        patches = data.get("patches")
+        if not isinstance(patches, list):
+            return kustomization_raw
+
+        filtered_patches: list[Any] = []
+        changed = False
+        for patch in patches:
+            if isinstance(patch, str) and patch.strip() == patch_name:
+                changed = True
+                continue
+            if isinstance(patch, dict) and str(patch.get("path") or "").strip() == patch_name:
+                changed = True
+                continue
+            filtered_patches.append(patch)
+
+        if not changed:
+            return kustomization_raw
+
+        data["patches"] = filtered_patches
+        return _yaml.safe_dump(data, sort_keys=False)
+
+    @staticmethod
+    def _build_decommission_plan(service_id: str, entry: dict[str, Any]) -> DecommissionPlan:
+        project_id = str(entry.get("project_id") or "").strip() or None
+        is_self_owned = project_id is None or project_id == service_id
+        if is_self_owned:
+            return DecommissionPlan(mode="standalone", project_id=project_id)
+
+        if not project_id or not service_id.startswith(f"{project_id}-"):
+            return DecommissionPlan(
+                mode="unsupported",
+                project_id=project_id,
+                reason=(
+                    f"Service '{service_id}' is project-linked, but only scaffold-generated "
+                    "shared project components can be removed from Service Settings in this phase."
+                ),
+            )
+
+        service_name = service_id.removeprefix(f"{project_id}-").strip()
+        if service_name in {"frontend", "backend", "db"}:
+            return DecommissionPlan(
+                mode="unsupported",
+                project_id=project_id,
+                reason=(
+                    f"Service '{service_id}' is a bundle core component and cannot be removed "
+                    "individually from Service Settings in this phase."
+                ),
+            )
+
+        envs = entry.get("envs")
+        if not isinstance(envs, list) or not envs:
+            return DecommissionPlan(
+                mode="unsupported",
+                project_id=project_id,
+                reason=f"Service '{service_id}' is missing environment ownership metadata.",
+            )
+
+        workload_refs = {
+            str(env_row.get("workload_ref") or env_row.get("workloadRef") or "").strip()
+            for env_row in envs
+            if isinstance(env_row, dict)
+        }
+        workload_refs.discard("")
+        if len(workload_refs) != 1:
+            return DecommissionPlan(
+                mode="unsupported",
+                project_id=project_id,
+                reason=(
+                    f"Service '{service_id}' does not have a single deterministic workload_ref "
+                    "for safe project-component removal."
+                ),
+            )
+
+        workload_ref = next(iter(workload_refs))
+        expected_prefix = f"apps/{project_id}/base/"
+        valid_suffixes = {
+            f"{service_name}-deployment.yaml",
+            f"{service_name}-statefulset.yaml",
+        }
+        if not workload_ref.startswith(expected_prefix) or workload_ref.split("/")[-1] not in valid_suffixes:
+            return DecommissionPlan(
+                mode="unsupported",
+                project_id=project_id,
+                reason=(
+                    f"Service '{service_id}' is not using the scaffold-generated shared component "
+                    "ownership layout required for safe removal."
+                ),
+            )
+
+        return DecommissionPlan(
+            mode="project-component",
+            project_id=project_id,
+            service_name=service_name,
+            workload_ref=workload_ref,
+        )
 
     def get_service_config(
         self,
@@ -664,6 +870,220 @@ class ScaffoldAdminService:
             )
             for pid, info in sorted(projects.items())
         ]
+
+    def decommission_service(
+        self,
+        *,
+        service_id: str,
+        admin_user: str,
+    ) -> ServiceDecommissionResponse:
+        workloads_repo = self.deps.workloads_repo_slug()
+        base_branch = self.deps.workloads_base_branch()
+
+        try:
+            git_provider = self.deps.build_default_git_provider()
+            services_yaml_raw = git_provider.read_file(
+                workloads_repo,
+                base_branch,
+                self.deps.workloads_catalog_path,
+            )
+            tracked_files = set(git_provider.list_files(workloads_repo, base_branch))
+        except Exception as exc:
+            self._raise_git_service_http_exception(exc, not_found_is_404=True)
+            raise
+
+        entry, _services = self._load_services_catalog_entry(services_yaml_raw, service_id)
+        plan = self._build_decommission_plan(service_id, entry)
+        project_id = plan.project_id
+        if plan.mode == "unsupported":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=plan.reason or f"Service '{service_id}' cannot be decommissioned safely.",
+            )
+
+        file_changes: dict[str, str | None] = {}
+        updated_services_yaml = self._remove_service_from_catalog(services_yaml_raw, service_id)
+        file_changes[self.deps.workloads_catalog_path] = updated_services_yaml
+
+        if plan.mode == "standalone":
+            env_manifest_name = f"{service_id}-app.yaml"
+            for kustomization_path in (WORKLOADS_DEV_KUSTOMIZATION_PATH, WORKLOADS_PROD_KUSTOMIZATION_PATH):
+                if kustomization_path not in tracked_files:
+                    continue
+                try:
+                    raw_kustomization = git_provider.read_file(workloads_repo, base_branch, kustomization_path)
+                except Exception as exc:
+                    self._raise_git_service_http_exception(exc, not_found_is_404=True)
+                    raise
+                updated_kustomization = self._remove_resource_from_kustomization(
+                    raw_kustomization,
+                    env_manifest_name,
+                )
+                if updated_kustomization != raw_kustomization:
+                    file_changes[kustomization_path] = updated_kustomization
+
+            for manifest_path in (
+                f"environments/dev/workloads/{env_manifest_name}",
+                f"environments/prod/workloads/{env_manifest_name}",
+            ):
+                if manifest_path in tracked_files:
+                    file_changes[manifest_path] = None
+
+            appproject_path = WORKLOADS_APPPROJECT_PATH
+            if appproject_path in tracked_files:
+                try:
+                    appproject_raw = git_provider.read_file(workloads_repo, base_branch, appproject_path)
+                except Exception as exc:
+                    self._raise_git_service_http_exception(exc, not_found_is_404=True)
+                    raise
+                updated_appproject = self._remove_appproject_document(appproject_raw, service_id)
+                if updated_appproject != appproject_raw:
+                    file_changes[appproject_path] = updated_appproject
+
+            service_prefix = f"apps/{service_id}"
+            for path in sorted(
+                tracked_path for tracked_path in tracked_files if tracked_path == service_prefix or tracked_path.startswith(f"{service_prefix}/")
+            ):
+                file_changes[path] = None
+        else:
+            assert plan.mode == "project-component"
+            assert project_id is not None
+            assert plan.service_name is not None
+            assert plan.workload_ref is not None
+
+            base_kustomization_path = f"apps/{project_id}/base/kustomization.yaml"
+            if base_kustomization_path in tracked_files:
+                try:
+                    base_kustomization_raw = git_provider.read_file(workloads_repo, base_branch, base_kustomization_path)
+                except Exception as exc:
+                    self._raise_git_service_http_exception(exc, not_found_is_404=True)
+                    raise
+                updated_base_kustomization = base_kustomization_raw
+
+                base_manifest_candidates = [
+                    f"serviceaccount-{plan.service_name}.yaml",
+                    f"{plan.service_name}-service.yaml",
+                    f"servicemonitor-{plan.service_name}.yaml",
+                    f"{plan.service_name}-deployment.yaml",
+                    f"{plan.service_name}-statefulset.yaml",
+                    f"{plan.service_name}-credentials-secret.yaml",
+                ]
+                for resource_name in base_manifest_candidates:
+                    updated_base_kustomization = self._remove_resource_from_kustomization(
+                        updated_base_kustomization,
+                        resource_name,
+                    )
+                if updated_base_kustomization != base_kustomization_raw:
+                    file_changes[base_kustomization_path] = updated_base_kustomization
+
+            for owned_path in (
+                f"apps/{project_id}/base/serviceaccount-{plan.service_name}.yaml",
+                f"apps/{project_id}/base/{plan.service_name}-service.yaml",
+                f"apps/{project_id}/base/servicemonitor-{plan.service_name}.yaml",
+                f"apps/{project_id}/base/{plan.service_name}-deployment.yaml",
+                f"apps/{project_id}/base/{plan.service_name}-statefulset.yaml",
+                f"apps/{project_id}/base/{plan.service_name}-credentials-secret.yaml",
+            ):
+                if owned_path in tracked_files:
+                    file_changes[owned_path] = None
+
+            patch_name = f"patch-{plan.service_name}-deployment.yaml"
+            for env_name in ("dev", "prod"):
+                overlay_kustomization_path = f"apps/{project_id}/envs/{env_name}/kustomization.yaml"
+                if overlay_kustomization_path in tracked_files:
+                    try:
+                        overlay_raw = git_provider.read_file(workloads_repo, base_branch, overlay_kustomization_path)
+                    except Exception as exc:
+                        self._raise_git_service_http_exception(exc, not_found_is_404=True)
+                        raise
+                    updated_overlay = self._remove_patch_from_kustomization(overlay_raw, patch_name)
+                    if updated_overlay != overlay_raw:
+                        file_changes[overlay_kustomization_path] = updated_overlay
+
+                patch_path = f"apps/{project_id}/envs/{env_name}/{patch_name}"
+                if patch_path in tracked_files:
+                    file_changes[patch_path] = None
+
+        updated_paths = sorted(path for path, content in file_changes.items() if content is not None)
+        removed_paths = sorted(path for path, content in file_changes.items() if content is None)
+
+        initiated_at = datetime.now(tz=timezone.utc)
+        timestamp = initiated_at.strftime("%Y%m%d-%H%M%S")
+        branch_name = f"decommission/{service_id}-{timestamp}"
+        if plan.mode == "standalone":
+            pr_title = f"chore(decommission): remove {service_id} from workloads"
+            pr_body = (
+                f"## Service decommission: {service_id}\n\n"
+                f"This PR removes the service from platform-managed GitOps state.\n\n"
+                f"### Managed state removed after merge\n"
+                f"- service catalog entry in `{self.deps.workloads_catalog_path}`\n"
+                f"- Argo Application manifests for `{service_id}`\n"
+                f"- app manifests under `apps/{service_id}`\n"
+                f"- AppProject entry for `{service_id}` when self-owned\n\n"
+                f"### Not removed in v1\n"
+                f"- source repository\n"
+                f"- GHCR package/images\n"
+                f"- unrelated shared-project resources\n\n"
+                f"After merge, Argo should prune the workloads-managed cluster resources for this service.\n"
+            )
+            success_message = (
+                "Decommission pull request created. After merge, workloads/catalog state will be "
+                "removed and Argo can prune the service resources. Source repos and image "
+                "artifacts are untouched in v1."
+            )
+        else:
+            pr_title = f"chore(decommission): remove {service_id} from project {project_id}"
+            pr_body = (
+                f"## Remove project component: {service_id}\n\n"
+                f"This PR removes only the service-specific manifests for `{service_id}` from the shared project `{project_id}`.\n\n"
+                f"### Managed state removed after merge\n"
+                f"- service catalog entry in `{self.deps.workloads_catalog_path}`\n"
+                f"- component-owned manifests under `apps/{project_id}`\n"
+                f"- component-owned overlay patch files and references\n\n"
+                f"### Preserved\n"
+                f"- shared Argo Application manifests\n"
+                f"- shared AppProject\n"
+                f"- project namespace\n"
+                f"- sibling services\n"
+                f"- shared ingress/auth/network-policy/generator resources\n"
+                f"- source repository\n"
+                f"- GHCR package/images\n"
+            )
+            success_message = (
+                "Project component removal pull request created. After merge, only this service will "
+                "be removed from the shared project. The project, namespace, sibling services, source "
+                "repo, and image artifacts are preserved."
+            )
+
+        try:
+            git_provider.create_branch(workloads_repo, base_branch, branch_name)
+            git_provider.commit_to_branch(
+                workloads_repo,
+                branch_name,
+                file_changes,
+                f"chore(decommission): remove {service_id} from workloads",
+            )
+            pr = git_provider.open_pr(workloads_repo, branch_name, base_branch, pr_title, pr_body)
+        except Exception as exc:
+            self._raise_git_service_http_exception(exc)
+            raise
+
+        return ServiceDecommissionResponse(
+            status="accepted",
+            serviceId=service_id,
+            projectId=project_id,
+            requestedBy=admin_user,
+            repository=workloads_repo,
+            baseBranch=base_branch,
+            branchName=branch_name,
+            prUrl=pr["url"],
+            prNumber=pr["number"],
+            updatedPaths=updated_paths,
+            removedPaths=removed_paths,
+            preservedArtifacts=["source-repository", "ghcr-package"],
+            message=success_message,
+            initiatedAt=initiated_at.isoformat(),
+        )
 
     def update_service_public_hostname(
         self,
