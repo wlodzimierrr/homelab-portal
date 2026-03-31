@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.schemas.onboarding import ServiceOnboardingVerification
+
 
 class ScaffoldServiceRequest(BaseModel):
     name: str
@@ -59,5 +61,9 @@ class ScaffoldSubmitResponse(BaseModel):
     branch_name: str = Field(alias="branchName")
     files_committed: list[str] = Field(alias="filesCommitted")
     initiated_at: str = Field(alias="initiatedAt")
+    deployment_verification: list[ServiceOnboardingVerification] = Field(
+        alias="deploymentVerification",
+        default_factory=list,
+    )
 
     model_config = ConfigDict(populate_by_name=True)

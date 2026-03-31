@@ -47,6 +47,7 @@ from app.services.composition import (
 from app.services.observability_service import ObservabilityService
 from app.services.scaffold_admin_service import ScaffoldAdminService
 from app.services.startup_jobs import register_deployment_reconciler_jobs
+from app.service_onboarding_verification import build_service_onboarding_verifications
 
 # --- schema re-exports -------------------------------------------------------
 # Route modules and tests resolve response model classes through `app.main.*`.
@@ -709,6 +710,7 @@ def _build_scaffold_admin_service() -> ScaffoldAdminService:
         workloads_catalog_path=WORKLOADS_CATALOG_PATH,
         workloads_catalog_sync_cronjob_path=WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
         update_service_registry_sync_namespaces=update_service_registry_sync_namespaces,
+        verify_service_onboarding_targets=build_service_onboarding_verifications,
         build_default_git_provider=build_default_git_provider,
     )
 

@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.schemas.onboarding import ServiceOnboardingVerification
+
 
 class AdoptServiceRequest(BaseModel):
     project_id: str = Field(alias="projectId", min_length=1)
@@ -16,6 +18,10 @@ class AdoptServiceResponse(BaseModel):
     pr_url: str | None = Field(default=None, alias="prUrl")
     pr_number: int | None = Field(default=None, alias="prNumber")
     message: str
+    deployment_verification: list[ServiceOnboardingVerification] = Field(
+        alias="deploymentVerification",
+        default_factory=list,
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 

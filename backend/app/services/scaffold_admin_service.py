@@ -61,11 +61,13 @@ from app.api.schemas.scaffold import (
     ScaffoldServiceRequest,
     ScaffoldSubmitResponse,
 )
+from app.api.schemas.onboarding import ServiceOnboardingVerification
 from app.migration_consolidation import (
     generate_consolidation_changes,
     update_services_yaml_project_id,
 )
 from app.migration_validation import validate_migration
+from app.service_onboarding_verification import ServiceOnboardingVerificationTarget
 
 
 @dataclass(frozen=True)
@@ -84,12 +86,185 @@ class ScaffoldAdminServiceDeps:
     workloads_catalog_path: str
     workloads_catalog_sync_cronjob_path: str
     update_service_registry_sync_namespaces: Any
+    verify_service_onboarding_targets: Any
     build_default_git_provider: Any
 
 
 class ScaffoldAdminService:
     def __init__(self, deps: ScaffoldAdminServiceDeps) -> None:
         self.deps = deps
+
+    @staticmethod
+    def _workload_kind_for_template(template: str) -> str:
+        return "statefulset" if template in {"postgres", "mysql"} else "deployment"
+
+    def _build_scaffold_verification_targets(
+        self,
+        *,
+        payload: ScaffoldServiceRequest,
+    ) -> list[ServiceOnboardingVerificationTarget]:
+        name = payload.name.strip().lower()
+        namespace = payload.namespace.strip() or name
+
+        if payload.mode == "add-to-project":
+            project_id = payload.project_id.strip().lower()
+            service_name = payload.service_name.strip().lower()
+            service_id = f"{project_id}-{service_name}"
+            return [
+                ServiceOnboardingVerificationTarget(
+                    service_id=service_id,
+                    namespace=payload.namespace.strip() or project_id,
+                    argo_application=f"{project_id}-dev",
+                    workload_kind=self._workload_kind_for_template(payload.template),
+                    workload_name=service_id,
+                    service_name=service_id,
+                    workloads_declared=True,
+                    declaration_source="generated workloads PR changes",
+                )
+            ]
+
+        if payload.topology == "frontend-backend":
+            return [
+                ServiceOnboardingVerificationTarget(
+                    service_id=f"{name}-frontend",
+                    namespace=namespace,
+                    argo_application=f"{name}-dev",
+                    workload_kind="deployment",
+                    workload_name=f"{name}-frontend",
+                    service_name=f"{name}-frontend",
+                    workloads_declared=True,
+                    declaration_source="generated workloads PR changes",
+                ),
+                ServiceOnboardingVerificationTarget(
+                    service_id=f"{name}-backend",
+                    namespace=namespace,
+                    argo_application=f"{name}-dev",
+                    workload_kind="deployment",
+                    workload_name=f"{name}-backend",
+                    service_name=f"{name}-backend",
+                    workloads_declared=True,
+                    declaration_source="generated workloads PR changes",
+                ),
+            ]
+
+        if payload.topology == "frontend-backend-db":
+            targets = self._build_scaffold_verification_targets(
+                payload=payload.model_copy(update={"topology": "frontend-backend"})
+            )
+            targets.append(
+                ServiceOnboardingVerificationTarget(
+                    service_id=f"{name}-db",
+                    namespace=namespace,
+                    argo_application=f"{name}-dev",
+                    workload_kind="statefulset",
+                    workload_name=f"{name}-db",
+                    service_name=f"{name}-db",
+                    workloads_declared=True,
+                    declaration_source="generated workloads PR changes",
+                )
+            )
+            return targets
+
+        return [
+            ServiceOnboardingVerificationTarget(
+                service_id=name,
+                namespace=namespace,
+                argo_application=f"{name}-prod" if payload.template in {"postgres", "mysql"} else f"{name}-dev",
+                workload_kind=self._workload_kind_for_template(payload.template),
+                workload_name=name,
+                service_name=name,
+                workloads_declared=True,
+                declaration_source="generated workloads PR changes",
+            )
+        ]
+
+    def _build_adoption_verification_targets(
+        self,
+        *,
+        service_id: str,
+        entry: dict[str, Any],
+    ) -> list[ServiceOnboardingVerificationTarget]:
+        envs = entry.get("envs", [])
+        selected_env: dict[str, Any] | None = None
+        if isinstance(envs, list):
+            for env_row in envs:
+                if isinstance(env_row, dict) and str(env_row.get("name") or "").strip() == "dev":
+                    selected_env = env_row
+                    break
+            if selected_env is None:
+                selected_env = next((env_row for env_row in envs if isinstance(env_row, dict)), None)
+
+        namespace = str(selected_env.get("namespace") or service_id).strip() if selected_env else service_id
+        argo_app_name = (
+            str(selected_env.get("argo_app") or "").strip() if selected_env else ""
+        ) or f"{service_id}-dev"
+
+        return [
+            ServiceOnboardingVerificationTarget(
+                service_id=service_id,
+                namespace=namespace,
+                argo_application=argo_app_name,
+                workload_kind="deployment",
+                workload_name=service_id,
+                service_name=service_id,
+                workloads_declared=True,
+                declaration_source="existing workloads catalog entry",
+            )
+        ]
+
+    def _verify_targets(
+        self,
+        targets: list[ServiceOnboardingVerificationTarget],
+    ) -> list[ServiceOnboardingVerification]:
+        try:
+            return self.deps.verify_service_onboarding_targets(targets)
+        except Exception as exc:
+            return [
+                ServiceOnboardingVerification(
+                    serviceId=target.service_id,
+                    namespace=target.namespace,
+                    argoApplication=target.argo_application,
+                    workloadKind=target.workload_kind,
+                    workloadName=target.workload_name or target.service_id,
+                    serviceName=target.service_name or target.service_id,
+                    overallStatus="verification_unavailable",
+                    summary="Live cluster verification is unavailable right now.",
+                    checks=[
+                        {
+                            "name": "workloadsDeclaration",
+                            "status": "present" if target.workloads_declared else "missing",
+                            "detail": (
+                                f"Service is declared via {target.declaration_source}."
+                                if target.workloads_declared
+                                else "Service is not declared in workloads yet."
+                            ),
+                        },
+                        {
+                            "name": "argoApplication",
+                            "status": "unknown",
+                            "detail": f"Argo Application could not be verified: {exc}",
+                        },
+                        {
+                            "name": "namespace",
+                            "status": "unknown",
+                            "detail": f"Namespace could not be verified: {exc}",
+                        },
+                        {
+                            "name": "deployment"
+                            if target.workload_kind == "deployment"
+                            else "statefulset",
+                            "status": "unknown",
+                            "detail": f"Workload could not be verified: {exc}",
+                        },
+                        {
+                            "name": "service",
+                            "status": "unknown",
+                            "detail": f"Service could not be verified: {exc}",
+                        },
+                    ],
+                )
+                for target in targets
+            ]
 
     @staticmethod
     def _raise_git_service_http_exception(exc: Exception, *, not_found_is_404: bool = False) -> None:
@@ -428,12 +603,17 @@ class ScaffoldAdminService:
             self._raise_git_service_http_exception(exc)
             raise
 
+        deployment_verification = self._verify_targets(
+            self._build_scaffold_verification_targets(payload=payload)
+        )
+
         return ScaffoldSubmitResponse(
             prUrl=pr["url"],
             prNumber=pr["number"],
             branchName=branch_name,
             filesCommitted=sorted(all_files),
             initiatedAt=initiated_at.isoformat(),
+            deploymentVerification=deployment_verification,
         )
 
     def scaffold_list_projects(self) -> list[ScaffoldProjectInfo]:
@@ -609,6 +789,9 @@ class ScaffoldAdminService:
                 serviceId=service_id,
                 projectId=project_id,
                 message=f"Service '{service_id}' is already linked to project '{project_id}'.",
+                deploymentVerification=self._verify_targets(
+                    self._build_adoption_verification_targets(service_id=service_id, entry=entry)
+                ),
             )
 
         try:
@@ -672,6 +855,9 @@ class ScaffoldAdminService:
             prUrl=pr["url"],
             prNumber=pr["number"],
             message=f"PR created to link '{service_id}' to project '{project_id}'.",
+            deploymentVerification=self._verify_targets(
+                self._build_adoption_verification_targets(service_id=service_id, entry=entry)
+            ),
         )
 
     def validate_migration(
