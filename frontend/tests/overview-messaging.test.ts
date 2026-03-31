@@ -15,6 +15,9 @@ const emptyCapabilities: NormalizedServiceCapabilities = {
   configEnvs: [],
   canEditPublicHostname: false,
   canAdopt: true,
+  canDelete: false,
+  decommissionMode: 'unsupported',
+  decommissionReason: null,
 }
 
 function createMetrics(overrides: Partial<Parameters<typeof buildOverviewMetricsCoverageMessage>[0]['metrics']> = {}) {

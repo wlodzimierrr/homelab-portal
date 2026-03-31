@@ -6,6 +6,8 @@ import type {
 } from '@/lib/api/admin'
 import { AdminControlsSection } from '@/features/service-details/components/admin-controls-section'
 import { AdoptServiceSection } from './adopt-service-section'
+import { DecommissionServiceSection } from './decommission-service-section'
+import type { ServiceDecommissionResponse } from '@/lib/api'
 
 interface ServiceSettingsSectionsProps {
   configSupported: boolean
@@ -36,6 +38,15 @@ interface ServiceSettingsSectionsProps {
   adoptError: string
   adoptResult: { status: string; message: string; prUrl?: string } | null
   onSubmitAdopt: () => void
+  decommissionMode: 'standalone' | 'project-component' | 'unsupported'
+  decommissionReason: string | null
+  decommissionConfirmation: string
+  setDecommissionConfirmation: (value: string) => void
+  decommissionSubmitting: boolean
+  decommissionError: string
+  decommissionResult: ServiceDecommissionResponse | null
+  onSubmitDecommission: () => void
+  serviceId: string
 }
 
 export function ServiceSettingsSections({
@@ -67,6 +78,15 @@ export function ServiceSettingsSections({
   adoptError,
   adoptResult,
   onSubmitAdopt,
+  decommissionMode,
+  decommissionReason,
+  decommissionConfirmation,
+  setDecommissionConfirmation,
+  decommissionSubmitting,
+  decommissionError,
+  decommissionResult,
+  onSubmitDecommission,
+  serviceId,
 }: ServiceSettingsSectionsProps) {
   return (
     <>
@@ -104,6 +124,18 @@ export function ServiceSettingsSections({
           onSubmit={onSubmitAdopt}
         />
       ) : null}
+
+      <DecommissionServiceSection
+        serviceId={serviceId}
+        mode={decommissionMode}
+        reason={decommissionReason}
+        confirmationValue={decommissionConfirmation}
+        setConfirmationValue={setDecommissionConfirmation}
+        submitting={decommissionSubmitting}
+        error={decommissionError}
+        result={decommissionResult}
+        onSubmit={onSubmitDecommission}
+      />
     </>
   )
 }

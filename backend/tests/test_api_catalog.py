@@ -399,8 +399,210 @@ def test_service_detail_returns_cluster_backed_row(client, monkeypatch) -> None:
             "configEnvs": [],
             "canEditPublicHostname": True,
             "canAdopt": True,
+            "canDelete": True,
+            "decommissionMode": "standalone",
+            "decommissionReason": None,
         },
     }
+
+
+def test_service_detail_blocks_delete_for_project_linked_service(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_project_catalog_rows",
+        lambda env=None, project_id=None: (
+            []
+            if project_id == "oauth2-proxy"
+            else [
+                {
+                    "project_id": "homelab-web",
+                    "project_name": "Homelab Web",
+                    "env": "dev",
+                    "namespace": "homelab-web",
+                    "app_label": "homelab-web",
+                    "observability_mode": "no-http",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_catalog_rows",
+        lambda env=None, service_id=None: [
+            {
+                "service_id": "oauth2-proxy",
+                "service_name": "oauth2-proxy",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "oauth2-proxy",
+                "argo_app_name": "homelab-web-dev",
+                "project_id": "homelab-web",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "oauth2-proxy",
+                "service_name": "oauth2-proxy",
+                "env": "dev",
+                "namespace": "homelab-web",
+                "app_label": "oauth2-proxy",
+                "argo_app_name": "homelab-web-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": None,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_release_rows_for_service", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
+    monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
+
+    response = client.get(
+        "/services/oauth2-proxy",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["projectContext"]["projectId"] == "homelab-web"
+    assert body["capabilities"]["canAdopt"] is False
+    assert body["capabilities"]["canDelete"] is False
+    assert body["capabilities"]["decommissionMode"] == "unsupported"
+    assert "manually managed shared services" in body["capabilities"]["decommissionReason"]
+
+
+def test_service_detail_allows_project_component_decommission_for_scaffold_generated_shared_service(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_project_catalog_rows",
+        lambda env=None, project_id=None: (
+            []
+            if project_id == "portal-project-worker"
+            else [
+                {
+                    "project_id": "portal-project",
+                    "project_name": "Portal Project",
+                    "env": "dev",
+                    "namespace": "portal-project",
+                    "app_label": "portal-project",
+                    "observability_mode": "ingress-derived",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_catalog_rows",
+        lambda env=None, service_id=None: [
+            {
+                "service_id": "portal-project-worker",
+                "service_name": "portal-project-worker",
+                "env": "dev",
+                "namespace": "portal-project",
+                "app_label": "portal-project-worker",
+                "argo_app_name": "portal-project-dev",
+                "project_id": "portal-project",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "portal-project-worker",
+                "service_name": "portal-project-worker",
+                "env": "dev",
+                "namespace": "portal-project",
+                "app_label": "portal-project-worker",
+                "argo_app_name": "portal-project-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": None,
+                "project_id": "portal-project",
+            }
+        ],
+    )
+    monkeypatch.setattr("app.main._load_release_rows_for_service", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
+    monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
+
+    response = client.get(
+        "/services/portal-project-worker",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["projectContext"]["projectId"] == "portal-project"
+    assert body["capabilities"]["canDelete"] is True
+    assert body["capabilities"]["decommissionMode"] == "project-component"
+    assert "preserving the project and sibling services" in body["capabilities"]["decommissionReason"]
+
+
+def test_service_detail_blocks_bundle_core_component_decommission(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main._load_project_catalog_rows",
+        lambda env=None, project_id=None: (
+            []
+            if project_id == "portal-project-frontend"
+            else [
+                {
+                    "project_id": "portal-project",
+                    "project_name": "Portal Project",
+                    "env": "dev",
+                    "namespace": "portal-project",
+                    "app_label": "portal-project",
+                    "observability_mode": "ingress-derived",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_catalog_rows",
+        lambda env=None, service_id=None: [
+            {
+                "service_id": "portal-project-frontend",
+                "service_name": "portal-project-frontend",
+                "env": "dev",
+                "namespace": "portal-project",
+                "app_label": "portal-project-frontend",
+                "argo_app_name": "portal-project-dev",
+                "project_id": "portal-project",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.main._load_service_rows",
+        lambda **_kwargs: [
+            {
+                "service_id": "portal-project-frontend",
+                "service_name": "portal-project-frontend",
+                "env": "dev",
+                "namespace": "portal-project",
+                "app_label": "portal-project-frontend",
+                "argo_app_name": "portal-project-dev",
+                "source": "cluster_services",
+                "source_ref": "kubernetes_api",
+                "last_synced_at": None,
+                "project_id": "portal-project",
+            }
+        ],
+    )
+    monkeypatch.setattr("app.main._load_release_rows_for_service", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.main._load_live_service_runtime_rows", lambda _row: [])
+    monkeypatch.setattr("app.main._get_active_deployment_lock", lambda *_args, **_kwargs: None)
+
+    response = client.get(
+        "/services/portal-project-frontend",
+        headers={"Authorization": "Bearer dev-static-token"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["capabilities"]["canDelete"] is False
+    assert body["capabilities"]["decommissionMode"] == "unsupported"
+    assert "Bundle core components" in body["capabilities"]["decommissionReason"]
 
 
 def test_catalog_reconciliation_returns_join_rows(client, monkeypatch) -> None:

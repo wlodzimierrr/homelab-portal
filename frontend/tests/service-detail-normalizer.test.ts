@@ -26,6 +26,9 @@ test('normalizeServiceDetail prefers backend project context and capabilities wh
         configEnvs: [],
         canEditPublicHostname: false,
         canAdopt: false,
+        canDelete: false,
+        decommissionMode: 'unsupported',
+        decommissionReason: 'Shared service',
       },
     },
     catalogRow: {
@@ -57,6 +60,9 @@ test('normalizeServiceDetail prefers backend project context and capabilities wh
   assert.deepEqual(normalized.capabilities.configEnvs, [])
   assert.equal(normalized.capabilities.canEditPublicHostname, false)
   assert.equal(normalized.capabilities.canAdopt, false)
+  assert.equal(normalized.capabilities.canDelete, false)
+  assert.equal(normalized.capabilities.decommissionMode, 'unsupported')
+  assert.equal(normalized.capabilities.decommissionReason, 'Shared service')
 })
 
 test('normalizeServiceDetail still falls back to catalog project context when backend projectContext is absent', () => {
@@ -91,6 +97,9 @@ test('normalizeServiceDetail still falls back to catalog project context when ba
   assert.deepEqual(normalized.capabilities.configEnvs, [])
   assert.equal(normalized.capabilities.canEditPublicHostname, false)
   assert.equal(normalized.capabilities.canAdopt, false)
+  assert.equal(normalized.capabilities.canDelete, false)
+  assert.equal(normalized.capabilities.decommissionMode, 'unsupported')
+  assert.equal(normalized.capabilities.decommissionReason, null)
 })
 
 test('normalizeServiceCapabilities keeps adopt fallback permissive when project context is absent', () => {
@@ -102,6 +111,9 @@ test('normalizeServiceCapabilities keeps adopt fallback permissive when project 
   assert.equal(normalized.canEditConfig, false)
   assert.equal(normalized.canEditPublicHostname, false)
   assert.equal(normalized.canAdopt, true)
+  assert.equal(normalized.canDelete, false)
+  assert.equal(normalized.decommissionMode, 'unsupported')
+  assert.equal(normalized.decommissionReason, null)
 })
 
 test('normalizeServiceProjectContext returns null when neither backend nor catalog context exists', () => {

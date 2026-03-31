@@ -8,6 +8,8 @@ from app.api.schemas.onboarding import ServiceOnboardingVerification
 from app.api.schemas.migration import AdoptServiceRequest
 from app.api.schemas.scaffold import ScaffoldServiceRequest
 from app.services.scaffold_admin_service import ScaffoldAdminService, ScaffoldAdminServiceDeps
+from fastapi import HTTPException
+import pytest
 
 
 _CATALOG_SYNC_CRONJOB = """
@@ -440,3 +442,409 @@ services:
         captured["commit"]["files"]["apps/homelab-api/base/catalog-sync-cronjob.yaml"],
         "demo-space",
     )["covered"] is True
+
+
+def test_decommission_service_creates_pr_for_self_owned_service() -> None:
+    captured: dict[str, object] = {}
+    services_yaml = """
+services:
+  - service_id: demo
+    name: Demo
+    envs:
+      - name: dev
+        namespace: demo
+        argo_app: demo-dev
+      - name: prod
+        namespace: demo
+        argo_app: demo-prod
+""".lstrip()
+    project_homelab = """
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: demo
+  namespace: argocd
+spec:
+  description: demo resources
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: keep-me
+  namespace: argocd
+spec:
+  description: keep me
+""".lstrip()
+    dev_kustomization = "resources:\n- homelab-api-app.yaml\n- demo-app.yaml\n"
+    prod_kustomization = "resources:\n- demo-app.yaml\n"
+
+    class _FakeGitProvider:
+        def read_file(self, _repo, _branch, file_path):
+            return {
+                "services.yaml": services_yaml,
+                "bootstrap/project-homelab.yaml": project_homelab,
+                "environments/dev/workloads/kustomization.yaml": dev_kustomization,
+                "environments/prod/workloads/kustomization.yaml": prod_kustomization,
+            }[file_path]
+
+        def list_files(self, _repo, _branch, prefix=""):
+            files = [
+                "services.yaml",
+                "bootstrap/project-homelab.yaml",
+                "environments/dev/workloads/kustomization.yaml",
+                "environments/prod/workloads/kustomization.yaml",
+                "environments/dev/workloads/demo-app.yaml",
+                "environments/prod/workloads/demo-app.yaml",
+                "apps/demo/base/kustomization.yaml",
+                "apps/demo/base/deployment.yaml",
+                "apps/demo/base/service.yaml",
+            ]
+            normalized = prefix.strip().lstrip("/")
+            if not normalized:
+                return files
+            return [path for path in files if path == normalized or path.startswith(f"{normalized}/")]
+
+        def create_branch(self, repo, from_branch, new_branch):
+            captured["create_branch"] = (repo, from_branch, new_branch)
+            return {"branch": new_branch}
+
+        def commit_to_branch(self, repo, branch, files_dict, message):
+            captured["commit"] = {
+                "repo": repo,
+                "branch": branch,
+                "files": dict(files_dict),
+                "message": message,
+            }
+            return {"branch": branch}
+
+        def open_pr(self, repo, from_branch, to_branch, title, description):
+            captured["pr"] = {
+                "repo": repo,
+                "from_branch": from_branch,
+                "to_branch": to_branch,
+                "title": title,
+                "description": description,
+            }
+            return {
+                "number": 42,
+                "url": "https://github.com/example/homelab-workloads/pull/42",
+            }
+
+    service = ScaffoldAdminService(
+        ScaffoldAdminServiceDeps(
+            workloads_repo_slug=lambda: "wlodzimierrr/homelab-workloads",
+            workloads_base_branch=lambda: "main",
+            build_config_edit_branch_name=None,
+            build_config_edit_pr_body=None,
+            build_secret_edit_branch_name=None,
+            build_secret_edit_pr_body=None,
+            generate_scaffold_files_and_updates=None,
+            read_current_public_host_from_services_yaml=None,
+            read_current_host_from_patch_ingress=None,
+            update_services_yaml_public_host=None,
+            update_patch_ingress_host=None,
+            workloads_catalog_path="services.yaml",
+            workloads_catalog_sync_cronjob_path="apps/homelab-api/base/catalog-sync-cronjob.yaml",
+            update_service_registry_sync_namespaces=update_service_registry_sync_namespaces,
+            verify_service_onboarding_targets=lambda targets: _sample_verification(
+                targets[0].service_id,
+                targets[0].namespace,
+                targets[0].argo_application,
+            ),
+            build_default_git_provider=lambda: _FakeGitProvider(),
+        ),
+    )
+
+    response = service.decommission_service(service_id="demo", admin_user="alice")
+
+    assert response.status == "accepted"
+    assert response.service_id == "demo"
+    assert response.requested_by == "alice"
+    assert response.pr_number == 42
+    assert response.project_id is None
+    assert response.preserved_artifacts == ["source-repository", "ghcr-package"]
+    assert "Argo can prune the service resources" in response.message
+    assert captured["pr"]["title"] == "chore(decommission): remove demo from workloads"
+    assert "Not removed in v1" in captured["pr"]["description"]
+    assert captured["commit"]["message"] == "chore(decommission): remove demo from workloads"
+    assert "service_id: demo" not in captured["commit"]["files"]["services.yaml"]
+    assert "demo-app.yaml" not in captured["commit"]["files"]["environments/dev/workloads/kustomization.yaml"]
+    assert "demo-app.yaml" not in captured["commit"]["files"]["environments/prod/workloads/kustomization.yaml"]
+    assert "name: demo" not in captured["commit"]["files"]["bootstrap/project-homelab.yaml"]
+    assert captured["commit"]["files"]["environments/dev/workloads/demo-app.yaml"] is None
+    assert captured["commit"]["files"]["environments/prod/workloads/demo-app.yaml"] is None
+    assert captured["commit"]["files"]["apps/demo/base/kustomization.yaml"] is None
+    assert captured["commit"]["files"]["apps/demo/base/deployment.yaml"] is None
+    assert captured["commit"]["files"]["apps/demo/base/service.yaml"] is None
+    assert "bootstrap/project-homelab.yaml" in response.updated_paths
+    assert "services.yaml" in response.updated_paths
+    assert "apps/demo/base/deployment.yaml" in response.removed_paths
+    assert "environments/dev/workloads/demo-app.yaml" in response.removed_paths
+
+
+def test_decommission_service_rejects_project_linked_service() -> None:
+    services_yaml = """
+services:
+  - service_id: oauth2-proxy
+    project_id: homelab-web
+    name: OAuth2 Proxy
+    envs:
+      - name: dev
+        namespace: homelab-web
+        argo_app: homelab-web-dev
+""".lstrip()
+
+    class _FakeGitProvider:
+        def read_file(self, _repo, _branch, file_path):
+            assert file_path == "services.yaml"
+            return services_yaml
+
+        def list_files(self, _repo, _branch, prefix=""):
+            return ["services.yaml"]
+
+    service = ScaffoldAdminService(
+        ScaffoldAdminServiceDeps(
+            workloads_repo_slug=lambda: "wlodzimierrr/homelab-workloads",
+            workloads_base_branch=lambda: "main",
+            build_config_edit_branch_name=None,
+            build_config_edit_pr_body=None,
+            build_secret_edit_branch_name=None,
+            build_secret_edit_pr_body=None,
+            generate_scaffold_files_and_updates=None,
+            read_current_public_host_from_services_yaml=None,
+            read_current_host_from_patch_ingress=None,
+            update_services_yaml_public_host=None,
+            update_patch_ingress_host=None,
+            workloads_catalog_path="services.yaml",
+            workloads_catalog_sync_cronjob_path="apps/homelab-api/base/catalog-sync-cronjob.yaml",
+            update_service_registry_sync_namespaces=update_service_registry_sync_namespaces,
+            verify_service_onboarding_targets=lambda targets: _sample_verification(
+                targets[0].service_id,
+                targets[0].namespace,
+                targets[0].argo_application,
+            ),
+            build_default_git_provider=lambda: _FakeGitProvider(),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.decommission_service(service_id="oauth2-proxy", admin_user="alice")
+
+    assert exc_info.value.status_code == 409
+    assert "shared project components" in str(exc_info.value.detail)
+
+
+def test_decommission_service_removes_only_project_component_owned_resources() -> None:
+    captured: dict[str, object] = {}
+    services_yaml = """
+services:
+  - service_id: portal-project-worker
+    project_id: portal-project
+    name: Portal Project Worker
+    envs:
+      - name: dev
+        namespace: portal-project
+        argo_app: portal-project-dev
+        workload_ref: apps/portal-project/base/worker-deployment.yaml
+      - name: prod
+        namespace: portal-project
+        argo_app: portal-project-prod
+        workload_ref: apps/portal-project/base/worker-deployment.yaml
+  - service_id: portal-project-frontend
+    project_id: portal-project
+    name: Portal Project Frontend
+    envs:
+      - name: dev
+        namespace: portal-project
+        argo_app: portal-project-dev
+""".lstrip()
+    base_kustomization = """
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - frontend-deployment.yaml
+  - frontend-service.yaml
+  - serviceaccount-worker.yaml
+  - worker-deployment.yaml
+  - worker-service.yaml
+  - servicemonitor-worker.yaml
+""".lstrip()
+    dev_kustomization = """
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - path: patch-frontend-deployment.yaml
+  - path: patch-worker-deployment.yaml
+""".lstrip()
+    prod_kustomization = dev_kustomization
+    project_homelab = """
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: portal-project
+  namespace: argocd
+spec: {}
+""".lstrip()
+
+    class _FakeGitProvider:
+        def read_file(self, _repo, _branch, file_path):
+            return {
+                "services.yaml": services_yaml,
+                "apps/portal-project/base/kustomization.yaml": base_kustomization,
+                "apps/portal-project/envs/dev/kustomization.yaml": dev_kustomization,
+                "apps/portal-project/envs/prod/kustomization.yaml": prod_kustomization,
+                "bootstrap/project-homelab.yaml": project_homelab,
+            }[file_path]
+
+        def list_files(self, _repo, _branch, prefix=""):
+            files = [
+                "services.yaml",
+                "bootstrap/project-homelab.yaml",
+                "environments/dev/workloads/portal-project-app.yaml",
+                "apps/portal-project/base/kustomization.yaml",
+                "apps/portal-project/base/frontend-deployment.yaml",
+                "apps/portal-project/base/frontend-service.yaml",
+                "apps/portal-project/base/serviceaccount-worker.yaml",
+                "apps/portal-project/base/worker-deployment.yaml",
+                "apps/portal-project/base/worker-service.yaml",
+                "apps/portal-project/base/servicemonitor-worker.yaml",
+                "apps/portal-project/envs/dev/kustomization.yaml",
+                "apps/portal-project/envs/dev/patch-frontend-deployment.yaml",
+                "apps/portal-project/envs/dev/patch-worker-deployment.yaml",
+                "apps/portal-project/envs/prod/kustomization.yaml",
+                "apps/portal-project/envs/prod/patch-worker-deployment.yaml",
+            ]
+            normalized = prefix.strip().lstrip("/")
+            if not normalized:
+                return files
+            return [path for path in files if path == normalized or path.startswith(f"{normalized}/")]
+
+        def create_branch(self, repo, from_branch, new_branch):
+            captured["create_branch"] = (repo, from_branch, new_branch)
+            return {"branch": new_branch}
+
+        def commit_to_branch(self, repo, branch, files_dict, message):
+            captured["commit"] = {
+                "repo": repo,
+                "branch": branch,
+                "files": dict(files_dict),
+                "message": message,
+            }
+            return {"branch": branch}
+
+        def open_pr(self, repo, from_branch, to_branch, title, description):
+            captured["pr"] = {
+                "repo": repo,
+                "from_branch": from_branch,
+                "to_branch": to_branch,
+                "title": title,
+                "description": description,
+            }
+            return {
+                "number": 77,
+                "url": "https://github.com/example/homelab-workloads/pull/77",
+            }
+
+    service = ScaffoldAdminService(
+        ScaffoldAdminServiceDeps(
+            workloads_repo_slug=lambda: "wlodzimierrr/homelab-workloads",
+            workloads_base_branch=lambda: "main",
+            build_config_edit_branch_name=None,
+            build_config_edit_pr_body=None,
+            build_secret_edit_branch_name=None,
+            build_secret_edit_pr_body=None,
+            generate_scaffold_files_and_updates=None,
+            read_current_public_host_from_services_yaml=None,
+            read_current_host_from_patch_ingress=None,
+            update_services_yaml_public_host=None,
+            update_patch_ingress_host=None,
+            workloads_catalog_path="services.yaml",
+            workloads_catalog_sync_cronjob_path="apps/homelab-api/base/catalog-sync-cronjob.yaml",
+            update_service_registry_sync_namespaces=update_service_registry_sync_namespaces,
+            verify_service_onboarding_targets=lambda targets: _sample_verification(
+                targets[0].service_id,
+                targets[0].namespace,
+                targets[0].argo_application,
+            ),
+            build_default_git_provider=lambda: _FakeGitProvider(),
+        ),
+    )
+
+    response = service.decommission_service(service_id="portal-project-worker", admin_user="alice")
+
+    assert response.status == "accepted"
+    assert response.service_id == "portal-project-worker"
+    assert response.project_id == "portal-project"
+    assert response.pr_number == 77
+    assert "only this service will be removed from the shared project" in response.message
+    assert captured["pr"]["title"] == "chore(decommission): remove portal-project-worker from project portal-project"
+    assert "shared Argo Application manifests" in captured["pr"]["description"]
+    assert "service_id: portal-project-worker" not in captured["commit"]["files"]["services.yaml"]
+    assert "worker-deployment.yaml" not in captured["commit"]["files"]["apps/portal-project/base/kustomization.yaml"]
+    assert "serviceaccount-worker.yaml" not in captured["commit"]["files"]["apps/portal-project/base/kustomization.yaml"]
+    assert "patch-worker-deployment.yaml" not in captured["commit"]["files"]["apps/portal-project/envs/dev/kustomization.yaml"]
+    assert captured["commit"]["files"]["apps/portal-project/base/worker-deployment.yaml"] is None
+    assert captured["commit"]["files"]["apps/portal-project/base/worker-service.yaml"] is None
+    assert captured["commit"]["files"]["apps/portal-project/base/serviceaccount-worker.yaml"] is None
+    assert captured["commit"]["files"]["apps/portal-project/base/servicemonitor-worker.yaml"] is None
+    assert captured["commit"]["files"]["apps/portal-project/envs/dev/patch-worker-deployment.yaml"] is None
+    assert captured["commit"]["files"]["apps/portal-project/envs/prod/patch-worker-deployment.yaml"] is None
+    assert "environments/dev/workloads/portal-project-app.yaml" not in captured["commit"]["files"]
+    assert "bootstrap/project-homelab.yaml" not in captured["commit"]["files"]
+    assert "apps/portal-project/base/frontend-deployment.yaml" not in captured["commit"]["files"]
+
+
+def test_decommission_service_rejects_bundle_core_component() -> None:
+    services_yaml = """
+services:
+  - service_id: portal-project-frontend
+    project_id: portal-project
+    name: Portal Project Frontend
+    envs:
+      - name: dev
+        namespace: portal-project
+        argo_app: portal-project-dev
+        workload_ref: apps/portal-project/base/frontend-deployment.yaml
+""".lstrip()
+
+    class _FakeGitProvider:
+        def read_file(self, _repo, _branch, file_path):
+            assert file_path == "services.yaml"
+            return services_yaml
+
+        def list_files(self, _repo, _branch, prefix=""):
+            return ["services.yaml"]
+
+    service = ScaffoldAdminService(
+        ScaffoldAdminServiceDeps(
+            workloads_repo_slug=lambda: "wlodzimierrr/homelab-workloads",
+            workloads_base_branch=lambda: "main",
+            build_config_edit_branch_name=None,
+            build_config_edit_pr_body=None,
+            build_secret_edit_branch_name=None,
+            build_secret_edit_pr_body=None,
+            generate_scaffold_files_and_updates=None,
+            read_current_public_host_from_services_yaml=None,
+            read_current_host_from_patch_ingress=None,
+            update_services_yaml_public_host=None,
+            update_patch_ingress_host=None,
+            workloads_catalog_path="services.yaml",
+            workloads_catalog_sync_cronjob_path="apps/homelab-api/base/catalog-sync-cronjob.yaml",
+            update_service_registry_sync_namespaces=update_service_registry_sync_namespaces,
+            verify_service_onboarding_targets=lambda targets: _sample_verification(
+                targets[0].service_id,
+                targets[0].namespace,
+                targets[0].argo_application,
+            ),
+            build_default_git_provider=lambda: _FakeGitProvider(),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.decommission_service(service_id="portal-project-frontend", admin_user="alice")
+
+    assert exc_info.value.status_code == 409
+    assert "bundle core component" in str(exc_info.value.detail).lower()

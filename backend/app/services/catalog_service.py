@@ -66,6 +66,12 @@ class CatalogServiceDeps:
     build_service_identity_diagnostics: Any
 
 
+@dataclass(frozen=True)
+class DecommissionCapabilityDecision:
+    mode: str
+    reason: str | None = None
+
+
 class CatalogService:
     def __init__(self, deps: CatalogServiceDeps) -> None:
         self.deps = deps
@@ -139,6 +145,7 @@ class CatalogService:
         *,
         service_id: str,
         project_context: ServiceProjectContextResponse | None,
+        selected_row: dict[str, Any],
     ) -> ServiceCapabilitiesResponse:
         can_deploy_to_dev = self._supports_optional_target(self.deps.dev_deploy_target, service_id)
         can_promote_to_prod = self._supports_optional_target(self.deps.promote_to_prod_target, service_id)
@@ -168,6 +175,12 @@ class CatalogService:
         # or self-owned services, while project-linked services should use later
         # migration flows instead of the phase-1 adopt action.
         can_adopt = is_self_owned
+        decommission = self._determine_decommission_capability(
+            service_id=service_id,
+            project_context=project_context,
+            selected_row=selected_row,
+        )
+        can_delete = decommission.mode != "unsupported"
 
         return ServiceCapabilitiesResponse(
             canDeployToDev=can_deploy_to_dev,
@@ -178,6 +191,46 @@ class CatalogService:
             configEnvs=config_envs,
             canEditPublicHostname=can_edit_public_hostname,
             canAdopt=can_adopt,
+            canDelete=can_delete,
+            decommissionMode=decommission.mode,
+            decommissionReason=decommission.reason,
+        )
+
+    @staticmethod
+    def _determine_decommission_capability(
+        *,
+        service_id: str,
+        project_context: ServiceProjectContextResponse | None,
+        selected_row: dict[str, Any],
+    ) -> DecommissionCapabilityDecision:
+        project_id = project_context.project_id if project_context else None
+        is_self_owned = project_id is None or project_id == service_id
+        if is_self_owned:
+            return DecommissionCapabilityDecision(mode="standalone")
+
+        normalized_project_id = str(project_id or "").strip()
+        if not normalized_project_id or not service_id.startswith(f"{normalized_project_id}-"):
+            return DecommissionCapabilityDecision(
+                mode="unsupported",
+                reason="Legacy or manually managed shared services cannot be decommissioned from Service Settings yet.",
+            )
+
+        service_suffix = service_id.removeprefix(f"{normalized_project_id}-").strip()
+        if service_suffix in {"frontend", "backend", "db"}:
+            return DecommissionCapabilityDecision(
+                mode="unsupported",
+                reason="Bundle core components cannot be removed individually from Service Settings yet.",
+            )
+
+        if str(selected_row.get("namespace") or "").strip() != str(project_context.namespace or "").strip():
+            return DecommissionCapabilityDecision(
+                mode="unsupported",
+                reason="Shared-service ownership is ambiguous, so decommission is blocked for safety.",
+            )
+
+        return DecommissionCapabilityDecision(
+            mode="project-component",
+            reason="This will remove only this service from the shared project while preserving the project and sibling services.",
         )
 
     @staticmethod
@@ -392,6 +445,7 @@ class CatalogService:
         capabilities = self._build_service_capabilities(
             service_id=str(selected["service_id"]),
             project_context=project_context,
+            selected_row=selected,
         )
 
         return ServiceDetailResponse(

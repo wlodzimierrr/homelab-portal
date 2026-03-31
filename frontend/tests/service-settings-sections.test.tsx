@@ -8,6 +8,7 @@ test('ServiceSettingsSections renders the moved settings-owned sections', () => 
   const browser = installMockBrowser({ pathname: '/services/homelab-api/settings' })
   const markup = renderToHtml(
     createElement(ServiceSettingsSections, {
+      serviceId: 'homelab-api',
       configSupported: true,
       publicHostEditMode: false,
       setPublicHostEditMode() {},
@@ -42,11 +43,20 @@ test('ServiceSettingsSections renders the moved settings-owned sections', () => 
       adoptError: '',
       adoptResult: null,
       onSubmitAdopt() {},
+      decommissionMode: 'standalone',
+      decommissionReason: null,
+      decommissionConfirmation: '',
+      setDecommissionConfirmation() {},
+      decommissionSubmitting: false,
+      decommissionError: '',
+      decommissionResult: null,
+      onSubmitDecommission() {},
     }),
   )
 
   assert.match(markup, /Public hostname/)
   assert.match(markup, /Runtime Config/)
   assert.match(markup, /Adopt into Project/)
+  assert.match(markup, /Danger Zone/)
   browser.cleanup()
 })

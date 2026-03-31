@@ -84,6 +84,9 @@ class ServiceCapabilitiesResponse(BaseModel):
     config_envs: list[str] = Field(default_factory=list, alias="configEnvs")
     can_edit_public_hostname: bool = Field(alias="canEditPublicHostname")
     can_adopt: bool = Field(alias="canAdopt")
+    can_delete: bool = Field(alias="canDelete")
+    decommission_mode: str = Field(alias="decommissionMode")
+    decommission_reason: str | None = Field(default=None, alias="decommissionReason")
 
     model_config = ConfigDict(populate_by_name=True)
 

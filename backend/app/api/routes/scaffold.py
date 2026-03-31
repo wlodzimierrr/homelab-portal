@@ -38,6 +38,15 @@ def register_routes(app: FastAPI, main_module: ModuleType) -> None:
         tags=["scaffold"],
     )
 
+    app.add_api_route(
+        "/services/{service_id}/decommission",
+        endpoint=wrap_sync_endpoint(scaffold_endpoints.decommission_service),
+        response_model=main_module.ServiceDecommissionResponse,
+        methods=["POST"],
+        status_code=status.HTTP_202_ACCEPTED,
+        tags=["migration"],
+    )
+
     # T5.3.4 — Service adoption and migration
     app.add_api_route(
         "/services/{service_id}/adopt",

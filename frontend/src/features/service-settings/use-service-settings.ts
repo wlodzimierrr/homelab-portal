@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { adoptService } from '@/lib/api'
+import { adoptService, decommissionService, type ServiceDecommissionResponse } from '@/lib/api'
 import {
   getServiceConfig,
   setServiceConfig,
@@ -26,6 +26,7 @@ export function useServiceSettings({
 }: UseServiceSettingsOptions) {
   const configSupported = capabilities.canEditConfig
   const adoptSupported = capabilities.canAdopt
+  const decommissionSupported = capabilities.decommissionMode !== 'unsupported'
 
   const [configEnv, setConfigEnv] = useState<'dev' | 'prod'>('dev')
   const [configEntries, setConfigEntries] = useState<ServiceConfigEntry[]>([])
@@ -46,6 +47,11 @@ export function useServiceSettings({
   const [adoptSubmitting, setAdoptSubmitting] = useState(false)
   const [adoptError, setAdoptError] = useState('')
   const [adoptResult, setAdoptResult] = useState<{ status: string; message: string; prUrl?: string } | null>(null)
+
+  const [decommissionConfirmation, setDecommissionConfirmation] = useState('')
+  const [decommissionSubmitting, setDecommissionSubmitting] = useState(false)
+  const [decommissionError, setDecommissionError] = useState('')
+  const [decommissionResult, setDecommissionResult] = useState<ServiceDecommissionResponse | null>(null)
 
   useEffect(() => {
     setPublicHostValue(initialPublicHost ?? '')
@@ -164,9 +170,30 @@ export function useServiceSettings({
     }
   }, [adoptProjectId, serviceId])
 
+  const submitDecommission = useCallback(async () => {
+    if (!decommissionSupported || decommissionConfirmation.trim() !== serviceId) {
+      return null
+    }
+
+    setDecommissionSubmitting(true)
+    setDecommissionError('')
+    setDecommissionResult(null)
+    try {
+      const response = await decommissionService(serviceId)
+      setDecommissionResult(response)
+      return response
+    } catch (err) {
+      setDecommissionError(err instanceof Error ? err.message : 'Failed to start decommission flow.')
+      throw err
+    } finally {
+      setDecommissionSubmitting(false)
+    }
+  }, [decommissionConfirmation, decommissionSupported, serviceId])
+
   return {
     configSupported,
     adoptSupported,
+    decommissionSupported,
     configEnv,
     setConfigEnv,
     configEntries,
@@ -193,5 +220,11 @@ export function useServiceSettings({
     adoptError,
     adoptResult,
     submitAdopt,
+    decommissionConfirmation,
+    setDecommissionConfirmation,
+    decommissionSubmitting,
+    decommissionError,
+    decommissionResult,
+    submitDecommission,
   }
 }

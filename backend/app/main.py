@@ -118,7 +118,12 @@ from app.api.schemas.migration import (  # noqa: F401
     MigrationConsolidateResponse,
     MigrationValidateResponse,
 )
-from app.api.schemas.scaffold import ScaffoldPreviewResponse, ScaffoldProjectInfo, ScaffoldSubmitResponse  # noqa: F401
+from app.api.schemas.scaffold import (  # noqa: F401
+    ScaffoldPreviewResponse,
+    ScaffoldProjectInfo,
+    ScaffoldSubmitResponse,
+    ServiceDecommissionResponse,
+)
 
 # --- runtime config ----------------------------------------------------------
 # Thin callables that read env vars at call time rather than at import time,
