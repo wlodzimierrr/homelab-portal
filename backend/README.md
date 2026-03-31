@@ -93,9 +93,9 @@ Deterministic drift rule for `/releases`:
 
 Scaffold observability defaults:
 
-- `python-fastapi`, `python-django`, `python-flask` -> `app-native`
-- `node-express`, `node-nestjs` -> `app-native`
-- `react`, `vue`, `static-nginx`, `nextjs`, `wordpress` -> `ingress-derived`
+- `python-fastapi`, `python-django`, `python-flask` -> `ingress-derived`
+- `node-express` -> `app-native`
+- `node-nestjs`, `react`, `vue`, `static-nginx`, `nextjs`, `wordpress` -> `ingress-derived`
 - `postgres`, `mysql` -> `no-http`
 
 These defaults are the platform contract for newly scaffolded services and
