@@ -8,7 +8,7 @@ import {
   type ServiceSetConfigResponse,
   type UpdatePublicHostnameResponse,
 } from '@/lib/api/admin'
-import { ApiRequestError } from '@/lib/http/errors'
+import { ApiRequestError, isApiAuthDiagnosticError } from '@/lib/http/errors'
 import type { NormalizedServiceCapabilities } from '@/features/service-details/normalizers/service-detail-normalizer'
 
 interface UseServiceSettingsOptions {
@@ -183,7 +183,13 @@ export function useServiceSettings({
       setDecommissionResult(response)
       return response
     } catch (err) {
-      setDecommissionError(err instanceof Error ? err.message : 'Failed to start decommission flow.')
+      if (isApiAuthDiagnosticError(err) || (err instanceof ApiRequestError && (err.status === 401 || err.status === 403))) {
+        setDecommissionError(
+          'Decommission requires portal admin access. If you are signed in through oauth2-proxy, make sure your user or group is allowed by PORTAL_ADMIN_USERS or PORTAL_ADMIN_GROUPS.',
+        )
+      } else {
+        setDecommissionError(err instanceof Error ? err.message : 'Failed to start decommission flow.')
+      }
       throw err
     } finally {
       setDecommissionSubmitting(false)
