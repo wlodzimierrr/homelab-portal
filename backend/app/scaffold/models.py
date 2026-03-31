@@ -13,16 +13,16 @@ SERVICE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 # Service-page behavior should consume declared modes rather than guessing from
 # template names or ad hoc frontend special cases.
 TEMPLATE_DEFAULT_OBSERVABILITY_MODE: dict[str, ObservabilityMode] = {
-    "python-fastapi": "app-native",
-    "python-django": "app-native",
-    "python-flask": "app-native",
+    "python-fastapi": "ingress-derived",
+    "python-django": "ingress-derived",
+    "python-flask": "ingress-derived",
     "static-nginx": "ingress-derived",
     "react": "ingress-derived",
     "vue": "ingress-derived",
     "wordpress": "ingress-derived",
     "nextjs": "ingress-derived",
     "node-express": "app-native",
-    "node-nestjs": "app-native",
+    "node-nestjs": "ingress-derived",
     "postgres": "no-http",
     "mysql": "no-http",
 }

@@ -4,6 +4,7 @@ from app.api.endpoints.scaffold import (
     parse_service_registry_sync_namespaces,
     update_service_registry_sync_namespaces,
 )
+from app.api.schemas.onboarding import ServiceOnboardingVerification
 from app.api.schemas.migration import AdoptServiceRequest
 from app.api.schemas.scaffold import ScaffoldServiceRequest
 from app.services.scaffold_admin_service import ScaffoldAdminService, ScaffoldAdminServiceDeps
@@ -40,6 +41,22 @@ spec:
                 - name: PORTAL_ENV
                   value: dev
 """.lstrip()
+
+
+def _sample_verification(service_id: str, namespace: str, argo_application: str) -> list[ServiceOnboardingVerification]:
+    return [
+        ServiceOnboardingVerification(
+            serviceId=service_id,
+            namespace=namespace,
+            argoApplication=argo_application,
+            workloadKind="deployment",
+            workloadName=service_id,
+            serviceName=service_id,
+            overallStatus="declared_not_applied",
+            summary="Workloads declaration exists, but live cluster resources are not present yet.",
+            checks=[],
+        )
+    ]
 
 
 def test_update_service_registry_sync_namespaces_adds_namespace_once() -> None:
@@ -265,6 +282,11 @@ def test_scaffold_submit_opens_pr_and_returns_commit_summary(monkeypatch) -> Non
             workloads_catalog_path="services.yaml",
             workloads_catalog_sync_cronjob_path="apps/homelab-api/base/catalog-sync-cronjob.yaml",
             update_service_registry_sync_namespaces=update_service_registry_sync_namespaces,
+            verify_service_onboarding_targets=lambda targets: _sample_verification(
+                targets[0].service_id,
+                targets[0].namespace,
+                targets[0].argo_application,
+            ),
             build_default_git_provider=lambda: _FakeGitProvider(),
         ),
     )
@@ -282,6 +304,9 @@ def test_scaffold_submit_opens_pr_and_returns_commit_summary(monkeypatch) -> Non
     assert response.pr_url == "https://github.com/example/homelab-workloads/pull/17"
     assert response.pr_number == 17
     assert response.branch_name.startswith("scaffold/demo-")
+    assert response.deployment_verification[0].service_id == "demo"
+    assert response.deployment_verification[0].namespace == "demo"
+    assert response.deployment_verification[0].argo_application == "demo-dev"
     assert set(response.files_committed) == {
         "apps/demo/demo-app.yaml",
         "apps/homelab-api/base/catalog-sync-cronjob.yaml",
@@ -386,6 +411,11 @@ services:
             workloads_catalog_path="services.yaml",
             workloads_catalog_sync_cronjob_path="apps/homelab-api/base/catalog-sync-cronjob.yaml",
             update_service_registry_sync_namespaces=update_service_registry_sync_namespaces,
+            verify_service_onboarding_targets=lambda targets: _sample_verification(
+                targets[0].service_id,
+                targets[0].namespace,
+                targets[0].argo_application,
+            ),
             build_default_git_provider=lambda: _FakeGitProvider(),
         ),
     )
@@ -398,6 +428,9 @@ services:
     assert response.status == "accepted"
     assert response.project_id == "demo-project"
     assert response.pr_number == 21
+    assert response.deployment_verification[0].service_id == "demo"
+    assert response.deployment_verification[0].namespace == "demo-space"
+    assert response.deployment_verification[0].argo_application == "demo-dev"
     assert "project_id: demo-project" in captured["commit"]["files"]["services.yaml"]
     assert "value: homelab-api,homelab-web,demo-space" in captured["commit"]["files"][
         "apps/homelab-api/base/catalog-sync-cronjob.yaml"

@@ -71,16 +71,16 @@ def test_validate_service_name_rejects_too_long() -> None:
 
 def test_template_observability_contract_matrix_is_explicit() -> None:
     assert TEMPLATE_DEFAULT_OBSERVABILITY_MODE == {
-        "python-fastapi": "app-native",
-        "python-django": "app-native",
-        "python-flask": "app-native",
+        "python-fastapi": "ingress-derived",
+        "python-django": "ingress-derived",
+        "python-flask": "ingress-derived",
         "static-nginx": "ingress-derived",
         "react": "ingress-derived",
         "vue": "ingress-derived",
         "wordpress": "ingress-derived",
         "nextjs": "ingress-derived",
         "node-express": "app-native",
-        "node-nestjs": "app-native",
+        "node-nestjs": "ingress-derived",
         "postgres": "no-http",
         "mysql": "no-http",
     }
@@ -97,8 +97,12 @@ def test_template_observability_contract_matrix_is_explicit() -> None:
 
 def test_generate_gitops_new_files_python_fastapi_file_count() -> None:
     files = generate_gitops_new_files(_make_input())
-    # 10 base files (inc. servicemonitor for app-native) + 2 dev overlay + 3 prod overlay + 2 argo app = 17
-    assert len(files) == 17
+    assert len(files) == 16
+
+
+def test_generate_gitops_new_files_python_fastapi_has_no_servicemonitor() -> None:
+    files = generate_gitops_new_files(_make_input())
+    assert not any("servicemonitor" in path for path in files)
 
 
 def test_generate_gitops_new_files_static_nginx_no_servicemonitor() -> None:
@@ -450,7 +454,7 @@ def test_build_catalog_entry_addition_raises_without_services_key() -> None:
 def test_build_catalog_entry_addition_observability_mode_fastapi() -> None:
     inp = _make_input(template="python-fastapi")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "mode: app-native" in result
+    assert "mode: ingress-derived" in result
 
 
 def test_build_catalog_entry_addition_observability_mode_nginx() -> None:
@@ -616,7 +620,7 @@ def test_mysql_template_credentials_secret_has_sops_block() -> None:
 
 
 # ---------------------------------------------------------------------------
-# build_catalog_entry_addition — database templates use ingress-derived mode, single env
+# build_catalog_entry_addition — database templates use no-http mode, single env
 # ---------------------------------------------------------------------------
 
 
@@ -652,15 +656,15 @@ def test_catalog_entry_mysql_single_env() -> None:
 
 
 def test_django_template_file_count_matches_fastapi() -> None:
-    """Django uses app-native observability like FastAPI, so file count is the same."""
+    """Django is ingress-derived like FastAPI, so file count is the same."""
     fastapi_files = generate_gitops_new_files(_make_input(template="python-fastapi"))
     django_files = generate_gitops_new_files(_make_input(template="python-django"))
     assert len(django_files) == len(fastapi_files)
 
 
-def test_django_template_has_servicemonitor() -> None:
+def test_django_template_has_no_servicemonitor() -> None:
     files = generate_gitops_new_files(_make_input(template="python-django"))
-    assert any("servicemonitor" in path for path in files)
+    assert not any("servicemonitor" in path for path in files)
 
 
 def test_django_template_health_path_trailing_slash() -> None:
@@ -688,10 +692,10 @@ def test_django_template_dev_and_prod_overlays() -> None:
     assert "apps/my-svc/envs/prod/patch-ingress.yaml" in files
 
 
-def test_catalog_entry_django_uses_app_native_observability() -> None:
+def test_catalog_entry_django_uses_ingress_derived_observability() -> None:
     inp = _make_input(template="python-django")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "mode: app-native" in result
+    assert "mode: ingress-derived" in result
 
 
 def test_catalog_entry_django_has_dev_and_prod_envs() -> None:
@@ -707,15 +711,15 @@ def test_catalog_entry_django_has_dev_and_prod_envs() -> None:
 
 
 def test_flask_template_file_count_matches_fastapi() -> None:
-    """Flask uses app-native observability like FastAPI, so file count is the same."""
+    """Flask is ingress-derived like FastAPI, so file count is the same."""
     fastapi_files = generate_gitops_new_files(_make_input(template="python-fastapi"))
     flask_files = generate_gitops_new_files(_make_input(template="python-flask"))
     assert len(flask_files) == len(fastapi_files)
 
 
-def test_flask_template_has_servicemonitor() -> None:
+def test_flask_template_has_no_servicemonitor() -> None:
     files = generate_gitops_new_files(_make_input(template="python-flask"))
-    assert any("servicemonitor" in path for path in files)
+    assert not any("servicemonitor" in path for path in files)
 
 
 def test_flask_template_container_port_5000() -> None:
@@ -736,10 +740,10 @@ def test_flask_template_network_policy_port_5000() -> None:
     assert "5000" in np
 
 
-def test_catalog_entry_flask_uses_app_native_observability() -> None:
+def test_catalog_entry_flask_uses_ingress_derived_observability() -> None:
     inp = _make_input(template="python-flask")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "mode: app-native" in result
+    assert "mode: ingress-derived" in result
 
 
 def test_catalog_entry_flask_has_dev_and_prod_envs() -> None:
@@ -755,10 +759,8 @@ def test_catalog_entry_flask_has_dev_and_prod_envs() -> None:
 
 
 def test_express_template_file_count_matches_fastapi() -> None:
-    """Express uses app-native observability like FastAPI, so file count is the same."""
-    fastapi_files = generate_gitops_new_files(_make_input(template="python-fastapi"))
     express_files = generate_gitops_new_files(_make_input(template="node-express"))
-    assert len(express_files) == len(fastapi_files)
+    assert len(express_files) == 17
 
 
 def test_express_template_has_servicemonitor() -> None:
@@ -810,15 +812,15 @@ def test_catalog_entry_express_has_dev_and_prod_envs() -> None:
 
 
 def test_nestjs_template_file_count_matches_fastapi() -> None:
-    """NestJS uses app-native observability like FastAPI, so file count is the same."""
+    """NestJS is ingress-derived like FastAPI, so file count is the same."""
     fastapi_files = generate_gitops_new_files(_make_input(template="python-fastapi"))
     nestjs_files = generate_gitops_new_files(_make_input(template="node-nestjs"))
     assert len(nestjs_files) == len(fastapi_files)
 
 
-def test_nestjs_template_has_servicemonitor() -> None:
+def test_nestjs_template_has_no_servicemonitor() -> None:
     files = generate_gitops_new_files(_make_input(template="node-nestjs"))
-    assert any("servicemonitor" in path for path in files)
+    assert not any("servicemonitor" in path for path in files)
 
 
 def test_nestjs_template_container_port_3000() -> None:
@@ -846,10 +848,10 @@ def test_nestjs_template_dev_and_prod_overlays() -> None:
     assert "apps/my-svc/envs/prod/patch-ingress.yaml" in files
 
 
-def test_catalog_entry_nestjs_uses_app_native_observability() -> None:
+def test_catalog_entry_nestjs_uses_ingress_derived_observability() -> None:
     inp = _make_input(template="node-nestjs")
     result = build_catalog_entry_addition(_SERVICES_YAML, inp)
-    assert "mode: app-native" in result
+    assert "mode: ingress-derived" in result
 
 
 def test_catalog_entry_nestjs_has_dev_and_prod_envs() -> None:
@@ -890,8 +892,7 @@ def test_bundle_frontend_backend_file_count() -> None:
     files = generate_gitops_bundle_files(_make_bundle_input())
     # Base: kustomization, namespace, 2 SA, 2 deployment, 2 service, ingress,
     #   3 netpol (default-deny, allow-dns, allow-ingress),
-    #   2 netpol (frontend↔backend), 2 servicemonitor (react=sidecar → no, fastapi=app-native → yes)
-    # react is sidecar so no frontend servicemonitor; fastapi is app-native
+    #   2 netpol (frontend↔backend), 0 servicemonitors (react=ingress-derived, fastapi=ingress-derived)
     assert "apps/my-proj/base/kustomization.yaml" in files
     assert "apps/my-proj/base/namespace.yaml" in files
     assert "apps/my-proj/base/frontend-deployment.yaml" in files
@@ -968,9 +969,9 @@ def test_bundle_argo_application_manifests() -> None:
 
 
 def test_bundle_servicemonitor_app_native_backend() -> None:
-    """FastAPI backend is app-native, so a ServiceMonitor should be generated."""
+    """Express backend is app-native, so a ServiceMonitor should be generated."""
     files = generate_gitops_bundle_files(_make_bundle_input(
-        backend_template="python-fastapi",
+        backend_template="node-express",
     ))
     assert "apps/my-proj/base/servicemonitor-backend.yaml" in files
 
@@ -989,6 +990,13 @@ def test_bundle_no_servicemonitor_nextjs_frontend() -> None:
         frontend_template="nextjs",
     ))
     assert "apps/my-proj/base/servicemonitor-frontend.yaml" not in files
+
+
+def test_bundle_no_servicemonitor_ingress_backend() -> None:
+    files = generate_gitops_bundle_files(_make_bundle_input(
+        backend_template="python-fastapi",
+    ))
+    assert "apps/my-proj/base/servicemonitor-backend.yaml" not in files
 
 
 def test_bundle_name_validation() -> None:
@@ -1107,7 +1115,7 @@ def test_add_service_overlay_patches() -> None:
 
 def test_add_service_servicemonitor_app_native() -> None:
     files, resources = generate_gitops_add_service_files(_make_add_service_input(
-        template="python-fastapi",
+        template="node-express",
     ))
     assert "apps/my-proj/base/servicemonitor-worker.yaml" in files
     assert "servicemonitor-worker.yaml" in resources
@@ -1116,6 +1124,14 @@ def test_add_service_servicemonitor_app_native() -> None:
 def test_add_service_no_servicemonitor_sidecar() -> None:
     files, resources = generate_gitops_add_service_files(_make_add_service_input(
         template="react",
+    ))
+    assert "apps/my-proj/base/servicemonitor-worker.yaml" not in files
+    assert "servicemonitor-worker.yaml" not in resources
+
+
+def test_add_service_no_servicemonitor_ingress_backend() -> None:
+    files, resources = generate_gitops_add_service_files(_make_add_service_input(
+        template="python-fastapi",
     ))
     assert "apps/my-proj/base/servicemonitor-worker.yaml" not in files
     assert "servicemonitor-worker.yaml" not in resources
