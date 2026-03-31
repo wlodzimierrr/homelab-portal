@@ -35,14 +35,14 @@ export async function request<T>(path: string, options: RequestOptions = {}) {
     headers,
   })
 
-  if (response.status === 401 && !skipUnauthorizedRedirect) {
-    clearToken()
-    dispatchUnauthorized()
-  }
-
   const authDiagnostic = await detectApiAuthDiagnostic(response, path)
   if (authDiagnostic) {
     throw authDiagnostic
+  }
+
+  if (response.status === 401 && !skipUnauthorizedRedirect) {
+    clearToken()
+    dispatchUnauthorized()
   }
 
   if (!response.ok) {
