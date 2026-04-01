@@ -253,6 +253,11 @@ def test_sync_project_registry_from_gitops_collects_failures(monkeypatch) -> Non
         "_prune_project_registry_records",
         lambda conn, envs, keep_keys: 0,
     )
+    monkeypatch.setattr(
+        gitops_project_sync,
+        "_prune_orphaned_service_registry_rows",
+        lambda conn, namespaces_by_env: 0,
+    )
 
     summary = gitops_project_sync.sync_project_registry_from_gitops(
         _DummyConn(),
@@ -267,3 +272,68 @@ def test_sync_project_registry_from_gitops_collects_failures(monkeypatch) -> Non
     assert summary["deleted"] == 0
     assert len(summary["sourceFailures"]) == 1
     assert summary["sourceFailures"][0]["scope"] == "apps/missing/envs/dev"
+
+
+def test_sync_project_registry_from_gitops_prunes_orphaned_service_registry_rows(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        gitops_project_sync,
+        "discover_gitops_project_records",
+        lambda **kwargs: (
+            [
+                gitops_project_sync.ProjectRegistryRecord(
+                    project_id="portfolio-next",
+                    project_name="Portfolio Next",
+                    namespace="portfolio-next",
+                    env="dev",
+                    app_label="portfolio-next",
+                    owner=None,
+                    repo_url=None,
+                    runbook_url=None,
+                    observability_mode="ingress-derived",
+                    public_host=None,
+                    source="gitops_apps",
+                    source_ref="repo:path",
+                    last_synced_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+                )
+            ],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        gitops_project_sync,
+        "_upsert_project_registry_records",
+        lambda conn, records: (0, 1),
+    )
+    monkeypatch.setattr(
+        gitops_project_sync,
+        "_prune_project_registry_records",
+        lambda conn, envs, keep_keys: 1,
+    )
+    monkeypatch.setattr(
+        gitops_project_sync,
+        "_prune_orphaned_service_registry_rows",
+        lambda conn, namespaces_by_env: (
+            captured.update({"namespaces_by_env": namespaces_by_env}) or 2
+        ),
+    )
+    monkeypatch.setattr(
+        gitops_project_sync,
+        "_load_service_catalog_metadata",
+        lambda repo_path: ({}, []),
+    )
+    monkeypatch.setattr(
+        gitops_project_sync,
+        "_stamp_project_ids_on_service_registry",
+        lambda conn, service_catalog: 0,
+    )
+
+    summary = gitops_project_sync.sync_project_registry_from_gitops(
+        _DummyConn(),
+        env_name="dev",
+        repo_path=Path("/tmp/does-not-matter"),
+    )
+
+    assert captured["namespaces_by_env"] == {"dev": {"portfolio-next"}}
+    assert summary["deleted"] == 3
