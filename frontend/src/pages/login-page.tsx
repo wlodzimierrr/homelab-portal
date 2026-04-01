@@ -12,7 +12,7 @@ interface LoginPageProps {
 }
 
 export function LoginPage({ onLoginSuccess }: LoginPageProps) {
-  const { setToken } = useAuth()
+  const { authMode, setToken } = useAuth()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -35,6 +35,23 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
     } finally {
       setIsLoading(false)
     }
+  }
+
+  if (authMode === 'forwarded_identity') {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background p-4">
+        <section className="w-full max-w-md rounded-xl border border-border bg-card p-8">
+          <h1 className="text-2xl font-semibold">Portal Sign-In</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This environment uses your SSO/auth gateway as the authoritative identity source.
+          </p>
+          <p className="mt-4 text-sm text-muted-foreground">
+            Manual portal token login is disabled here. Sign in through the configured gateway, then return to{' '}
+            <AppLink to="/dashboard">Dashboard</AppLink>.
+          </p>
+        </section>
+      </main>
+    )
   }
 
   return (

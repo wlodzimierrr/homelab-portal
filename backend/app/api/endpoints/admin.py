@@ -10,7 +10,12 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, status
 
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import (
+    get_auth_mode,
+    get_current_user,
+    require_admin,
+)
+from app.api.deps.auth import AUTH_MODE_FORWARDED_IDENTITY
 from app.api.schemas.auth import LoginRequest, LoginResponse
 from app.api.schemas.deployments import (
     PortalSetConfigRequest,
@@ -39,6 +44,16 @@ def _get_scaffold_admin_service() -> ScaffoldAdminService:
 def login(payload: LoginRequest) -> LoginResponse:
     # This is a development-only login contract that matches the frontend auth
     # flow. Production auth is expected to be enforced by the ingress/auth proxy.
+    if get_auth_mode() == AUTH_MODE_FORWARDED_IDENTITY:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Manual /auth/login is not available when "
+                "PORTAL_AUTH_MODE=forwarded_identity. "
+                "Use the configured SSO/auth gateway instead."
+            ),
+        )
+
     if payload.username != "admin" or payload.password != "changeme":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

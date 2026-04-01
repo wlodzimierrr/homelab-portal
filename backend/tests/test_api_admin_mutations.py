@@ -10,7 +10,8 @@ def test_create_project_rejected_for_gitops_owned_catalog(client) -> None:
     assert "GitOps app definitions" in response.json()["detail"]
 
 
-def test_create_project_forbidden_for_non_admin_forwarded_user(client) -> None:
+def test_create_project_forbidden_for_non_admin_forwarded_user(client, monkeypatch) -> None:
+    monkeypatch.setenv("PORTAL_AUTH_MODE", "forwarded_identity")
     response = client.post(
         "/projects",
         headers={"X-Auth-Request-User": "alice"},
@@ -19,7 +20,8 @@ def test_create_project_forbidden_for_non_admin_forwarded_user(client) -> None:
     assert response.status_code == 403
 
 
-def test_create_project_rejected_for_admin_group_when_catalog_is_gitops_owned(client) -> None:
+def test_create_project_rejected_for_admin_group_when_catalog_is_gitops_owned(client, monkeypatch) -> None:
+    monkeypatch.setenv("PORTAL_AUTH_MODE", "forwarded_identity")
     response = client.post(
         "/projects",
         headers={
@@ -30,6 +32,17 @@ def test_create_project_rejected_for_admin_group_when_catalog_is_gitops_owned(cl
     )
     assert response.status_code == 409
     assert "GitOps app definitions" in response.json()["detail"]
+
+
+def test_create_project_rejects_forwarded_identity_when_bearer_mode_is_active(client) -> None:
+    response = client.post(
+        "/projects",
+        headers={"X-Auth-Request-User": "alice", "X-Auth-Request-Groups": "team-admins"},
+        json={"id": "proj-forwarded-ignored", "name": "Nope", "environment": "dev"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing bearer token"
 
 
 def test_service_registry_sync_requires_auth(client) -> None:

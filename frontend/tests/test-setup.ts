@@ -4,7 +4,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 interface MockBrowserOptions {
   pathname?: string
   hostname?: string
-  token?: string
+  token?: string | null
+  authMode?: 'bearer_token' | 'forwarded_identity'
 }
 
 function createStorage() {
@@ -30,6 +31,7 @@ export function installMockBrowser({
   pathname = '/services/demo-service',
   hostname = 'portal.test',
   token = 'test-token',
+  authMode,
 }: MockBrowserOptions = {}) {
   const previousWindow = globalThis.window
   const previousDocument = globalThis.document
@@ -52,6 +54,7 @@ export function installMockBrowser({
 
   const windowStub = {
     location,
+    __PORTAL_AUTH_MODE__: authMode,
     history: {
       pushState(_state: unknown, _title: string, nextPath: string) {
         location.pathname = nextPath

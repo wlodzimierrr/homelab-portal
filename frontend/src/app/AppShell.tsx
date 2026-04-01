@@ -9,7 +9,7 @@ import { useIncidentFeed } from './use-incident-feed'
 import { useTheme } from './use-theme'
 
 function AppShell() {
-  const { token, clearToken } = useAuth()
+  const { authMode, token, isAuthenticated, clearToken } = useAuth()
   const [pathname, setPathname] = useState(window.location.pathname)
   const [toastMessage, setToastMessage] = useState('')
   const { theme, toggleTheme } = useTheme()
@@ -34,21 +34,23 @@ function AppShell() {
   // Client-side auth guards keep the browser location aligned with session
   // state, while the backend remains the source of truth for authorization.
   useEffect(() => {
-    if (pathname !== '/login' && !token) {
+    if (authMode === 'bearer_token' && pathname !== '/login' && !isAuthenticated) {
       navigate('/login', true)
       return
     }
 
-    if (pathname === '/login' && token) {
+    if (authMode === 'bearer_token' && pathname === '/login' && isAuthenticated) {
       navigate('/dashboard', true)
     }
-  }, [navigate, pathname, token])
+  }, [authMode, isAuthenticated, navigate, pathname])
 
   // Transport helpers emit one unauthorized event so the shell can clear local
   // auth state and redirect consistently instead of every page handling 401s.
   useEffect(() => {
     const handleUnauthorized = (event: Event) => {
-      clearToken()
+      if (authMode === 'bearer_token') {
+        clearToken()
+      }
       const message =
         event instanceof CustomEvent && typeof event.detail?.message === 'string'
           ? event.detail.message
@@ -60,7 +62,7 @@ function AppShell() {
 
     window.addEventListener(UNAUTHORIZED_EVENT, handleUnauthorized)
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, handleUnauthorized)
-  }, [clearToken, navigate])
+  }, [authMode, clearToken, navigate])
 
   useEffect(() => {
     if (!toastMessage) {
@@ -72,7 +74,10 @@ function AppShell() {
   }, [toastMessage])
 
   const route = useMemo(() => resolveAppRoute(pathname), [pathname])
-  const { incidentSnapshot, showIncidentBanner, dismissIncidentBanner } = useIncidentFeed(token, pathname)
+  const { incidentSnapshot, showIncidentBanner, dismissIncidentBanner } = useIncidentFeed(
+    authMode === 'forwarded_identity' ? true : Boolean(token),
+    pathname,
+  )
   const handleLoginSuccess = useCallback(() => navigate('/dashboard', true), [navigate])
 
   const content = useMemo(() => {

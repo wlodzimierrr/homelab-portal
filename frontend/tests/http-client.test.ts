@@ -72,3 +72,67 @@ test('request still clears the auth token for a real JSON 401 from the API', asy
   })
   browser.cleanup()
 })
+
+test('request includes the bearer token header in bearer_token mode', async () => {
+  const browser = installMockBrowser({ pathname: '/dashboard', token: 'dev-static-token', authMode: 'bearer_token' })
+  let authorizationHeader: string | null = null
+
+  const previousFetch = globalThis.fetch
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    value: async (_input: unknown, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      authorizationHeader = headers.get('Authorization')
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+        },
+      })
+    },
+  })
+
+  await request('/health')
+
+  assert.equal(authorizationHeader, 'Bearer dev-static-token')
+
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    value: previousFetch,
+  })
+  browser.cleanup()
+})
+
+test('request omits the bearer token header in forwarded_identity mode', async () => {
+  const browser = installMockBrowser({
+    pathname: '/dashboard',
+    token: 'dev-static-token',
+    authMode: 'forwarded_identity',
+  })
+  let authorizationHeader: string | null = null
+
+  const previousFetch = globalThis.fetch
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    value: async (_input: unknown, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      authorizationHeader = headers.get('Authorization')
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+        },
+      })
+    },
+  })
+
+  await request('/health')
+
+  assert.equal(authorizationHeader, null)
+
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    value: previousFetch,
+  })
+  browser.cleanup()
+})

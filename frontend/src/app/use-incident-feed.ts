@@ -17,7 +17,7 @@ const EMPTY_INCIDENT_SNAPSHOT: IncidentAlertSnapshot = {
   serviceAlerts: {},
 }
 
-export function useIncidentFeed(token: string | null, pathname: string) {
+export function useIncidentFeed(sessionActive: boolean, pathname: string) {
   const [incidentSnapshot, setIncidentSnapshot] = useState<IncidentAlertSnapshot>(EMPTY_INCIDENT_SNAPSHOT)
   const [isIncidentBannerDismissed, setIsIncidentBannerDismissed] = useState(() => {
     return window.sessionStorage.getItem(INCIDENT_BANNER_DISMISSED_KEY) === '1'
@@ -26,7 +26,7 @@ export function useIncidentFeed(token: string | null, pathname: string) {
   // Incident polling stays at the shell level so layout chrome and individual
   // pages can reuse one snapshot instead of issuing duplicate observability reads.
   useEffect(() => {
-    if (!token) {
+    if (!sessionActive) {
       return
     }
 
@@ -54,7 +54,7 @@ export function useIncidentFeed(token: string | null, pathname: string) {
       cancelled = true
       window.clearInterval(intervalId)
     }
-  }, [token])
+  }, [sessionActive])
 
   const dismissIncidentBanner = useCallback(() => {
     setIsIncidentBannerDismissed(true)
@@ -69,15 +69,15 @@ export function useIncidentFeed(token: string | null, pathname: string) {
   const showIncidentBanner = useMemo(() => {
     return (
       pathname !== '/login' &&
-      shouldShowIncidentBanner(token ? incidentSnapshot : EMPTY_INCIDENT_SNAPSHOT, {
+      shouldShowIncidentBanner(sessionActive ? incidentSnapshot : EMPTY_INCIDENT_SNAPSHOT, {
         threshold: incidentThreshold,
         dismissed: isIncidentBannerDismissed,
       })
     )
-  }, [incidentSnapshot, incidentThreshold, isIncidentBannerDismissed, pathname, token])
+  }, [incidentSnapshot, incidentThreshold, isIncidentBannerDismissed, pathname, sessionActive])
 
   return {
-    incidentSnapshot: token ? incidentSnapshot : EMPTY_INCIDENT_SNAPSHOT,
+    incidentSnapshot: sessionActive ? incidentSnapshot : EMPTY_INCIDENT_SNAPSHOT,
     showIncidentBanner,
     dismissIncidentBanner,
   }
