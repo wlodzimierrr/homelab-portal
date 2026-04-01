@@ -665,6 +665,38 @@ def _prune_project_registry_records(
     return deleted
 
 
+def _prune_orphaned_service_registry_rows(
+    conn: psycopg.Connection,
+    *,
+    namespaces_by_env: dict[str, set[str]],
+) -> int:
+    deleted = 0
+    with conn.cursor() as cur:
+        for env_name in sorted(namespaces_by_env):
+            namespaces = sorted(namespaces_by_env[env_name])
+            if namespaces:
+                cur.execute(
+                    """
+                    DELETE FROM service_registry
+                    WHERE source = %s
+                      AND env = %s
+                      AND namespace <> ALL(%s)
+                    """,
+                    ("cluster_services", env_name, namespaces),
+                )
+            else:
+                cur.execute(
+                    """
+                    DELETE FROM service_registry
+                    WHERE source = %s
+                      AND env = %s
+                    """,
+                    ("cluster_services", env_name),
+                )
+            deleted += cur.rowcount
+    return deleted
+
+
 def _stamp_project_ids_on_service_registry(
     conn: psycopg.Connection,
     service_catalog: dict[str, ServiceCatalogMetadata],
@@ -716,9 +748,17 @@ def sync_project_registry_from_gitops(
     unique_records = list(deduped.values())
     envs = {env_name} if env_name else {row.env for row in unique_records}
     keep_keys = set(deduped)
+    namespaces_by_env = {
+        env: {row.namespace for row in unique_records if row.env == env}
+        for env in envs
+    }
 
     inserted, updated = _upsert_project_registry_records(conn, unique_records)
     deleted = _prune_project_registry_records(conn, envs=envs, keep_keys=keep_keys)
+    orphaned_service_rows_deleted = _prune_orphaned_service_registry_rows(
+        conn,
+        namespaces_by_env=namespaces_by_env,
+    )
 
     # Stamp project_id onto service_registry rows for services that declare
     # an explicit project_id in the catalog (e.g. oauth2-proxy → homelab-web).
@@ -736,7 +776,7 @@ def sync_project_registry_from_gitops(
         "upserted": len(unique_records),
         "inserted": inserted,
         "updated": updated,
-        "deleted": deleted,
+        "deleted": deleted + orphaned_service_rows_deleted,
         "sourceFailures": source_failures,
         "generatedAt": synced_at.isoformat(),
         "durationMs": duration_ms,
