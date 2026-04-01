@@ -40,6 +40,20 @@ python scripts/live_catalog_validation.py --api-base-url http://api.dev.homelab.
 python scripts/project_source_cutover_smoke.py --api-base-url http://api.dev.homelab.local --auth-token dev-static-token --env dev
 ```
 
+## Auth mode
+
+Backend auth source is controlled explicitly with `PORTAL_AUTH_MODE`:
+
+- `bearer_token` (default): require bearer-token auth for app requests
+- `forwarded_identity`: require trusted forwarded identity headers such as `X-Auth-Request-User`
+
+Use `bearer_token` for local/no-SSO development. Use `forwarded_identity` in SSO-enabled environments where oauth2-proxy or a trusted auth gateway injects the user/group headers.
+
+`POST /auth/login` is intentionally dev-only:
+
+- available in `bearer_token` mode
+- rejected with `409 Conflict` in `forwarded_identity` mode so SSO environments do not mint misleading local tokens
+
 ## Database Migrations (Alembic)
 
 Set `DATABASE_URL` and run:

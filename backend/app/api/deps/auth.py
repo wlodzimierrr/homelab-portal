@@ -12,6 +12,9 @@ from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 bearer_auth = HTTPBearer(auto_error=False)
+AUTH_MODE_BEARER_TOKEN = "bearer_token"
+AUTH_MODE_FORWARDED_IDENTITY = "forwarded_identity"
+_VALID_AUTH_MODES = {AUTH_MODE_BEARER_TOKEN, AUTH_MODE_FORWARDED_IDENTITY}
 
 
 def require_bearer_token(
@@ -38,13 +41,33 @@ def _parse_csv_header(value: str | None) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
+def get_auth_mode() -> str:
+    mode = str(os.getenv("PORTAL_AUTH_MODE", AUTH_MODE_BEARER_TOKEN)).strip().lower()
+    if mode not in _VALID_AUTH_MODES:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"Invalid PORTAL_AUTH_MODE '{mode}'. "
+                f"Expected one of: {', '.join(sorted(_VALID_AUTH_MODES))}."
+            ),
+        )
+    return mode
+
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_auth),
     x_auth_user: str | None = Header(None, alias="X-Auth-Request-User"),
     x_auth_groups: str | None = Header(None, alias="X-Auth-Request-Groups"),
 ) -> tuple[str, set[str]]:
-    if x_auth_user:
+    mode = get_auth_mode()
+    if mode == AUTH_MODE_FORWARDED_IDENTITY:
+        if not x_auth_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing forwarded identity headers",
+            )
         return x_auth_user, _parse_csv_header(x_auth_groups)
+
     return require_bearer_token(credentials), set()
 
 
