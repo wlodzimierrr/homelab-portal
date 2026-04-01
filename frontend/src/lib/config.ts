@@ -1,4 +1,6 @@
 const env = import.meta.env ?? {}
+const VALID_AUTH_MODES = new Set(['bearer_token', 'forwarded_identity'] as const)
+export type AuthMode = 'bearer_token' | 'forwarded_identity'
 
 const TEMPLATE_TOKEN_REGEX = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}|\{([a-zA-Z0-9_]+)\}/g
 
@@ -20,6 +22,27 @@ function warnTemplate(context: string, message: string) {
   if (import.meta.env?.DEV) {
     console.warn(`[monitoring-url] ${context}: ${message}`)
   }
+}
+
+function warnAuthMode(message: string) {
+  if (import.meta.env?.DEV) {
+    console.warn(`[auth-mode] ${message}`)
+  }
+}
+
+export function getAuthMode(): AuthMode {
+  const runtimeMode =
+    typeof window !== 'undefined'
+      ? (window as Window & { __PORTAL_AUTH_MODE__?: string }).__PORTAL_AUTH_MODE__
+      : undefined
+  const rawMode = String(runtimeMode ?? env.VITE_AUTH_MODE ?? 'bearer_token').trim().toLowerCase()
+
+  if (VALID_AUTH_MODES.has(rawMode as AuthMode)) {
+    return rawMode as AuthMode
+  }
+
+  warnAuthMode(`invalid auth mode "${rawMode}", falling back to bearer_token`)
+  return 'bearer_token'
 }
 
 function fillTemplate(template: string, values: Record<string, string | undefined>, context: string) {

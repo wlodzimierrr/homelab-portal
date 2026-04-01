@@ -1,5 +1,5 @@
 import { clearToken, getToken } from '@/lib/auth'
-import { config } from '@/lib/config'
+import { config, getAuthMode } from '@/lib/config'
 import { dispatchUnauthorized } from '@/lib/http/auth-events'
 import { ApiRequestError, detectApiAuthDiagnostic, getApiErrorMessage } from '@/lib/http/errors'
 
@@ -19,9 +19,10 @@ export async function request<T>(path: string, options: RequestOptions = {}) {
   // adapters and domain modules can focus on request intent instead of fetch ceremony.
   const { skipUnauthorizedRedirect = false, headers: inputHeaders, ...init } = options
   const headers = new Headers(inputHeaders)
+  const authMode = getAuthMode()
   const token = getToken()
 
-  if (token) {
+  if (authMode === 'bearer_token' && token) {
     headers.set('Authorization', `Bearer ${token}`)
   }
 
@@ -41,8 +42,12 @@ export async function request<T>(path: string, options: RequestOptions = {}) {
   }
 
   if (response.status === 401 && !skipUnauthorizedRedirect) {
-    clearToken()
-    dispatchUnauthorized()
+    if (authMode === 'bearer_token') {
+      clearToken()
+      dispatchUnauthorized()
+    } else {
+      dispatchUnauthorized('Your SSO session is required. Sign in through the configured auth gateway.')
+    }
   }
 
   if (!response.ok) {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { getAuthMode } from '@/lib/config'
 
 // Auth state is stored in localStorage so refreshes survive, and mirrored through
 // a custom event because the browser `storage` event does not fire in the same tab.
@@ -10,6 +11,9 @@ function emitTokenChanged() {
 }
 
 export function getToken() {
+  if (getAuthMode() !== 'bearer_token') {
+    return null
+  }
   return window.localStorage.getItem(AUTH_TOKEN_KEY)
 }
 
@@ -24,6 +28,7 @@ export function clearToken() {
 }
 
 export function useAuth() {
+  const authMode = getAuthMode()
   const [token, setTokenState] = useState<string | null>(() => getToken())
 
   useEffect(() => {
@@ -53,8 +58,9 @@ export function useAuth() {
   }, [])
 
   return {
+    authMode,
     token,
-    isAuthenticated: Boolean(token),
+    isAuthenticated: authMode === 'forwarded_identity' ? true : Boolean(token),
     setToken: saveToken,
     clearToken: removeToken,
   }
