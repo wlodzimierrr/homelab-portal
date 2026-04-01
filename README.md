@@ -49,6 +49,7 @@ VITE_API_PROXY_TARGET=http://localhost:8081 npm run dev
 Frontend runtime config (see `src/lib/config.ts`):
 
 - `VITE_API_BASE_URL` (default: `/api`)
+- `VITE_AUTH_MODE` (default: `bearer_token`; runtime override supported via `window.__PORTAL_AUTH_MODE__`)
 - `VITE_ARGO_BASE_URL` (default: inferred on `*.homelab.local` / `*.wlodzimierrr.co.uk`, otherwise empty)
 - `VITE_GRAFANA_BASE_URL` (default: inferred on `*.homelab.local` / `*.wlodzimierrr.co.uk`, otherwise empty)
 - `VITE_ARGO_APP_PATH_TEMPLATE` (default: `/applications/{argoAppName}`)
@@ -79,6 +80,7 @@ npm run dev
 
 Notes:
 - On homelab-hosted portal domains, Argo and Grafana base URLs fall back to the repo's known hosts when the `VITE_*` overrides are unset.
+- In deployed SSO environments, prefer runtime injection of `window.__PORTAL_AUTH_MODE__ = "forwarded_identity"` over baking auth mode into the image.
 - If `VITE_ARGO_BASE_URL` or `VITE_GRAFANA_BASE_URL` remains empty after inference, related external links are unavailable.
 - Logs templates support both `{var}` and `{{var}}` placeholders, including `{{namespace}}`, `{{app_label}}`, `{{time_range}}`, and optional `{{preset}}`/`{{query}}`.
 - Argo app templates support `serviceId` and `argoAppName` placeholders.
