@@ -7,9 +7,11 @@ from app.api.endpoints.scaffold import (
 from app.api.schemas.onboarding import ServiceOnboardingVerification
 from app.api.schemas.migration import AdoptServiceRequest
 from app.api.schemas.scaffold import ScaffoldServiceRequest
+from app.scaffold_service import ScaffoldServiceInput, build_catalog_entry_addition
 from app.services.scaffold_admin_service import ScaffoldAdminService, ScaffoldAdminServiceDeps
 from fastapi import HTTPException
 import pytest
+import yaml
 
 
 _CATALOG_SYNC_CRONJOB = """
@@ -848,3 +850,72 @@ services:
 
     assert exc_info.value.status_code == 409
     assert "bundle core component" in str(exc_info.value.detail).lower()
+
+
+def test_remove_service_from_catalog_preserves_append_compatible_services_yaml_format() -> None:
+    services_yaml = """
+services:
+  - service_id: scaffold-smoke
+    name: scaffold-smoke
+    owner: wlodzimierrr
+    repo_url: https://github.com/wlodzimierrr/scaffold-smoke
+    runbook_url: https://github.com/wlodzimierrr/scaffold-smoke
+    description: smoke test
+    observability:
+      mode: ingress-derived
+    envs:
+      - name: dev
+        namespace: scaffold-smoke
+        argo_app: scaffold-smoke-dev
+  - service_id: portfolio-next
+    name: Portfolio Next
+    owner: wlodzimierrr
+    owner_email: szerszywlodzimierz@gmail.com
+    repo_url: https://github.com/wlodzimierrr/portfolio-next
+    runbook_url: https://github.com/wlodzimierrr/portfolio-next
+    description: portfolio website
+    observability:
+      mode: ingress-derived
+    envs:
+      - name: dev
+        namespace: portfolio-next
+        argo_app: portfolio-next-dev
+      - name: prod
+        namespace: portfolio-next
+        argo_app: portfolio-next-prod
+        public_host: portfolio-next.homelab.local
+""".lstrip()
+
+    removed = ScaffoldAdminService._remove_service_from_catalog(services_yaml, "scaffold-smoke")
+    assert "services:\n  - service_id: portfolio-next\n" in removed
+
+    appended = build_catalog_entry_addition(
+        removed,
+        ScaffoldServiceInput(
+            name="scaffold-gen-test",
+            description="Scaffold smoke validation service",
+            image_repo="ghcr.io/example/scaffold-gen-test",
+            repo_url="https://github.com/example/scaffold-gen-test",
+            owner_email="ops@example.com",
+            owner="",
+            template="python-fastapi",
+            namespace="scaffold-gen-test",
+            dev_host="scaffold-gen-test.dev.homelab.local",
+            prod_host="",
+            public_host="scaffold-gen-test.example.com",
+            workloads_repo_url="https://github.com/example/workloads.git",
+        ),
+    )
+
+    parsed = yaml.safe_load(appended)
+    services = parsed["services"]
+    assert [service["service_id"] for service in services] == [
+        "portfolio-next",
+        "scaffold-gen-test",
+    ]
+
+    portfolio_next = services[0]
+    assert [env["name"] for env in portfolio_next["envs"]] == ["dev", "prod"]
+
+    scaffold_gen_test = services[1]
+    assert [env["name"] for env in scaffold_gen_test["envs"]] == ["dev", "prod"]

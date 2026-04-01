@@ -75,6 +75,16 @@ WORKLOADS_DEV_KUSTOMIZATION_PATH = "environments/dev/workloads/kustomization.yam
 WORKLOADS_PROD_KUSTOMIZATION_PATH = "environments/prod/workloads/kustomization.yaml"
 
 
+def _dump_yaml_with_indented_sequences(data: Any) -> str:
+    import yaml as _yaml
+
+    class _IndentedSequenceDumper(_yaml.SafeDumper):
+        def increase_indent(self, flow: bool = False, indentless: bool = False) -> Any:  # type: ignore[override]
+            return super().increase_indent(flow, False)
+
+    return _yaml.dump(data, Dumper=_IndentedSequenceDumper, sort_keys=False)
+
+
 @dataclass(frozen=True)
 class ScaffoldAdminServiceDeps:
     workloads_repo_slug: Any
@@ -336,7 +346,7 @@ class ScaffoldAdminService:
             )
         ]
         data["services"] = filtered
-        return _yaml.safe_dump(data, sort_keys=False)
+        return _dump_yaml_with_indented_sequences(data)
 
     @staticmethod
     def _remove_resource_from_kustomization(kustomization_raw: str, resource_name: str) -> str:
