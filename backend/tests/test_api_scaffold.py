@@ -149,7 +149,7 @@ def test_generate_scaffold_files_and_updates_adds_sync_namespace_file(monkeypatc
     )
     monkeypatch.setattr(
         "app.api.endpoints.scaffold.generate_gitops_new_files",
-        lambda inp: {f"apps/{inp.name}/{inp.name}-app.yaml": "kind: Application\n"},
+        lambda inp, **_: {f"apps/{inp.name}/{inp.name}-app.yaml": "kind: Application\n"},
     )
     monkeypatch.setattr(
         "app.api.endpoints.scaffold.update_kustomization_resources",
@@ -191,28 +191,81 @@ def test_generate_scaffold_files_and_updates_adds_sync_namespace_file(monkeypatc
         modified_files["apps/homelab-api/base/catalog-sync-cronjob.yaml"],
         "demo",
     )["covered"] is True
-    assert reads == [
-        (
-            "wlodzimierrr/homelab-workloads",
-            "main",
-            "environments/dev/workloads/kustomization.yaml",
+
+
+def test_generate_scaffold_files_and_updates_encrypts_wordpress_secrets(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeGitProvider:
+        def read_file(self, repo, branch, file_path):
+            return {
+                "environments/dev/workloads/kustomization.yaml": "resources: []\n",
+                "bootstrap/project-homelab.yaml": "spec: {}\n",
+                "services.yaml": "services: []\n",
+                "apps/homelab-api/base/catalog-sync-cronjob.yaml": _CATALOG_SYNC_CRONJOB,
+                ".sops.yaml": "creation_rules:\n  - path_regex: .*\\.enc\\.yaml$\n",
+            }[file_path]
+
+    def fake_generate(inp, wordpress_secret_encrypter=None):
+        assert wordpress_secret_encrypter is not None
+        captured["encrypted"] = wordpress_secret_encrypter(
+            "apps/demo/envs/dev/wordpress-db-secret.enc.yaml",
+            "kind: Secret\nstringData:\n  WORDPRESS_DB_PASSWORD: plaintext\n",
+        )
+        return {"apps/demo/envs/dev/wordpress-db-secret.enc.yaml": captured["encrypted"]}
+
+    monkeypatch.setattr(
+        "app.api.endpoints.scaffold.generate_gitops_new_files",
+        fake_generate,
+    )
+    monkeypatch.setattr(
+        "app.api.endpoints.scaffold.encrypt_secret_manifest",
+        lambda plain_manifest, *, target_file_path, sops_config_contents: (
+            captured.update(
+                {
+                    "plain_manifest": plain_manifest,
+                    "target_file_path": target_file_path,
+                    "sops_config_contents": sops_config_contents,
+                }
+            )
+            or f"encrypted::{target_file_path}"
         ),
-        (
-            "wlodzimierrr/homelab-workloads",
-            "main",
-            "bootstrap/project-homelab.yaml",
+    )
+    monkeypatch.setattr(
+        "app.api.endpoints.scaffold.update_kustomization_resources",
+        lambda _raw, new_resource: f"resources:\n- {new_resource}\n",
+    )
+    monkeypatch.setattr(
+        "app.api.endpoints.scaffold.build_catalog_entry_addition",
+        lambda _raw, inp: f"services:\n- service_id: {inp.name}\n",
+    )
+    monkeypatch.setattr(
+        "app.api.endpoints.scaffold.build_appproject_addition",
+        lambda _raw, inp: f"metadata:\n  name: {inp.name}\n",
+    )
+
+    new_files, _ = generate_scaffold_files_and_updates(
+        ScaffoldServiceRequest(
+            name="Demo",
+            description="Demo service",
+            imageRepo="wordpress:latest",
+            repoUrl="https://github.com/example/demo",
+            ownerEmail="owner@example.com",
+            template="wordpress",
         ),
-        (
-            "wlodzimierrr/homelab-workloads",
-            "main",
-            "services.yaml",
-        ),
-        (
-            "wlodzimierrr/homelab-workloads",
-            "main",
-            "apps/homelab-api/base/catalog-sync-cronjob.yaml",
-        ),
-    ]
+        "wlodzimierrr/homelab-workloads",
+        "main",
+        _FakeGitProvider(),
+    )
+
+    assert new_files == {
+        "apps/demo/envs/dev/wordpress-db-secret.enc.yaml": (
+            "encrypted::apps/demo/envs/dev/wordpress-db-secret.enc.yaml"
+        )
+    }
+    assert captured["target_file_path"] == "apps/demo/envs/dev/wordpress-db-secret.enc.yaml"
+    assert captured["sops_config_contents"] == "creation_rules:\n  - path_regex: .*\\.enc\\.yaml$\n"
+    assert "WORDPRESS_DB_PASSWORD: plaintext" in str(captured["plain_manifest"])
 
 
 def test_scaffold_submit_opens_pr_and_returns_commit_summary(monkeypatch) -> None:
@@ -255,7 +308,7 @@ def test_scaffold_submit_opens_pr_and_returns_commit_summary(monkeypatch) -> Non
 
     monkeypatch.setattr(
         "app.api.endpoints.scaffold.generate_gitops_new_files",
-        lambda inp: {f"apps/{inp.name}/{inp.name}-app.yaml": "kind: Application\n"},
+        lambda inp, **_: {f"apps/{inp.name}/{inp.name}-app.yaml": "kind: Application\n"},
     )
     monkeypatch.setattr(
         "app.api.endpoints.scaffold.update_kustomization_resources",

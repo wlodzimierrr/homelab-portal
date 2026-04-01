@@ -31,6 +31,7 @@ from app.api.schemas.deployments import (
     UpdatePublicHostnameRequest,
     UpdatePublicHostnameResponse,
 )
+from app.secret_editing import encrypt_secret_manifest
 from app.scaffold_service import (
     ScaffoldAddServiceInput,
     ScaffoldBundleInput,
@@ -439,8 +440,21 @@ def generate_scaffold_files_and_updates(
             base_branch,
             WORKLOADS_CATALOG_SYNC_CRONJOB_PATH,
         )  # type: ignore[union-attr]
+        wordpress_secret_encrypter = None
+        if inp_single.template == "wordpress":
+            sops_config_contents = git_provider.read_file(workloads_repo, base_branch, ".sops.yaml")  # type: ignore[union-attr]
 
-        new_files = generate_gitops_new_files(inp_single)
+            def wordpress_secret_encrypter(target_file_path: str, plain_manifest: str) -> str:
+                return encrypt_secret_manifest(
+                    plain_manifest,
+                    target_file_path=target_file_path,
+                    sops_config_contents=sops_config_contents,
+                )
+
+        new_files = generate_gitops_new_files(
+            inp_single,
+            wordpress_secret_encrypter=wordpress_secret_encrypter,
+        )
         modified_files = {
             kustomization_path: update_kustomization_resources(kustomization_raw, f"{inp_single.name}-app.yaml"),
             WORKLOADS_APPPROJECT_PATH: build_appproject_addition(appproject_raw, inp_single),
