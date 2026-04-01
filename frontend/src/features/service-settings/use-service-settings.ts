@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { adoptService, decommissionService, type ServiceDecommissionResponse } from '@/lib/api'
+import { normalizeServiceId } from '@/lib/service-identity'
 import {
   getServiceConfig,
   setServiceConfig,
@@ -171,7 +172,10 @@ export function useServiceSettings({
   }, [adoptProjectId, serviceId])
 
   const submitDecommission = useCallback(async () => {
-    if (!decommissionSupported || decommissionConfirmation.trim() !== serviceId) {
+    if (
+      !decommissionSupported ||
+      normalizeServiceId(decommissionConfirmation) !== normalizeServiceId(serviceId)
+    ) {
       return null
     }
 

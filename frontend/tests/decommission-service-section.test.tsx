@@ -44,6 +44,28 @@ test('DecommissionServiceSection requires exact service-id confirmation before e
   browser.cleanup()
 })
 
+test('DecommissionServiceSection tolerates invisible whitespace around the service id', () => {
+  const browser = installMockBrowser({ pathname: '/services/my-service/settings' })
+
+  const markup = renderToHtml(
+    createElement(DecommissionServiceSection, {
+      serviceId: 'my-service ',
+      mode: 'standalone',
+      reason: null,
+      confirmationValue: 'my-service',
+      setConfirmationValue() {},
+      submitting: false,
+      error: '',
+      result: null,
+      onSubmit() {},
+    }),
+  )
+
+  assert.doesNotMatch(markup, /<button[^>]* disabled=/)
+
+  browser.cleanup()
+})
+
 test('DecommissionServiceSection shows a safe informational state for ineligible project-linked services', () => {
   const browser = installMockBrowser({ pathname: '/services/oauth2-proxy/settings' })
   const markup = renderToHtml(

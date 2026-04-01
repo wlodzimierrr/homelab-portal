@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button'
 import type { ServiceDecommissionResponse } from '@/lib/api'
+import { normalizeServiceId } from '@/lib/service-identity'
 
 interface DecommissionServiceSectionProps {
   serviceId: string
@@ -25,7 +26,8 @@ export function DecommissionServiceSection({
   onSubmit,
 }: DecommissionServiceSectionProps) {
   const eligible = mode !== 'unsupported'
-  const confirmationMatches = confirmationValue.trim() === serviceId
+  const normalizedServiceId = normalizeServiceId(serviceId)
+  const confirmationMatches = normalizeServiceId(confirmationValue) === normalizedServiceId
   const actionDisabled = !eligible || !confirmationMatches || submitting || result !== null
   const isProjectComponent = mode === 'project-component'
   const actionLabel = isProjectComponent ? 'Remove service from project' : 'Decommission service'
