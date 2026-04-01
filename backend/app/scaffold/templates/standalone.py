@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import secrets
+from collections.abc import Callable
+
 from app.scaffold.models import ScaffoldError, ScaffoldServiceInput, TEMPLATES
 from app.scaffold.render import (
     generate_application_manifest,
@@ -10,12 +13,22 @@ from app.scaffold.render import (
 )
 
 
-def generate_gitops_new_files(inp: ScaffoldServiceInput) -> dict[str, str]:
+WordpressSecretEncrypter = Callable[[str, str], str]
+
+
+def generate_gitops_new_files(
+    inp: ScaffoldServiceInput,
+    *,
+    wordpress_secret_encrypter: WordpressSecretEncrypter | None = None,
+) -> dict[str, str]:
     """Return all NEW files keyed by path relative to the gitops root."""
     if inp.template in ("postgres", "mysql"):
         return _generate_database_gitops_files(inp)
     if inp.template == "wordpress":
-        return _generate_wordpress_gitops_files(inp)
+        return _generate_wordpress_gitops_files(
+            inp,
+            wordpress_secret_encrypter=wordpress_secret_encrypter,
+        )
 
     template = TEMPLATES[inp.template]
     container_port = int(template["container_port"])  # type: ignore[arg-type]
@@ -502,7 +515,11 @@ def _generate_database_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     }
 
 
-def _generate_wordpress_gitops_files(inp: ScaffoldServiceInput) -> dict[str, str]:
+def _generate_wordpress_gitops_files(
+    inp: ScaffoldServiceInput,
+    *,
+    wordpress_secret_encrypter: WordpressSecretEncrypter | None = None,
+) -> dict[str, str]:
     files: dict[str, str] = {}
 
     base_prefix = f"apps/{inp.name}/base"
@@ -510,11 +527,19 @@ def _generate_wordpress_gitops_files(inp: ScaffoldServiceInput) -> dict[str, str
         files[f"{base_prefix}/{rel_path}"] = content
 
     dev_prefix = f"apps/{inp.name}/envs/dev"
-    for rel_path, content in _generate_wordpress_overlay_files(inp, "dev").items():
+    for rel_path, content in _generate_wordpress_overlay_files(
+        inp,
+        "dev",
+        wordpress_secret_encrypter=wordpress_secret_encrypter,
+    ).items():
         files[f"{dev_prefix}/{rel_path}"] = content
 
     prod_prefix = f"apps/{inp.name}/envs/prod"
-    for rel_path, content in _generate_wordpress_overlay_files(inp, "prod").items():
+    for rel_path, content in _generate_wordpress_overlay_files(
+        inp,
+        "prod",
+        wordpress_secret_encrypter=wordpress_secret_encrypter,
+    ).items():
         files[f"{prod_prefix}/{rel_path}"] = content
 
     files[f"environments/dev/workloads/{inp.name}-app.yaml"] = generate_application_manifest(
@@ -991,8 +1016,22 @@ def _generate_wordpress_base_files(inp: ScaffoldServiceInput) -> dict[str, str]:
     }
 
 
-def _generate_wordpress_overlay_files(inp: ScaffoldServiceInput, env_name: str) -> dict[str, str]:
+def _generate_wordpress_overlay_files(
+    inp: ScaffoldServiceInput,
+    env_name: str,
+    *,
+    wordpress_secret_encrypter: WordpressSecretEncrypter | None = None,
+) -> dict[str, str]:
     db_secret_name = f"{inp.name}-wordpress-db"
+    target_secret_path = f"apps/{inp.name}/envs/{env_name}/wordpress-db-secret.enc.yaml"
+    encrypted_secret = (
+        wordpress_secret_encrypter(
+            target_secret_path,
+            _render_wordpress_db_secret_manifest(inp, env_name),
+        )
+        if wordpress_secret_encrypter is not None
+        else _render_wordpress_db_secret_stub(db_secret_name, inp.namespace)
+    )
     files = {
         "kustomization.yaml": render_template(
             """
@@ -1023,42 +1062,7 @@ def _generate_wordpress_overlay_files(inp: ScaffoldServiceInput, env_name: str) 
               - wordpress-db-secret.enc.yaml
             """
         ),
-        "wordpress-db-secret.enc.yaml": render_template(
-            """
-            # SOPS-encrypted Secret stub for WordPress + MySQL credentials.
-            # Rotate by editing the placeholder values and re-encrypting with SOPS.
-            # See docs/runbooks/sops-secrets.md for the full workflow.
-            apiVersion: v1
-            kind: Secret
-            metadata:
-              name: {db_secret_name}
-              namespace: {namespace}
-            type: Opaque
-            stringData:
-              WORDPRESS_DB_USER: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-              WORDPRESS_DB_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-              WORDPRESS_DB_NAME: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-              MYSQL_ROOT_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-            sops:
-              kms: []
-              gcp_kms: []
-              azure_kv: []
-              hc_vault: []
-              age:
-                - recipient: age1xxx
-                  enc: |
-                    -----BEGIN AGE ENCRYPTED FILE-----
-                    ...
-                    -----END AGE ENCRYPTED FILE-----
-              lastmodified: "2026-03-25T00:00:00Z"
-              mac: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
-              pgp: []
-              encrypted_regex: ^(stringData|data)$
-              version: 3.8.1
-            """,
-            db_secret_name=db_secret_name,
-            namespace=inp.namespace,
-        ),
+        "wordpress-db-secret.enc.yaml": encrypted_secret,
         "patch-deployment.yaml": render_template(
             """
             apiVersion: apps/v1
@@ -1123,6 +1127,75 @@ def _generate_wordpress_overlay_files(inp: ScaffoldServiceInput, env_name: str) 
         )
 
     return files
+
+
+def _render_wordpress_db_secret_manifest(inp: ScaffoldServiceInput, env_name: str) -> str:
+    db_secret_name = f"{inp.name}-wordpress-db"
+    wordpress_password = _generate_wordpress_secret_value(env_name)
+    mysql_root_password = _generate_wordpress_secret_value(f"{env_name}-root")
+    return render_template(
+        """
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: {db_secret_name}
+          namespace: {namespace}
+        type: Opaque
+        stringData:
+          WORDPRESS_DB_USER: appuser
+          WORDPRESS_DB_PASSWORD: {wordpress_password}
+          WORDPRESS_DB_NAME: appdb
+          MYSQL_ROOT_PASSWORD: {mysql_root_password}
+        """,
+        db_secret_name=db_secret_name,
+        namespace=inp.namespace,
+        wordpress_password=wordpress_password,
+        mysql_root_password=mysql_root_password,
+    )
+
+
+def _generate_wordpress_secret_value(suffix: str) -> str:
+    token = secrets.token_urlsafe(24).replace("-", "a").replace("_", "b")
+    return f"wp-{suffix}-{token}"
+
+
+def _render_wordpress_db_secret_stub(db_secret_name: str, namespace: str) -> str:
+    return render_template(
+        """
+        # SOPS-encrypted Secret stub for WordPress + MySQL credentials.
+        # Rotate by editing the placeholder values and re-encrypting with SOPS.
+        # See docs/runbooks/sops-secrets.md for the full workflow.
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: {db_secret_name}
+          namespace: {namespace}
+        type: Opaque
+        stringData:
+          WORDPRESS_DB_USER: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+          WORDPRESS_DB_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+          WORDPRESS_DB_NAME: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+          MYSQL_ROOT_PASSWORD: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+        sops:
+          kms: []
+          gcp_kms: []
+          azure_kv: []
+          hc_vault: []
+          age:
+            - recipient: age1xxx
+              enc: |
+                -----BEGIN AGE ENCRYPTED FILE-----
+                ...
+                -----END AGE ENCRYPTED FILE-----
+          lastmodified: "2026-03-25T00:00:00Z"
+          mac: ENC[AES256_GCM,data:xxx,iv:xxx,tag:xxx,type:str]
+          pgp: []
+          encrypted_regex: ^(stringData|data)$
+          version: 3.8.1
+        """,
+        db_secret_name=db_secret_name,
+        namespace=namespace,
+    )
 
 
 def _generate_base_files(

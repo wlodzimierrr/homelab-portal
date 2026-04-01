@@ -294,6 +294,33 @@ def test_wordpress_template_secret_stub_has_sops_block() -> None:
     assert "MYSQL_ROOT_PASSWORD" in secret_stub
 
 
+def test_wordpress_template_uses_secret_encrypter_when_provided() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_encrypter(target_file_path: str, plain_manifest: str) -> str:
+        calls.append((target_file_path, plain_manifest))
+        return f"encrypted::{target_file_path}"
+
+    files = generate_gitops_new_files(
+        _make_input(template="wordpress", image_repo="wordpress:latest"),
+        wordpress_secret_encrypter=fake_encrypter,
+    )
+
+    assert files["apps/my-svc/envs/dev/wordpress-db-secret.enc.yaml"] == (
+        "encrypted::apps/my-svc/envs/dev/wordpress-db-secret.enc.yaml"
+    )
+    assert files["apps/my-svc/envs/prod/wordpress-db-secret.enc.yaml"] == (
+        "encrypted::apps/my-svc/envs/prod/wordpress-db-secret.enc.yaml"
+    )
+    assert [path for path, _ in calls] == [
+        "apps/my-svc/envs/dev/wordpress-db-secret.enc.yaml",
+        "apps/my-svc/envs/prod/wordpress-db-secret.enc.yaml",
+    ]
+    assert "WORDPRESS_DB_PASSWORD: wp-dev-" in calls[0][1]
+    assert "MYSQL_ROOT_PASSWORD: wp-dev-root-" in calls[0][1]
+    assert "ENC[AES256_GCM,data:xxx" not in calls[0][1]
+
+
 
 def test_catalog_entry_wordpress_uses_ingress_derived_observability() -> None:
     inp = _make_input(template="wordpress", image_repo="wordpress:latest")
