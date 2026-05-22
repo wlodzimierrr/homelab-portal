@@ -13,6 +13,7 @@ from app.scaffold_service import (
     generate_gitops_add_service_files,
     generate_gitops_bundle_files,
     generate_gitops_new_files,
+    normalize_hostname,
     update_kustomization_resources,
     update_overlay_kustomization_patches,
     validate_add_service,
@@ -67,6 +68,20 @@ def test_validate_service_name_rejects_spaces() -> None:
 def test_validate_service_name_rejects_too_long() -> None:
     with pytest.raises(ScaffoldError):
         validate_service_name("a" * 64)
+
+
+def test_normalize_hostname_accepts_trailing_slash() -> None:
+    assert normalize_hostname("comparebuilding.wlodzimierrr.pl/") == "comparebuilding.wlodzimierrr.pl"
+
+
+def test_normalize_hostname_rejects_paths() -> None:
+    with pytest.raises(ScaffoldError):
+        normalize_hostname("comparebuilding.wlodzimierrr.pl/app")
+
+
+def test_scaffold_input_normalizes_public_host() -> None:
+    inp = _make_input(public_host="CompareBuilding.Wlodzimierrr.PL/")
+    assert inp.public_host == "comparebuilding.wlodzimierrr.pl"
 
 
 def test_template_observability_contract_matrix_is_explicit() -> None:

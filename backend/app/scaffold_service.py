@@ -9,6 +9,7 @@ from app.scaffold.models import (  # noqa: F401
     ScaffoldBundleInput,
     ScaffoldError,
     ScaffoldServiceInput,
+    normalize_hostname,
     validate_service_name,
 )
 from app.scaffold.render import yaml_string

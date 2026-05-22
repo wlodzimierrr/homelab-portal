@@ -193,6 +193,54 @@ def test_generate_scaffold_files_and_updates_adds_sync_namespace_file(monkeypatc
     )["covered"] is True
 
 
+def test_generate_scaffold_files_and_updates_preserves_public_host_for_ingress(monkeypatch) -> None:
+    captured: dict[str, ScaffoldServiceInput] = {}
+
+    class _FakeGitProvider:
+        def read_file(self, _repo, _branch, file_path):
+            return {
+                "environments/dev/workloads/kustomization.yaml": "resources: []\n",
+                "bootstrap/project-homelab.yaml": "spec: {}\n",
+                "services.yaml": "services: []\n",
+                "apps/homelab-api/base/catalog-sync-cronjob.yaml": _CATALOG_SYNC_CRONJOB,
+            }[file_path]
+
+    def fake_generate(inp, **_kwargs):
+        captured["input"] = inp
+        return {f"apps/{inp.name}/{inp.name}-app.yaml": "kind: Application\n"}
+
+    monkeypatch.setattr("app.api.endpoints.scaffold.generate_gitops_new_files", fake_generate)
+    monkeypatch.setattr(
+        "app.api.endpoints.scaffold.update_kustomization_resources",
+        lambda _raw, new_resource: f"resources:\n- {new_resource}\n",
+    )
+    monkeypatch.setattr(
+        "app.api.endpoints.scaffold.build_catalog_entry_addition",
+        lambda _raw, inp: f"services:\n- service_id: {inp.name}\n",
+    )
+    monkeypatch.setattr(
+        "app.api.endpoints.scaffold.build_appproject_addition",
+        lambda _raw, inp: f"metadata:\n  name: {inp.name}\n",
+    )
+
+    generate_scaffold_files_and_updates(
+        ScaffoldServiceRequest(
+            name="comparebuilding-web",
+            description="Compare building products webpage",
+            imageRepo="ghcr.io/wlodzimierrr/compare_frontend:latest",
+            repoUrl="https://github.com/wlodzimierrr/CompareBuildingProducts_Web",
+            ownerEmail="owner@example.com",
+            publicHost="comparebuilding.wlodzimierrr.pl",
+        ),
+        "wlodzimierrr/homelab-workloads",
+        "main",
+        _FakeGitProvider(),
+    )
+
+    assert captured["input"].prod_host == ""
+    assert captured["input"].public_host == "comparebuilding.wlodzimierrr.pl"
+
+
 def test_generate_scaffold_files_and_updates_encrypts_wordpress_secrets(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
