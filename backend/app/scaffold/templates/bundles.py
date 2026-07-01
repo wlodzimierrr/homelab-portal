@@ -30,6 +30,63 @@ def _render_public_ingress_patch(*, name: str, namespace: str, host: str) -> str
     )
 
 
+def _render_public_http_ingress(*, name: str, namespace: str, host: str) -> str:
+    return render_template(
+        """
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: {name}-http
+          namespace: {namespace}
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+        spec:
+          ingressClassName: traefik
+          rules:
+            - host: {host}
+              http:
+                paths:
+                  - path: /
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: {name}-frontend
+                        port:
+                          number: 80
+        """,
+        name=name,
+        namespace=namespace,
+        host=host,
+    )
+
+
+def _render_acme_http01_solver_network_policy(*, namespace: str) -> str:
+    return render_template(
+        """
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: allow-acme-http01-solver
+          namespace: {namespace}
+        spec:
+          podSelector:
+            matchLabels:
+              acme.cert-manager.io/http01-solver: "true"
+          policyTypes:
+            - Ingress
+          ingress:
+            - from:
+                - namespaceSelector:
+                    matchLabels:
+                      kubernetes.io/metadata.name: kube-system
+              ports:
+                - protocol: TCP
+                  port: 8089
+        """,
+        namespace=namespace,
+    )
+
+
 def generate_gitops_bundle_files(inp: ScaffoldBundleInput) -> dict[str, str]:
     """Return all NEW files for a multi-service project bundle."""
     validate_service_name(inp.name)
@@ -831,7 +888,8 @@ def _generate_bundle_overlay_files(
         "kind: Kustomization\n"
         "resources:\n"
         "  - ../../base\n"
-        "commonLabels:\n"
+        + ("  - ingress-http.yaml\n  - networkpolicy-allow-acme-http01-solver.yaml\n" if env_name == "dev" and inp.public_host else "")
+        + "commonLabels:\n"
         f"  homelab.env: {env_name}\n"
         "patches:\n"
         + "\n".join(patches)
@@ -887,6 +945,14 @@ def _generate_bundle_overlay_files(
             name=inp.name,
             namespace=inp.namespace,
             host=inp.public_host,
+        )
+        files["ingress-http.yaml"] = _render_public_http_ingress(
+            name=inp.name,
+            namespace=inp.namespace,
+            host=inp.public_host,
+        )
+        files["networkpolicy-allow-acme-http01-solver.yaml"] = _render_acme_http01_solver_network_policy(
+            namespace=inp.namespace,
         )
     elif env_name == "prod":
         ingress_host = inp.prod_host or inp.public_host

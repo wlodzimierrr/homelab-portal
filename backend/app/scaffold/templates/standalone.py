@@ -77,6 +77,64 @@ def _render_public_ingress_patch(*, name: str, namespace: str, host: str, servic
     )
 
 
+def _render_public_http_ingress(*, name: str, namespace: str, host: str, service_port: int) -> str:
+    return render_template(
+        """
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: {name}-http
+          namespace: {namespace}
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+        spec:
+          ingressClassName: traefik
+          rules:
+            - host: {host}
+              http:
+                paths:
+                  - path: /
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: {name}
+                        port:
+                          number: {service_port}
+        """,
+        name=name,
+        namespace=namespace,
+        host=host,
+        service_port=str(service_port),
+    )
+
+
+def _render_acme_http01_solver_network_policy(*, namespace: str) -> str:
+    return render_template(
+        """
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: allow-acme-http01-solver
+          namespace: {namespace}
+        spec:
+          podSelector:
+            matchLabels:
+              acme.cert-manager.io/http01-solver: "true"
+          policyTypes:
+            - Ingress
+          ingress:
+            - from:
+                - namespaceSelector:
+                    matchLabels:
+                      kubernetes.io/metadata.name: kube-system
+              ports:
+                - protocol: TCP
+                  port: 8089
+        """,
+        namespace=namespace,
+    )
+
+
 def generate_gitops_new_files(
     inp: ScaffoldServiceInput,
     *,
@@ -1621,6 +1679,8 @@ def _generate_overlay_files(
             kind: Kustomization
             resources:
               - ../../base
+              - ingress-http.yaml
+              - networkpolicy-allow-acme-http01-solver.yaml
             commonLabels:
               homelab.env: dev
             patches:
@@ -1633,6 +1693,15 @@ def _generate_overlay_files(
             namespace=inp.namespace,
             host=inp.public_host,
             service_port=service_port,
+        )
+        files["ingress-http.yaml"] = _render_public_http_ingress(
+            name=inp.name,
+            namespace=inp.namespace,
+            host=inp.public_host,
+            service_port=service_port,
+        )
+        files["networkpolicy-allow-acme-http01-solver.yaml"] = _render_acme_http01_solver_network_policy(
+            namespace=inp.namespace,
         )
 
     if env_name == "prod":

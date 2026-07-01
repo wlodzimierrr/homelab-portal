@@ -112,7 +112,7 @@ def test_template_observability_contract_matrix_is_explicit() -> None:
 
 def test_generate_gitops_new_files_python_fastapi_file_count() -> None:
     files = generate_gitops_new_files(_make_input())
-    assert len(files) == 17
+    assert len(files) == 19
 
 
 def test_generate_gitops_new_files_python_fastapi_has_no_servicemonitor() -> None:
@@ -123,7 +123,7 @@ def test_generate_gitops_new_files_python_fastapi_has_no_servicemonitor() -> Non
 def test_generate_gitops_new_files_static_nginx_no_servicemonitor() -> None:
     files = generate_gitops_new_files(_make_input(template="static-nginx"))
     assert not any("servicemonitor" in path for path in files)
-    assert len(files) == 17
+    assert len(files) == 19
 
 
 def test_vue_template_file_count_matches_static_nginx() -> None:
@@ -218,7 +218,7 @@ def test_react_template_network_policy_port_80() -> None:
 
 def test_nextjs_template_file_count() -> None:
     files = generate_gitops_new_files(_make_input(template="nextjs"))
-    assert len(files) == 17
+    assert len(files) == 19
 
 
 def test_nextjs_template_has_no_servicemonitor() -> None:
@@ -527,16 +527,25 @@ def test_generate_gitops_new_files_public_host_in_dev_patch_ingress() -> None:
     files = generate_gitops_new_files(_make_input(public_host="svc.example.com"))
     kustomization = files["apps/my-svc/envs/dev/kustomization.yaml"]
     patch = files["apps/my-svc/envs/dev/patch-ingress.yaml"]
+    http_ingress = files["apps/my-svc/envs/dev/ingress-http.yaml"]
+    acme_policy = files["apps/my-svc/envs/dev/networkpolicy-allow-acme-http01-solver.yaml"]
     assert "patch-ingress.yaml" in kustomization
+    assert "ingress-http.yaml" in kustomization
+    assert "networkpolicy-allow-acme-http01-solver.yaml" in kustomization
     assert "cert-manager.io/cluster-issuer: letsencrypt-http01" in patch
     assert "traefik.ingress.kubernetes.io/router.entrypoints: websecure" in patch
     assert "secretName: my-svc-tls" in patch
     assert "host: svc.example.com" in patch
+    assert "name: my-svc-http" in http_ingress
+    assert "traefik.ingress.kubernetes.io/router.entrypoints: web" in http_ingress
+    assert "port: 8089" in acme_policy
 
 
 def test_generate_gitops_new_files_dev_patch_ingress_omitted_without_public_host() -> None:
     files = generate_gitops_new_files(_make_input(public_host=""))
     assert "apps/my-svc/envs/dev/patch-ingress.yaml" not in files
+    assert "apps/my-svc/envs/dev/ingress-http.yaml" not in files
+    assert "apps/my-svc/envs/dev/networkpolicy-allow-acme-http01-solver.yaml" not in files
     assert "patch-ingress.yaml" not in files["apps/my-svc/envs/dev/kustomization.yaml"]
 
 
@@ -819,7 +828,7 @@ def test_catalog_entry_flask_has_dev_and_prod_envs() -> None:
 
 def test_express_template_file_count_matches_fastapi() -> None:
     express_files = generate_gitops_new_files(_make_input(template="node-express"))
-    assert len(express_files) == 18
+    assert len(express_files) == 20
 
 
 def test_express_template_has_servicemonitor() -> None:
@@ -1017,10 +1026,16 @@ def test_bundle_public_host_in_dev_patch_ingress() -> None:
     files = generate_gitops_bundle_files(_make_bundle_input(public_host="my-proj.example.com"))
     kustomization = files["apps/my-proj/envs/dev/kustomization.yaml"]
     patch = files["apps/my-proj/envs/dev/patch-ingress.yaml"]
+    http_ingress = files["apps/my-proj/envs/dev/ingress-http.yaml"]
+    acme_policy = files["apps/my-proj/envs/dev/networkpolicy-allow-acme-http01-solver.yaml"]
     assert "patch-ingress.yaml" in kustomization
+    assert "ingress-http.yaml" in kustomization
+    assert "networkpolicy-allow-acme-http01-solver.yaml" in kustomization
     assert "secretName: my-proj-tls" in patch
     assert "host: my-proj.example.com" in patch
     assert "traefik.ingress.kubernetes.io/router.entrypoints: websecure" in patch
+    assert "my-proj-frontend" in http_ingress
+    assert "port: 8089" in acme_policy
 
 
 def test_bundle_overlay_files_exist() -> None:
