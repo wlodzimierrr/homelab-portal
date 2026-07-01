@@ -1681,8 +1681,11 @@ def _generate_overlay_files(
               - ../../base
               - ingress-http.yaml
               - networkpolicy-allow-acme-http01-solver.yaml
-            commonLabels:
-              homelab.env: dev
+            labels:
+              - pairs:
+                  homelab.env: dev
+                includeSelectors: false
+                includeTemplates: true
             patches:
               - path: patch-deployment.yaml
               - path: patch-ingress.yaml

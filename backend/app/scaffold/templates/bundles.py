@@ -883,15 +883,23 @@ def _generate_bundle_overlay_files(
     elif env_name == "prod":
         patches.append("  - path: patch-ingress.yaml")
 
+    label_block = (
+        "labels:\n"
+        "  - pairs:\n"
+        f"      homelab.env: {env_name}\n"
+        "    includeSelectors: false\n"
+        "    includeTemplates: true\n"
+        if env_name == "dev" and inp.public_host
+        else f"commonLabels:\n  homelab.env: {env_name}\n"
+    )
     kustomization = (
         "apiVersion: kustomize.config.k8s.io/v1beta1\n"
         "kind: Kustomization\n"
         "resources:\n"
         "  - ../../base\n"
         + ("  - ingress-http.yaml\n  - networkpolicy-allow-acme-http01-solver.yaml\n" if env_name == "dev" and inp.public_host else "")
-        + "commonLabels:\n"
-        f"  homelab.env: {env_name}\n"
-        "patches:\n"
+        + label_block
+        + "patches:\n"
         + "\n".join(patches)
         + "\n"
     )
