@@ -101,7 +101,7 @@ def _build_scaffold_input(payload: ScaffoldServiceRequest) -> ScaffoldServiceInp
     name = payload.name.strip().lower()
     namespace = payload.namespace.strip() or name
     dev_host = payload.dev_host.strip() or f"{name}.dev.homelab.local"
-    prod_host = payload.prod_host.strip() or f"{name}.homelab.local"
+    prod_host = payload.prod_host.strip()
     base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
     public_host = payload.public_host.strip() or f"{name}.{base_domain}"
     image_repo = payload.image_repo.strip()
@@ -136,7 +136,7 @@ def _build_scaffold_bundle_input(payload: ScaffoldServiceRequest) -> ScaffoldBun
     name = payload.name.strip().lower()
     namespace = payload.namespace.strip() or name
     dev_host = payload.dev_host.strip() or f"{name}.dev.homelab.local"
-    prod_host = payload.prod_host.strip() or f"{name}.homelab.local"
+    prod_host = payload.prod_host.strip()
     base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
     public_host = payload.public_host.strip() or f"{name}.{base_domain}"
 
@@ -190,7 +190,7 @@ def _build_scaffold_add_service_input(payload: ScaffoldServiceRequest) -> Scaffo
 
     namespace = payload.namespace.strip() or project_id
     dev_host = payload.dev_host.strip() or f"{project_id}.dev.homelab.local"
-    prod_host = payload.prod_host.strip() or f"{project_id}.homelab.local"
+    prod_host = payload.prod_host.strip()
     base_domain = os.getenv("PUBLIC_BASE_DOMAIN", "homelab.local").strip() or "homelab.local"
     public_host = payload.public_host.strip() or f"{project_id}.{base_domain}"
     return ScaffoldAddServiceInput(

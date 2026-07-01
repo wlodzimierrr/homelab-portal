@@ -3,11 +3,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Literal
+from urllib.parse import urlsplit
 
 from app.service_observability import ObservabilityMode
 
 
 SERVICE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
+HOSTNAME_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 # This is the platform-level observability contract for scaffolded services.
 # Service-page behavior should consume declared modes rather than guessing from
@@ -164,6 +166,11 @@ class ScaffoldServiceInput:
     db_password: str = "changeme"
     db_name: str = "appdb"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "dev_host", normalize_hostname(self.dev_host, field_name="devHost"))
+        object.__setattr__(self, "prod_host", normalize_hostname(self.prod_host, field_name="prodHost"))
+        object.__setattr__(self, "public_host", normalize_hostname(self.public_host, field_name="publicHost"))
+
 
 FRONTEND_TEMPLATES = frozenset({"react", "nextjs", "vue", "static-nginx"})
 BACKEND_TEMPLATES = frozenset(
@@ -198,6 +205,11 @@ class ScaffoldBundleInput:
     db_password: str = "changeme"
     db_name: str = "appdb"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "dev_host", normalize_hostname(self.dev_host, field_name="devHost"))
+        object.__setattr__(self, "prod_host", normalize_hostname(self.prod_host, field_name="prodHost"))
+        object.__setattr__(self, "public_host", normalize_hostname(self.public_host, field_name="publicHost"))
+
 
 @dataclass(frozen=True)
 class ScaffoldAddServiceInput:
@@ -223,6 +235,53 @@ class ScaffoldAddServiceInput:
     @property
     def service_id(self) -> str:
         return f"{self.project_id}-{self.service_name}"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "dev_host", normalize_hostname(self.dev_host, field_name="devHost"))
+        object.__setattr__(self, "prod_host", normalize_hostname(self.prod_host, field_name="prodHost"))
+        object.__setattr__(self, "public_host", normalize_hostname(self.public_host, field_name="publicHost"))
+
+
+def normalize_hostname(value: str, *, field_name: str = "hostname") -> str:
+    """Return a Kubernetes Ingress-safe hostname, accepting a harmless trailing slash."""
+    raw = value.strip()
+    if not raw:
+        return ""
+
+    candidate = raw
+    if "://" in raw or any(char in raw for char in "/?#:"):
+        try:
+            parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+            port = parsed.port
+        except ValueError as exc:
+            raise ScaffoldError(
+                f"{field_name} must be a DNS hostname without a port.",
+                status_code=422,
+            ) from exc
+        if parsed.username or parsed.password or port is not None:
+            raise ScaffoldError(
+                f"{field_name} must be a DNS hostname without credentials or a port.",
+                status_code=422,
+            )
+        if parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+            raise ScaffoldError(
+                f"{field_name} must be a DNS hostname without a path, query, or fragment.",
+                status_code=422,
+            )
+        candidate = parsed.hostname or ""
+
+    hostname = candidate.strip().lower()
+    labels = hostname.split(".")
+    if (
+        not hostname
+        or len(hostname) > 253
+        or any(not label or not HOSTNAME_LABEL_PATTERN.match(label) for label in labels)
+    ):
+        raise ScaffoldError(
+            f"{field_name} must be a DNS hostname, for example comparebuilding.wlodzimierrr.pl.",
+            status_code=422,
+        )
+    return hostname
 
 
 def validate_service_name(name: str) -> None:

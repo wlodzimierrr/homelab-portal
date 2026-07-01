@@ -26,7 +26,7 @@ from app.lib import (
     GitServiceConflictError,
     GitServiceError,
 )
-from app.scaffold_service import ScaffoldError
+from app.scaffold_service import ScaffoldError, normalize_hostname
 from app.secret_editing import (
     SecretEditingError,
     decrypt_secret_manifest,
@@ -1102,7 +1102,10 @@ class ScaffoldAdminService:
         payload: UpdatePublicHostnameRequest,
         response: Response,
     ) -> UpdatePublicHostnameResponse | None:
-        new_host = payload.public_host.strip()
+        try:
+            new_host = normalize_hostname(payload.public_host, field_name="publicHost")
+        except ScaffoldError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         if not new_host:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

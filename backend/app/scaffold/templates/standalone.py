@@ -16,6 +16,125 @@ from app.scaffold.render import (
 WordpressSecretEncrypter = Callable[[str, str], str]
 
 
+def _render_public_ingress_patch(*, name: str, namespace: str, host: str, service_port: int | None = None) -> str:
+    if service_port is not None:
+        return render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: Ingress
+            metadata:
+              name: {name}
+              namespace: {namespace}
+              annotations:
+                cert-manager.io/cluster-issuer: letsencrypt-http01
+                traefik.ingress.kubernetes.io/router.entrypoints: websecure
+                traefik.ingress.kubernetes.io/router.tls: "true"
+            spec:
+              tls:
+                - hosts:
+                    - {host}
+                  secretName: {name}-tls
+              rules:
+                - host: {host}
+                  http:
+                    paths:
+                      - path: /
+                        pathType: Prefix
+                        backend:
+                          service:
+                            name: {name}
+                            port:
+                              number: {service_port}
+            """,
+            name=name,
+            namespace=namespace,
+            host=host,
+            service_port=str(service_port),
+        )
+
+    return render_template(
+        """
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: {name}
+          namespace: {namespace}
+          annotations:
+            cert-manager.io/cluster-issuer: letsencrypt-http01
+            traefik.ingress.kubernetes.io/router.entrypoints: websecure
+            traefik.ingress.kubernetes.io/router.tls: "true"
+        spec:
+          tls:
+            - hosts:
+                - {host}
+              secretName: {name}-tls
+          rules:
+            - host: {host}
+        """,
+        name=name,
+        namespace=namespace,
+        host=host,
+    )
+
+
+def _render_public_http_ingress(*, name: str, namespace: str, host: str, service_port: int) -> str:
+    return render_template(
+        """
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: {name}-http
+          namespace: {namespace}
+          annotations:
+            traefik.ingress.kubernetes.io/router.entrypoints: web
+        spec:
+          ingressClassName: traefik
+          rules:
+            - host: {host}
+              http:
+                paths:
+                  - path: /
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: {name}
+                        port:
+                          number: {service_port}
+        """,
+        name=name,
+        namespace=namespace,
+        host=host,
+        service_port=str(service_port),
+    )
+
+
+def _render_acme_http01_solver_network_policy(*, namespace: str) -> str:
+    return render_template(
+        """
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: allow-acme-http01-solver
+          namespace: {namespace}
+        spec:
+          podSelector:
+            matchLabels:
+              acme.cert-manager.io/http01-solver: "true"
+          policyTypes:
+            - Ingress
+          ingress:
+            - from:
+                - namespaceSelector:
+                    matchLabels:
+                      kubernetes.io/metadata.name: kube-system
+              ports:
+                - protocol: TCP
+                  port: 8089
+        """,
+        namespace=namespace,
+    )
+
+
 def generate_gitops_new_files(
     inp: ScaffoldServiceInput,
     *,
@@ -1552,6 +1671,41 @@ def _generate_overlay_files(
             mem_lim=mem_lim,
         ),
     }
+
+    if env_name == "dev" and inp.public_host:
+        files["kustomization.yaml"] = render_template(
+            """
+            apiVersion: kustomize.config.k8s.io/v1beta1
+            kind: Kustomization
+            resources:
+              - ../../base
+              - ingress-http.yaml
+              - networkpolicy-allow-acme-http01-solver.yaml
+            labels:
+              - pairs:
+                  homelab.env: dev
+                includeSelectors: false
+                includeTemplates: true
+            patches:
+              - path: patch-deployment.yaml
+              - path: patch-ingress.yaml
+            """
+        )
+        files["patch-ingress.yaml"] = _render_public_ingress_patch(
+            name=inp.name,
+            namespace=inp.namespace,
+            host=inp.public_host,
+            service_port=service_port,
+        )
+        files["ingress-http.yaml"] = _render_public_http_ingress(
+            name=inp.name,
+            namespace=inp.namespace,
+            host=inp.public_host,
+            service_port=service_port,
+        )
+        files["networkpolicy-allow-acme-http01-solver.yaml"] = _render_acme_http01_solver_network_policy(
+            namespace=inp.namespace,
+        )
 
     if env_name == "prod":
         files["kustomization.yaml"] = render_template(
