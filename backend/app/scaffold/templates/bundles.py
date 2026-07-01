@@ -4,6 +4,32 @@ from app.scaffold.models import ScaffoldBundleInput, ScaffoldError, TEMPLATES, v
 from app.scaffold.render import generate_application_manifest, indent_block, render_template, yaml_string
 
 
+def _render_public_ingress_patch(*, name: str, namespace: str, host: str) -> str:
+    return render_template(
+        """
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: {name}
+          namespace: {namespace}
+          annotations:
+            cert-manager.io/cluster-issuer: letsencrypt-http01
+            traefik.ingress.kubernetes.io/router.entrypoints: websecure
+            traefik.ingress.kubernetes.io/router.tls: "true"
+        spec:
+          tls:
+            - hosts:
+                - {host}
+              secretName: {name}-tls
+          rules:
+            - host: {host}
+        """,
+        name=name,
+        namespace=namespace,
+        host=host,
+    )
+
+
 def generate_gitops_bundle_files(inp: ScaffoldBundleInput) -> dict[str, str]:
     """Return all NEW files for a multi-service project bundle."""
     validate_service_name(inp.name)
@@ -795,7 +821,9 @@ def _generate_bundle_overlay_files(
         "  - path: patch-frontend-deployment.yaml",
         "  - path: patch-backend-deployment.yaml",
     ]
-    if env_name == "prod":
+    if env_name == "dev" and inp.public_host:
+        patches.append("  - path: patch-ingress.yaml")
+    elif env_name == "prod":
         patches.append("  - path: patch-ingress.yaml")
 
     kustomization = (
@@ -854,7 +882,13 @@ def _generate_bundle_overlay_files(
             mem_lim=mem_lim,
         )
 
-    if env_name == "prod":
+    if env_name == "dev" and inp.public_host:
+        files["patch-ingress.yaml"] = _render_public_ingress_patch(
+            name=inp.name,
+            namespace=inp.namespace,
+            host=inp.public_host,
+        )
+    elif env_name == "prod":
         ingress_host = inp.prod_host or inp.public_host
         files["patch-ingress.yaml"] = render_template(
             """

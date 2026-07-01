@@ -16,6 +16,67 @@ from app.scaffold.render import (
 WordpressSecretEncrypter = Callable[[str, str], str]
 
 
+def _render_public_ingress_patch(*, name: str, namespace: str, host: str, service_port: int | None = None) -> str:
+    if service_port is not None:
+        return render_template(
+            """
+            apiVersion: networking.k8s.io/v1
+            kind: Ingress
+            metadata:
+              name: {name}
+              namespace: {namespace}
+              annotations:
+                cert-manager.io/cluster-issuer: letsencrypt-http01
+                traefik.ingress.kubernetes.io/router.entrypoints: websecure
+                traefik.ingress.kubernetes.io/router.tls: "true"
+            spec:
+              tls:
+                - hosts:
+                    - {host}
+                  secretName: {name}-tls
+              rules:
+                - host: {host}
+                  http:
+                    paths:
+                      - path: /
+                        pathType: Prefix
+                        backend:
+                          service:
+                            name: {name}
+                            port:
+                              number: {service_port}
+            """,
+            name=name,
+            namespace=namespace,
+            host=host,
+            service_port=str(service_port),
+        )
+
+    return render_template(
+        """
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: {name}
+          namespace: {namespace}
+          annotations:
+            cert-manager.io/cluster-issuer: letsencrypt-http01
+            traefik.ingress.kubernetes.io/router.entrypoints: websecure
+            traefik.ingress.kubernetes.io/router.tls: "true"
+        spec:
+          tls:
+            - hosts:
+                - {host}
+              secretName: {name}-tls
+          rules:
+            - host: {host}
+        """,
+        name=name,
+        namespace=namespace,
+        host=host,
+    )
+
+
 def generate_gitops_new_files(
     inp: ScaffoldServiceInput,
     *,
@@ -1552,6 +1613,27 @@ def _generate_overlay_files(
             mem_lim=mem_lim,
         ),
     }
+
+    if env_name == "dev" and inp.public_host:
+        files["kustomization.yaml"] = render_template(
+            """
+            apiVersion: kustomize.config.k8s.io/v1beta1
+            kind: Kustomization
+            resources:
+              - ../../base
+            commonLabels:
+              homelab.env: dev
+            patches:
+              - path: patch-deployment.yaml
+              - path: patch-ingress.yaml
+            """
+        )
+        files["patch-ingress.yaml"] = _render_public_ingress_patch(
+            name=inp.name,
+            namespace=inp.namespace,
+            host=inp.public_host,
+            service_port=service_port,
+        )
 
     if env_name == "prod":
         files["kustomization.yaml"] = render_template(
